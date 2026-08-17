@@ -187,9 +187,21 @@ export async function inspectCertificate(certPath, { stage_der = true } = {}) {
     fingerprint_sha256: cert.fingerprint256.replaceAll(':', '').toLowerCase(),
     valid_from: cert.validFrom,
     valid_to: cert.validTo,
-    public_key: { type: keyType, ...keyDetails },
+    public_key: { type: keyType, ...jsonSafeKeyDetails(keyDetails) },
     der_path: stage_der ? derPath : null,
   };
+}
+
+// Node reports RSA publicExponent as a BigInt, which JSON.stringify refuses to
+// serialize. This result crosses the control plane and the MCP wire, so a raw
+// spread makes every certificate tool fail on an ordinary RSA CA.
+function jsonSafeKeyDetails(details) {
+  const safe = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (typeof value !== 'bigint') { safe[key] = value; continue; }
+    safe[key] = value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString();
+  }
+  return safe;
 }
 
 export async function trustCaOnSimulator(udid, certPath, { developer_dir, device_set } = {}) {
