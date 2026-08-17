@@ -17,10 +17,17 @@ export const MAX_QUERY_PARAMS = 1000;
 // url_pattern removed the only bound it had (compileSafeRegex caps a pattern
 // at 500 characters), and a rule is persisted to rules.json and re-registered
 // on every start_proxy, so an unbounded match_query is stored and replayed
-// forever. 8 KiB is half of Node's 16 KiB default header budget, which the
-// request line shares with the method, host and version: a longer query cannot
-// reach the proxy, so the rule could never fire anyway.
+// forever. That is the whole rationale: the bound is on what this server
+// persists and replays, and it says nothing about what any other server,
+// proxy, or client accepts on the wire.
 export const MAX_QUERY_BYTES = 8192;
+
+// capture_to_mock derives its query from a captured flow, so a caller who trips
+// a bound on that path never supplied a match_query and cannot shorten one.
+const DERIVED_QUERY_RECOVERY = Object.freeze([
+  'Capture the same endpoint with a shorter query, or pick a flow carrying fewer parameters.',
+  'Pass url_pattern to anchor the mock yourself; the captured query is then not matched at all.',
+]);
 
 const isAbsoluteUrl = (value) => value.toLowerCase().startsWith('http://')
   || value.toLowerCase().startsWith('https://');
@@ -95,7 +102,7 @@ export function matchUrlPath(absoluteUrl) {
  * url_pattern instead, which bypasses this entirely — but url_pattern is a raw
  * regular expression, so the wildcard is written '.', not '?'.
  */
-export function splitRuleUrl(value) {
+export function splitRuleUrl(value, { recovery = null } = {}) {
   const raw = String(value ?? '');
   // Per the URL spec everything after the first '#' is fragment, so a '?'
   // inside a fragment is not a query separator.
@@ -107,10 +114,12 @@ export function splitRuleUrl(value) {
   const remainder = withoutFragment.slice(separator + 1);
   // A trailing bare '?' means "no query constraint", not an unmatchable rule.
   if (!remainder) return { base, query: null };
-  return { base, query: parseMatchQuery(remainder) };
+  return { base, query: parseMatchQuery(remainder, recovery) };
 }
 
-function queryError(code, message, recovery) {
+// Every matcher guard raises the same shape: a coded, non-retryable error
+// carrying hints the caller can act on.
+export function matcherError(code, message, recovery) {
   const error = new Error(message);
   error.code = code;
   error.retryable = false;
@@ -118,7 +127,36 @@ function queryError(code, message, recovery) {
   return error;
 }
 
-function parseMatchQuery(search) {
+/**
+ * The gate every mockttp matcher object passes through — match_query here,
+ * match_headers in proxy.mjs — on every path that can register a rule: tool
+ * call, rule import, startup replay, update_rule patch.
+ * mockttp compares each matcher with lodash isMatch, which is unconditionally
+ * true against an empty expectation, so an empty matcher is not a weak
+ * constraint but the absence of one: a blacklist meant for a single request
+ * would block the whole path. An empty object also means a key can have gone
+ * missing on the way in — a '__proto__' key assigned onto a '{}' literal writes
+ * the prototype slot instead of an own property — so it has to fail loudly
+ * either way. A non-object is rejected before anything spreads it, because
+ * spreading a string or an array produces an index-keyed object ({0:'a'}) that
+ * reads as a real constraint.
+ * Returns false when there is no matcher at all, so callers can skip the
+ * checks that only apply to a present one.
+ */
+export function validateMatcherObject(value, label, {
+  code, invalidMessage, invalidRecovery, emptyMessage, emptyRecovery, recovery = null,
+}) {
+  if (value == null) return false;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw matcherError(`${code}_INVALID`, invalidMessage, recovery ?? invalidRecovery);
+  }
+  if (Object.keys(value).length === 0) {
+    throw matcherError(`${code}_EMPTY`, emptyMessage, recovery ?? emptyRecovery);
+  }
+  return true;
+}
+
+function parseMatchQuery(search, recovery = null) {
   // querystring.parse is what url.parse(url, true) — and therefore mockttp's
   // QueryMatcher — uses, so parsing with it is parity by construction:
   // repeated keys collapse to arrays and a leading '?' stays part of the first
@@ -126,7 +164,7 @@ function parseMatchQuery(search) {
   const capped = querystring.parse(search);
   const complete = querystring.parse(search, '&', '=', { maxKeys: 0 });
   if (!isDeepStrictEqual(capped, complete)) {
-    throw queryError('QUERY_TOO_LARGE', `url query exceeds the ${MAX_QUERY_PARAMS} parameters the proxy can match; the rule could never fire`, [
+    throw matcherError('QUERY_TOO_LARGE', `url query exceeds the ${MAX_QUERY_PARAMS} parameters the proxy can match; the rule could never fire`, recovery ?? [
       `Keep the url query to at most ${MAX_QUERY_PARAMS} parameters.`,
       'Pass url_pattern plus a small match_query instead of encoding every parameter in url.',
     ]);
@@ -140,48 +178,49 @@ function parseMatchQuery(search) {
 }
 
 /**
- * The one gate every match_query passes through — tool call, rule import,
- * startup replay, update_rule patch — because a bad one is silent otherwise.
- * mockttp's QueryMatcher runs _.isMatch(query, expected), which is
- * unconditionally true for an empty expected object, so an empty match_query
- * is not a weak constraint but the absence of one: a blacklist meant for a
- * single query would block the whole path. A key can also disappear before we
- * ever see it (zod's z.record drops '__proto__'), so an empty object always
- * means something was lost or misunderstood and has to fail loudly. An empty
- * array value is the same mistake one level down — isMatch reads [] as a
- * vacuous subset of any value — and fails the same way. Past the
- * bounds the rule is dead the other way: mockttp parses the incoming request
- * with url.parse(url, true), whose parser stops at MAX_QUERY_PARAMS pairs.
+ * match_query's use of validateMatcherObject, plus the two bounds only a query
+ * has. An empty array value is the empty matcher one level down — isMatch reads
+ * [] as a vacuous subset of an array actual — and fails the same way. Past the
+ * bounds the rule is dead in the other direction: mockttp parses the incoming
+ * request with url.parse(url, true), whose parser stops at MAX_QUERY_PARAMS
+ * pairs.
  */
-export function validateMatchQuery(value, label = 'match_query') {
-  if (value == null) return;
-  if (typeof value !== 'object' || Array.isArray(value)) {
-    throw queryError('MATCH_QUERY_INVALID', `${label} must be an object of query parameters`, [
+export function validateMatchQuery(value, label = 'match_query', { recovery = null } = {}) {
+  const present = validateMatcherObject(value, label, {
+    code: 'MATCH_QUERY',
+    recovery,
+    invalidMessage: `${label} must be an object of query parameters`,
+    invalidRecovery: [
       `Pass ${label} as {"key": "value"} or {"key": ["value", "other"]}.`,
       `Omit ${label} entirely for no query constraint.`,
-    ]);
-  }
-  const keys = Object.keys(value);
-  if (keys.length === 0) {
-    throw queryError('MATCH_QUERY_EMPTY', `${label} has no parameters, and an empty query matcher matches every request`, [
+    ],
+    emptyMessage: `${label} has no parameters, and an empty query matcher matches every request`,
+    // Nothing drops a key on the way in any more — the MCP schema keeps
+    // '__proto__', and JSON.parse always made it an own property — so an empty
+    // object here is the one the caller or the stored rule actually holds.
+    emptyRecovery: [
       `Omit ${label} entirely for no query constraint.`,
       `Name at least one parameter in ${label}, or put the query in url and let it split.`,
-      "A '__proto__' key is dropped before the rule reaches the proxy; write it in url instead.",
-    ]);
-  }
+      `A rule written, imported, or stored before this guard can carry ${label}: {} meaning "any query"; re-create it with the parameters it meant to constrain.`,
+    ],
+  });
+  if (!present) return;
+  const keys = Object.keys(value);
   let pairs = 0;
   let bytes = 0;
   for (const key of keys) {
     const raw = value[key];
     const items = Array.isArray(raw) ? raw : [raw];
     // An empty array is the per-key form of the empty object above: lodash
-    // isMatch treats [] as a vacuous subset, so it matches whatever value the
-    // key holds — a constraint that reads like one but is not. It also used to
-    // cost nothing here, so a key of any length added 0 pairs and 0 bytes and
-    // walked past both bounds. Rejecting it keeps every key worth at least its
-    // own bytes, because every key now contributes at least one wire pair.
+    // isMatch treats [] as a vacuous subset of an array actual, so it matches
+    // whatever values a repeated parameter arrives with — a constraint that
+    // reads like one but is not. (A scalar actual does not match, so the rule
+    // is unpredictable rather than merely broad.) It also used to cost nothing
+    // here, so a key of any length added 0 pairs and 0 bytes and walked past
+    // both bounds. Rejecting it keeps every key worth at least its own bytes,
+    // because every key now contributes at least one wire pair.
     if (items.length === 0) {
-      throw queryError('MATCH_QUERY_EMPTY_VALUE', `${label}.${key} is an empty array, which matches any value that parameter has`, [
+      throw matcherError('MATCH_QUERY_EMPTY_VALUE', `${label}.${key} is an empty array, which matches any values a repeated ${key} arrives with`, recovery ?? [
         `Name the value ${key} must have, e.g. {"${key}": ["value"]}.`,
         `Drop ${key} from ${label} if any value of it is acceptable.`,
       ]);
@@ -192,13 +231,13 @@ export function validateMatchQuery(value, label = 'match_query') {
     for (const item of items) bytes += Buffer.byteLength(`${key}=${item ?? ''}&`);
   }
   if (pairs > MAX_QUERY_PARAMS) {
-    throw queryError('QUERY_TOO_LARGE', `${label} holds ${pairs} parameters, past the ${MAX_QUERY_PARAMS} the proxy can match; the rule could never fire`, [
+    throw matcherError('QUERY_TOO_LARGE', `${label} holds ${pairs} parameters, past the ${MAX_QUERY_PARAMS} the proxy can match; the rule could never fire`, recovery ?? [
       `Keep ${label} to at most ${MAX_QUERY_PARAMS} parameters.`,
       'Match the few parameters that identify the request rather than every one of them.',
     ]);
   }
   if (bytes > MAX_QUERY_BYTES) {
-    throw queryError('QUERY_TOO_LARGE', `${label} is ${bytes} bytes, past the ${MAX_QUERY_BYTES}-byte limit; a query that long cannot reach the proxy, and the rule is persisted to disk`, [
+    throw matcherError('QUERY_TOO_LARGE', `${label} is ${bytes} bytes, past the ${MAX_QUERY_BYTES}-byte limit on what a rule may persist and replay`, recovery ?? [
       `Keep ${label} under ${MAX_QUERY_BYTES} bytes in total.`,
       'Match the few parameters that identify the request rather than every one of them.',
     ]);
@@ -249,11 +288,31 @@ export function queryMatches(actualQuery, expectedQuery) {
 // Glob to anchored regex: '*' is any run of characters and '?' is any single
 // character. In a rule `url` the first '?' never reaches here — splitRuleUrl
 // has already cut the query off — so '?' only keeps its glob meaning in the
-// flow filters that share this helper.
+// flow filters that share this helper. Only a human-written url gets glob
+// semantics; see literalUrlPattern for the machine-derived case.
 export function urlPattern(value) {
   if (!value) return null;
   const escaped = String(value).replace(/[.+^${}()|[\]\\]/g, '\\$&');
   return `^${escaped.replaceAll('*', '.*').replaceAll('?', '.')}$`;
+}
+
+// The same anchored regex with no glob semantics at all: every metacharacter is
+// escaped, '*' included. A URL taken off the wire is text, not a pattern — a
+// captured path holding a literal '*' must match that path and nothing else, or
+// capture_to_mock builds a rule broader than the flow it came from.
+export function literalUrlPattern(value) {
+  if (!value) return null;
+  return `^${String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
+}
+
+/**
+ * The query mockttp's QueryMatcher sees: url.parse(url, true) runs the legacy
+ * querystring parser, which stops at MAX_QUERY_PARAMS pairs where
+ * URLSearchParams has no cap at all. The dry run reads the request through this
+ * so it cannot report a match the live proxy would never make past the cap.
+ */
+export function parseRequestQuery(requestUrl) {
+  return legacyUrl.parse(String(requestUrl ?? ''), true).query;
 }
 
 /**
@@ -265,15 +324,30 @@ export function urlPattern(value) {
  * parameters only fill the gaps so intent is preserved, never clobbered.
  * `normalize` is for machine-derived URLs (a captured flow): the pattern is
  * built from the exact text mockttp will test, so a captured default port or
- * lowercase escape cannot produce a rule that can never fire. A hand-written
- * url is left alone — what you wrote is what gets matched.
+ * lowercase escape cannot produce a rule that can never fire, and it is built
+ * literally, because a URL off the wire is text and never a glob. A
+ * hand-written url keeps its wildcards — what you wrote is what gets matched.
  */
 export function ruleUrlMatchers(url, args = {}, { normalize = false } = {}) {
+  // Nothing behind a derived url was written by the caller, so a rejected query
+  // has to be recovered from by changing the capture, not by editing a
+  // match_query they never supplied.
+  const recovery = normalize ? DERIVED_QUERY_RECOVERY : null;
+  // Before the spread below, not after it: spreading a string or an array
+  // produces an index-keyed object ({0:'a',1:'b'}) that reads as a real
+  // constraint. import_rules, a hand-written rules.json and a direct
+  // registerRule all reach the engine through here, so validating here is what
+  // gives every path the same coded error.
+  validateMatchQuery(args.match_query, 'match_query', { recovery });
   if (args.url_pattern != null) return { url_pattern: args.url_pattern, match_query: args.match_query };
-  const { base, query } = splitRuleUrl(url);
-  const pattern = urlPattern(normalize ? normalizeMatchUrl(base) : base);
+  const { base, query } = splitRuleUrl(url, { recovery });
+  const pattern = normalize ? literalUrlPattern(normalizeMatchUrl(base)) : urlPattern(base);
   if (!query) return { url_pattern: pattern, match_query: args.match_query };
   // Null prototype: '__proto__' must stay an own key, or the merged object
   // collapses to {} and withQuery({}) matches every request.
-  return { url_pattern: pattern, match_query: { __proto__: null, ...query, ...args.match_query } };
+  const merged = { __proto__: null, ...query, ...args.match_query };
+  // The engine validates this again at registration, but only the call that
+  // derived it knows whether the caller can act on hints about match_query.
+  validateMatchQuery(merged, 'match_query', { recovery });
+  return { url_pattern: pattern, match_query: merged };
 }

@@ -221,3 +221,51 @@ test('resource subscription helper tracks status and live-flow subscribers befor
     { uri: flowUri },
   ]);
 });
+
+test('every match_query in the registry keeps a prototype-shaped key the caller sent', () => {
+  // zod 4's z.record skips a '__proto__' key outright, and MCP arguments come
+  // from JSON.parse, which makes it an own enumerable property. A rule that
+  // quietly loses a query constraint matches more than the caller asked for, so
+  // this holds for every tool that accepts one, not just the ones with a test.
+  const sites = MCP_TOOLS.filter((tool) => tool.inputSchema?.match_query);
+  assert.ok(sites.length >= 7, `expected the match_query surface, found ${sites.length}`);
+  for (const tool of sites) {
+    const schema = tool.inputSchema.match_query;
+    const parsed = schema.parse(JSON.parse('{"__proto__":"evil","b":"1"}'));
+    assert.deepEqual(Object.keys(parsed), ['__proto__', 'b'], tool.name);
+    assert.equal(parsed['__proto__'], 'evil', tool.name);
+    // Null prototype, so re-assigning the key downstream cannot lose it either.
+    assert.equal(Object.getPrototypeOf(parsed), null, tool.name);
+    // The shape the record it replaced accepted, and only that shape.
+    assert.equal(schema.safeParse({ b: ['1', '2'] }).success, true, tool.name);
+    assert.equal(schema.safeParse(undefined).success, true, tool.name);
+    for (const bad of ['a=1', ['a'], 42, null, { a: 1 }, { a: [1] }]) {
+      assert.equal(schema.safeParse(bad).success, false, `${tool.name}: ${JSON.stringify(bad)}`);
+    }
+  }
+  assert.equal({}.evil, undefined);
+});
+
+test('every match_headers in the registry keeps a prototype-shaped key the caller sent', () => {
+  // The same z.record hole one field over: mockttp's HeaderMatcher is _.isMatch
+  // too, so a dropped header key widens the rule exactly as a dropped query key
+  // does — and a match_headers that loses its only key is {}, which matches
+  // every request on the path.
+  const sites = MCP_TOOLS.filter((tool) => tool.inputSchema?.match_headers);
+  assert.ok(sites.length >= 3, `expected the match_headers surface, found ${sites.length}`);
+  for (const tool of sites) {
+    const schema = tool.inputSchema.match_headers;
+    const parsed = schema.parse(JSON.parse('{"__proto__":"evil","x-api-key":"k"}'));
+    assert.deepEqual(Object.keys(parsed), ['__proto__', 'x-api-key'], tool.name);
+    assert.equal(parsed['__proto__'], 'evil', tool.name);
+    assert.equal(Object.getPrototypeOf(parsed), null, tool.name);
+    // The shape the record it replaced accepted, and only that shape: header
+    // values stay strings, unlike match_query's string-or-array.
+    assert.equal(schema.safeParse({ 'x-api-key': 'k' }).success, true, tool.name);
+    assert.equal(schema.safeParse(undefined).success, true, tool.name);
+    for (const bad of ['a: 1', ['a'], 42, null, { a: 1 }, { a: ['k'] }]) {
+      assert.equal(schema.safeParse(bad).success, false, `${tool.name}: ${JSON.stringify(bad)}`);
+    }
+  }
+  assert.equal({}.evil, undefined);
+});
