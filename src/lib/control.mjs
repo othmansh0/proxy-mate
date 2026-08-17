@@ -188,9 +188,15 @@ export class ControlServer {
           : Promise.resolve().then(invoke);
         if (SERIAL_TOOL_NAMES.has(tool)) this.queue = operation.catch(() => {});
         const result = await operation;
+        // Serialize before committing headers. A stringify failure after
+        // writeHead lands in the catch below, which would writeHead a second
+        // time; that throws ERR_HTTP_HEADERS_SENT inside this async 'end'
+        // handler, where nothing can catch it, and takes the daemon down.
+        const body = JSON.stringify({ ok: true, result });
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, result }));
+        res.end(body);
       } catch (e) {
+        if (res.headersSent || res.writableEnded) { res.destroy(); return; }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: serializeToolError(e) }));
       }

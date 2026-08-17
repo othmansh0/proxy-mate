@@ -26,8 +26,12 @@ export async function getHostCertificateStatus(certPath) {
   const fingerprint = cert.fingerprint256.replaceAll(':', '').toUpperCase();
   let output = '';
   try {
+    // Identify by SHA-256 fingerprint, not by common name: the CA's subject is
+    // whatever the generator produced, and a name filter that drifts silently
+    // reports an installed, trusted CA as absent — which also makes uninstall
+    // leave a trusted root behind.
     const result = await execFileP(SECURITY, [
-      'find-certificate', '-a', '-Z', '-c', 'proxy-mcp CA', LOGIN_KEYCHAIN,
+      'find-certificate', '-a', '-Z', LOGIN_KEYCHAIN,
     ], options());
     output = `${result.stdout}\n${result.stderr}`;
   } catch (error) {

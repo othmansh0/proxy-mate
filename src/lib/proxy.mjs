@@ -3,6 +3,7 @@
 // rich matchers, and diagnostic events.
 
 import * as mockttp from 'mockttp';
+import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -54,7 +55,7 @@ export async function ensureCA() {
   try {
     if (!existsSync(CA_KEY) || !existsSync(CA_CERT)) {
       const { key, cert } = await mockttp.generateCACertificate({
-        commonName: 'proxy-mcp CA', organizationName: 'proxy-mcp',
+        subject: { commonName: 'proxy-mcp CA', organizationName: 'proxy-mcp' },
       });
       await atomicWriteFile(CA_KEY, key, 0o600);
       await atomicWriteFile(CA_CERT, cert, 0o644);

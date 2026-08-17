@@ -24,19 +24,23 @@ const resultMetaSchema = z.object({
 
 const resourceUriSchema = z.string().min(1).describe('A proxy-mcp resource URI.');
 const headerSchema = z.record(z.string(), z.string());
+// The flow serializers emit `null` as the explicit "absent" marker (a captured
+// body reports body_omitted:false with body_omission_reason:null), so these
+// fields are nullish rather than merely optional. Declaring them optional-only
+// makes the SDK reject the tool's own well-formed output.
 const flowPartSchema = z.looseObject({
-  method: z.string().optional(),
-  url: z.string().optional(),
-  headers: headerSchema.optional(),
-  statusCode: z.number().int().optional(),
-  status: z.number().int().optional(),
-  body_size: z.number().int().nonnegative().optional(),
-  body_inline: z.string().optional(),
-  body_base64: z.string().optional(),
-  body_encoding: z.string().optional(),
-  body_omitted: z.boolean().optional(),
-  body_omission_reason: z.string().optional(),
-  body_resource_uri: resourceUriSchema.optional(),
+  method: z.string().nullish(),
+  url: z.string().nullish(),
+  headers: headerSchema.nullish(),
+  statusCode: z.number().int().nullish(),
+  status: z.number().int().nullish(),
+  body_size: z.number().int().nonnegative().nullish(),
+  body_inline: z.string().nullish(),
+  body_base64: z.string().nullish(),
+  body_encoding: z.string().nullish(),
+  body_omitted: z.boolean().nullish(),
+  body_omission_reason: z.string().nullish(),
+  body_resource_uri: resourceUriSchema.nullish(),
 });
 const flowSummarySchema = z.looseObject({
   id: z.string().optional(),
