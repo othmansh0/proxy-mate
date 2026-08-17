@@ -43,11 +43,14 @@ If nothing appears, use the `diagnose-capture` prompt or call `diagnose_ios_capt
 
 - Inspect traffic: `get_flows` → `get_flow_detail` → `compare_flows`.
 - Reproduce a request: `export_flow_curl`, `export_flow_code`, or `repeat_flow`.
-- Mock an API: `capture_to_mock`, `create_map_local`, or `create_map_remote`.
+- Mock an API: `capture_to_mock` (anchored on the captured URL and its query, so a flow captured from `/v1/orders?page=2` mocks `page=2` only), `create_map_local`, or `create_map_remote`.
 - Pause traffic: `create_breakpoint` → `list_pending_breakpoints` → `resolve_breakpoint`.
 - Check an API contract: `validate_flow_openapi` or `validate_capture_openapi`.
 - Gate CI captures: `npm run analyze:capture -- --input capture.har --assertions assertions.json`.
 - Work with WebSockets: list connections, page messages, and import/export transcripts.
+- Transform traffic safely: `upsert_transform_plugin` → `test_transform_plugin` → `create_transform_plugin_rule`.
+- Set up a new capture target: `list_capture_adapters` → `preflight_capture_adapter` → `build_capture_setup_plan`.
+- Watch traffic locally: `start_operator_ui` for a read-only loopback dashboard.
 
 The MCP server also provides guided prompts, typed result envelopes, status/flow resources, progress notifications, and resource-update subscriptions. Captured content is marked as untrusted.
 
@@ -61,6 +64,7 @@ See [capabilities and limits](docs/CAPABILITIES.md) for the complete surface.
 - Raw body persistence separately needs `PROXY_MCP_STORE_SENSITIVE=1` and `capture_body_mode: "all"`.
 - Persistence health is visible in status and diagnostics; `PROXY_MCP_PERSISTENCE_FAIL_CLOSED=1` stops capture after a storage failure.
 - Runtime files are private under `~/.proxy-mcp`; never share `~/.proxy-mcp/ca/key.pem`.
+- Storing or test-executing a transform plugin needs no grant; registering a live `request`/`response` rule for it — by tool call, rule import, or startup replay — needs `PROXY_MCP_ENABLE_TRANSFORM_PLUGINS=1`, enforced at the engine's rule-registration path.
 
 Add organization-specific secret names with comma-separated safe globs:
 
@@ -83,7 +87,7 @@ proxy-mcp status                 inspect daemon and handshake state
 proxy-mcp doctor                 diagnose and recover verified stale state
 ```
 
-Useful daemon options include `--domains`, `--tls-passthrough`, `--capture-body-mode`, `--enable-socks`, paired `--ca-key`/`--ca-cert`, `--network-service`, and `--no-routing`. Physical-device use additionally requires `--allow-remote-proxy`, `--remote-allowlist`, and a bounded `--remote-access-ttl`.
+Useful daemon options include `--domains`, `--tls-passthrough`, `--capture-body-mode`, `--enable-socks`, paired `--ca-key`/`--ca-cert`, `--network-service`, and `--no-routing`. Physical-device use additionally requires `--allow-remote-proxy`, `--remote-allowlist`, and a bounded `--remote-access-ttl`. `start_proxy` also accepts an `upstream_proxy` to chain through an HTTP(S) or SOCKS proxy; credentials are never returned by status tools.
 
 ## Deliberate limits
 
