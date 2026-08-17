@@ -6,9 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-plugin-integration-'));
+// Live plugin rules are grant-gated at the engine. Tests that exercise real
+// traffic hold the grant; the gating tests below clear it deliberately.
+process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS = '1';
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { PluginStore } = await import('../src/lib/plugin-store.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
+const { saveRules } = await import('../src/lib/rules.mjs');
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -118,6 +122,34 @@ test('ProxyEngine rejects disabled and non-live-stage plugins with coded errors'
   }), (error) => error.code === 'PLUGIN_STAGE_MISMATCH');
 });
 
+test('stage check outranks the grant check: PLUGIN_STAGE_MISMATCH beats TRANSFORM_PLUGINS_NOT_ENABLED, and vice versa', async (t) => {
+  const previousGrant = process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS;
+  delete process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS;
+  t.after(() => {
+    if (previousGrant == null) delete process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS;
+    else process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS = previousGrant;
+  });
+
+  const { engine, pluginStore } = await createEngine(t, 'plugin-gate-order');
+
+  // No grant + a websocket_offline plugin: the stage is invalid for a live
+  // rule regardless of the grant, so PLUGIN_STAGE_MISMATCH must win over
+  // TRANSFORM_PLUGINS_NOT_ENABLED.
+  await pluginStore.upsert({ id: 'offline-no-grant', stage: 'websocket_offline', enabled: true, source: '(input) => input' });
+  await assert.rejects(engine.registerRule({
+    rule_id: 'offline-no-grant-rule', type: 'plugin_transform', plugin_id: 'offline-no-grant',
+    plugin_stage: 'websocket_offline', url_pattern: '^http://offline-no-grant\\.test/',
+  }), (error) => error.code === 'PLUGIN_STAGE_MISMATCH');
+
+  // No grant + a request-stage plugin (a stage that IS otherwise valid for a
+  // live rule): the grant is the correct diagnosis here.
+  await pluginStore.upsert({ id: 'request-no-grant', stage: 'request', enabled: true, source: '(input) => input' });
+  await assert.rejects(engine.registerRule({
+    rule_id: 'request-no-grant-rule', type: 'plugin_transform', plugin_id: 'request-no-grant',
+    plugin_stage: 'request', url_pattern: '^http://request-no-grant\\.test/',
+  }), (error) => error.code === 'TRANSFORM_PLUGINS_NOT_ENABLED');
+});
+
 test('ProxyEngine records a coded diagnostic when sandbox execution fails', async (t) => {
   const upstream = http.createServer((_request, response) => response.end('should-not-complete-normally'));
   const upstreamPort = await listen(upstream);
@@ -172,4 +204,59 @@ test('makeTools keeps live plugins off by default and gates source disclosure', 
   await assert.rejects(tools.get_transform_plugin({
     plugin_id: 'disabled-by-default', include_source: true,
   }), (error) => error.code === 'SENSITIVE_ACCESS_REQUIRED');
+});
+
+test('the live-transform grant is re-checked per run by startup replay and rule import', async (t) => {
+  const previousGrant = process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS;
+  t.after(() => {
+    if (previousGrant == null) delete process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS;
+    else process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS = previousGrant;
+  });
+
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-grant-replay-'));
+  const pluginStore = new PluginStore({ directory });
+  t.after(() => pluginStore.dispose());
+  // Both the catalog entry and rules.json are durable, so they survive from the
+  // trusted session that first enabled them. Only the grant must be per-run.
+  await pluginStore.upsert({ id: 'persisted-live', stage: 'request', enabled: true, source: '(input) => input' });
+  const persistedRule = {
+    rule_id: 'persisted-plugin-rule', type: 'plugin_transform', plugin_id: 'persisted-live',
+    plugin_stage: 'request', url_pattern: '^http://persisted-plugin\\.test/', enabled: true,
+  };
+  const importPath = path.join(process.env.PROXY_MCP_HOME, 'plugin-rules-import.json');
+  await fs.writeFile(importPath, JSON.stringify({
+    version: 2, rules: [{ ...persistedRule, rule_id: 'imported-plugin-rule' }],
+  }));
+
+  delete process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS;
+  await saveRules([persistedRule]);
+  const ungrantedEngine = new ProxyEngine({ pluginStore, sessionId: `plugin-grant-off-${Date.now()}` });
+  const ungrantedTools = makeTools({ engine: ungrantedEngine, pacServer: {}, mode: 'test' });
+  t.after(() => ungrantedEngine.stop());
+  await ungrantedTools.start_proxy({ port: 0, auto_setup: false });
+
+  assert.deepEqual(ungrantedEngine.listRuleConfigs(), []);
+  const replay = ungrantedEngine.diagnostics.find((item) => item.kind === 'rule-replay-failures');
+  assert.ok(replay, 'the skipped rule must be visible in diagnostics');
+  assert.deepEqual(replay.failures.map((failure) => failure.rule_id), ['persisted-plugin-rule']);
+  assert.match(replay.failures[0].error, /PROXY_MCP_ENABLE_TRANSFORM_PLUGINS=1/);
+
+  const ungrantedImport = await ungrantedTools.import_rules({ path: importPath });
+  assert.equal(ungrantedImport.registered, 0);
+  assert.deepEqual(ungrantedImport.failed.map((failure) => failure.rule_id), ['imported-plugin-rule']);
+  assert.match(ungrantedImport.failed[0].error, /PROXY_MCP_ENABLE_TRANSFORM_PLUGINS=1/);
+
+  // The same durable state registers normally once the grant is present again.
+  process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS = '1';
+  await saveRules([persistedRule]);
+  const grantedEngine = new ProxyEngine({ pluginStore, sessionId: `plugin-grant-on-${Date.now()}` });
+  const grantedTools = makeTools({ engine: grantedEngine, pacServer: {}, mode: 'test' });
+  t.after(() => grantedEngine.stop());
+  await grantedTools.start_proxy({ port: 0, auto_setup: false });
+
+  assert.deepEqual(grantedEngine.listRuleConfigs().map((rule) => rule.rule_id), ['persisted-plugin-rule']);
+  assert.equal(grantedEngine.diagnostics.some((item) => item.kind === 'rule-replay-failures'), false);
+  const grantedImport = await grantedTools.import_rules({ path: importPath });
+  assert.equal(grantedImport.registered, 1);
+  assert.deepEqual(grantedImport.failed, []);
 });

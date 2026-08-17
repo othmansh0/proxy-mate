@@ -9,6 +9,10 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 test('stdio MCP initializes, lists the parity surface, and returns structured content', async (t) => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const pkg = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
+  const lock = JSON.parse(await fs.readFile(path.join(root, 'package-lock.json'), 'utf8'));
+  assert.equal(lock.version, pkg.version, 'package-lock.json root version must match package.json');
+  assert.equal(lock.packages?.[''].version, pkg.version, 'package-lock.json "" package entry must match package.json');
   const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-stdio-'));
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -38,10 +42,10 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
 
   const result = await client.callTool({ name: 'get_version', arguments: {} });
   assert.equal(result.isError, undefined);
-  assert.equal(result.structuredContent.version, '0.6.0');
+  assert.equal(result.structuredContent.version, pkg.version);
   assert.equal(result.structuredContent.schema_version, '1.0');
   assert.equal(result.structuredContent.ok, true);
-  assert.equal(result.structuredContent.data.version, '0.6.0');
+  assert.equal(result.structuredContent.data.version, pkg.version);
   assert.equal(result.structuredContent.error, null);
   assert.match(result.content[0].text, /^proxy-mcp v/);
   assert.equal(result.content[0].text.includes('{'), false);

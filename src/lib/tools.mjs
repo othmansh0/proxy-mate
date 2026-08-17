@@ -23,7 +23,7 @@ import {
   readState, patchState, clearState, isStateStale,
   defensiveNetworkResetAllServices, readPidFile,
 } from './state.mjs';
-import { STATE_DIR, SERVER_VERSION } from './config.mjs';
+import { STATE_DIR, SERVER_VERSION, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { getHostCertificateStatus, setupHostCertificate, removeHostCertificate } from './host-cert.mjs';
 import { authorizeReadPath, authorizeWritePath, requireSensitiveAccess } from './paths.mjs';
 import { DeviceOnboardingPortal } from './device-onboarding.mjs';
@@ -33,6 +33,7 @@ import {
 import { analyzeFlows, evaluateCaptureAssertions } from './analytics.mjs';
 import { decodeProtobuf, inspectGraphQLBody, parseGrpcFrames, protocolCapabilities } from './protocols.mjs';
 import { ReverseProxyManager } from './reverse-proxy.mjs';
+import { ruleUrlMatchers, urlPattern } from './url-match.mjs';
 import {
   MAX_OPENAPI_BODY_BYTES, MAX_OPENAPI_DOCUMENT_BYTES,
   MAX_OPENAPI_FLOW_BATCH_LIMIT, validateOpenApiFlow, validateOpenApiFlows,
@@ -825,11 +826,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   // ---- bounded transform plugins ----
+  // An early, explicit tool-layer error. The engine re-checks the same
+  // predicate so replayed and imported rules cannot bypass this.
   function requireLiveTransformGrant() {
-    if (process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS === '1') return;
-    const error = new Error('Live transform plugins require PROXY_MCP_ENABLE_TRANSFORM_PLUGINS=1 on the server.');
+    if (liveTransformGrantEnabled()) return;
+    const error = new Error(`Live transform plugins require ${TRANSFORM_PLUGIN_GRANT_ENV}=1 on the server.`);
     error.code = 'TRANSFORM_PLUGINS_NOT_ENABLED';
-    error.recovery = ['Set PROXY_MCP_ENABLE_TRANSFORM_PLUGINS=1 only for a trusted local proxy-mcp deployment, then restart the server.'];
+    error.recovery = [`Set ${TRANSFORM_PLUGIN_GRANT_ENV}=1 only for a trusted local proxy-mcp deployment, then restart the server.`];
     throw error;
   }
 
@@ -842,9 +845,17 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function get_transform_plugin(args = {}) {
-    const includeSource = args.include_source === true
-      ? requireSensitiveAccess(args.include_sensitive ?? false)
-      : false;
+    let includeSource = false;
+    if (args.include_source === true) {
+      if (args.include_sensitive !== true) {
+        const error = new Error('Plugin source requires include_sensitive: true in addition to include_source: true.');
+        error.code = 'SENSITIVE_ACCESS_REQUIRED';
+        error.retryable = false;
+        error.recovery = ['Pass include_sensitive: true along with include_source: true to request plugin source.'];
+        throw error;
+      }
+      includeSource = requireSensitiveAccess(true);
+    }
     const plugin = await engine.pluginStore.get(args.plugin_id, { includeSource });
     if (!plugin) throw Object.assign(new Error(`Transform plugin not found: ${args.plugin_id}`), { code: 'PLUGIN_NOT_FOUND' });
     return { plugin };
@@ -922,7 +933,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       type: 'plugin_transform',
       plugin_stage: plugin.stage,
       rule_id: args.rule_id ?? stableRuleId('plugin', `${args.plugin_id}:${url}`),
-      url_pattern: args.url_pattern ?? urlPattern(url),
+      ...ruleUrlMatchers(url, args),
     });
     await persistRules();
     return { status: 'registered', rule };
@@ -985,7 +996,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       transform_plugins: {
         sandbox: 'QuickJS',
         stages: ['request', 'response', 'websocket_offline'],
-        live_activation_granted: process.env.PROXY_MCP_ENABLE_TRANSFORM_PLUGINS === '1',
+        live_activation_granted: liveTransformGrantEnabled(),
         host_api_access: false,
       },
     };
@@ -996,7 +1007,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     await ensureProxyRunning();
     args = await authorizeRulePaths({ ...args });
     args.rule_id ??= stableRuleId('map-local', args.url_pattern ?? args.url);
-    args.url_pattern ??= urlPattern(args.url);
+    Object.assign(args, ruleUrlMatchers(args.url, args));
     args.type = 'map_local';
     if (!args.url_pattern) throw new Error('url or url_pattern is required');
     if (!args.body_file && args.body == null && args.body_inline == null) args.body_inline = '';
@@ -1015,7 +1026,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       ...args,
       type: 'map_remote',
       rule_id: args.rule_id ?? stableRuleId('map-remote', `${from}->${args.to_url}`),
-      url_pattern: args.url_pattern ?? urlPattern(from),
+      ...ruleUrlMatchers(from, args),
     });
     await persistRules();
     return { status: 'registered', ...rule };
@@ -1030,7 +1041,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       ...args,
       type: 'blacklist',
       rule_id: args.rule_id ?? stableRuleId('blacklist', url),
-      url_pattern: args.url_pattern ?? urlPattern(url),
+      ...ruleUrlMatchers(url, args),
       status: args.status ?? 403,
     });
     await persistRules();
@@ -1055,7 +1066,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       fault: args.fault ?? preset?.fault ?? null,
       type: 'network_condition',
       rule_id: args.rule_id ?? stableRuleId('network', `${url}:${args.profile ?? args.delay_ms ?? args.fault}`),
-      url_pattern: args.url_pattern ?? urlPattern(url),
+      ...ruleUrlMatchers(url, args),
     });
     await persistRules();
     return {
@@ -1094,7 +1105,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       ...args,
       type: 'breakpoint',
       rule_id: args.rule_id ?? stableRuleId('breakpoint', `${url}:${args.direction ?? 'request'}`),
-      url_pattern: args.url_pattern ?? urlPattern(url),
+      ...ruleUrlMatchers(url, args),
     });
     await persistRules();
     return { status: 'registered', rule };
@@ -1740,11 +1751,14 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         ? f.response.body_inline
         : redactBody(f.response.body_inline, f.response.headers),
     });
-    const fullUrl = f.request?.url ?? '';
-    const inferredPath = (() => { try { return new URL(fullUrl).pathname; } catch { return fullUrl; } })();
+    // The captured URL goes through the same builder every other rule uses, so
+    // the mock is anchored on the endpoint it was captured from. The old
+    // escapeRegex(pathname) was unanchored and host-less, so a mock of
+    // GET /v1/users also answered http://evil.test/x/v1/users/extra — and when
+    // the URL failed to parse it fell back to the whole URL, query included.
     const rule = await engine.registerRule({
       rule_id: id,
-      url_pattern: url_pattern ?? escapeRegex(inferredPath),
+      ...ruleUrlMatchers(f.request?.url ?? '', { ...args, url_pattern }, { normalize: true }),
       method: method ?? f.request?.method ?? 'ANY',
       status: status ?? f.response.statusCode ?? 200,
       content_type: content_type ?? f.response.headers?.['content-type'] ?? 'application/json',
@@ -1753,10 +1767,6 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     });
     await persistRules();
     return { status: 'registered', source_flow: flow_id, redacted: !includeSensitive, ...rule };
-  }
-
-  function escapeRegex(s) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   async function get_ca_cert_path() {
@@ -2116,12 +2126,6 @@ function safeRegex(pattern) {
 function stableRuleId(prefix, input = '') {
   const digest = crypto.createHash('sha256').update(String(input)).digest('hex').slice(0, 12);
   return `${prefix}-${digest}`;
-}
-
-function urlPattern(value) {
-  if (!value) return null;
-  const escaped = String(value).replace(/[.+^${}()|[\]\\]/g, '\\$&');
-  return `^${escaped.replaceAll('*', '.*').replaceAll('?', '.')}$`;
 }
 
 function shellQuote(value) {

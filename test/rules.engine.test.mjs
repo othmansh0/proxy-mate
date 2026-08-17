@@ -4,10 +4,12 @@ import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { z } from 'zod';
 
 process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-rules-'));
 const { ProxyEngine, compileSafeRegex } = await import('../src/lib/proxy.mjs');
 const { saveRules, loadRules, exportRulesTo, importRulesFrom } = await import('../src/lib/rules.mjs');
+const { makeTools } = await import('../src/lib/tools.mjs');
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -217,6 +219,234 @@ test('Map Local directory serves safe files, falls through misses, and supports 
   assert.equal(traversal.status, 200);
 });
 
+test('rules built from a query-bearing URL match that query instead of an unmatchable regex', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`upstream:${req.url}`);
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const engine = new ProxyEngine();
+  await engine.start({ port: 0 });
+  t.after(() => engine.stop());
+  const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
+  const origin = `http://127.0.0.1:${upstreamPort}`;
+  const escapedOrigin = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // Mockttp cuts the query before testing url_pattern, so the query has to
+  // travel as match_query or the rule can never fire.
+  const withQuery = await tools.create_map_local({
+    rule_id: 'query-rule', url: `${origin}/v1/users?active=1&role=admin`,
+    status: 201, content_type: 'text/plain', body: 'mocked-users',
+  });
+  assert.equal(withQuery.url_pattern, `^${escapedOrigin}/v1/users$`);
+  assert.deepEqual(withQuery.match_query, { active: '1', role: 'admin' });
+
+  const matched = await requestViaProxy(engine.port, `${origin}/v1/users?active=1&role=admin`);
+  assert.equal(matched.status, 201);
+  assert.equal(matched.body, 'mocked-users');
+
+  const differentQuery = await requestViaProxy(engine.port, `${origin}/v1/users?active=0&role=admin`);
+  assert.equal(differentQuery.status, 200);
+  assert.equal(differentQuery.body, 'upstream:/v1/users?active=0&role=admin');
+  const missingQuery = await requestViaProxy(engine.port, `${origin}/v1/users`);
+  assert.equal(missingQuery.status, 200);
+
+  // A query-less URL keeps the historical pattern and adds no query matcher.
+  const withoutQuery = await tools.create_map_local({
+    rule_id: 'plain-rule', url: `${origin}/v1/plain`,
+    status: 202, content_type: 'text/plain', body: 'plain',
+  });
+  assert.equal(withoutQuery.url_pattern, `^${escapedOrigin}/v1/plain$`);
+  assert.equal(withoutQuery.match_query, null);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/plain?ignored=1`)).body, 'plain');
+
+  // A caller-supplied match_query wins over the value derived from the URL.
+  const overridden = await tools.create_blacklist({
+    rule_id: 'override-rule', url: `${origin}/v1/blocked?page=1`,
+    match_query: { page: '9' }, status: 451, body_inline: 'blocked',
+  });
+  assert.deepEqual(overridden.match_query, { page: '9' });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/blocked?page=9`)).status, 451);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/blocked?page=1`)).status, 200);
+
+  // The first '?' is always the query separator: '?' is not a glob in `url`,
+  // and the fragment is cut before the query is looked for. Callers who want a
+  // regex pass url_pattern, which short-circuits all of this.
+  const cases = [
+    ['http://api.example.com/v1/users?active=1', '^http://api\\.example\\.com/v1/users$', { active: '1' }],
+    ['*/v1/users?active=1', '^.*/v1/users$', { active: '1' }],
+    ['http://x/a?b=1&c=2', '^http://x/a$', { b: '1', c: '2' }],
+    ['http://x/a?b=1&b=2', '^http://x/a$', { b: ['1', '2'] }],
+    // A flag parameter carries an empty value, exactly as url.parse reports it.
+    ['http://x/a?debug', '^http://x/a$', { debug: '' }],
+    // Former globs: the '?' now separates, so the tail becomes a query key.
+    ['http://host/v?/users', '^http://host/v$', { '/users': '' }],
+    ['https://api.test/????/x', '^https://api\\.test/$', { '???/x': '' }],
+    // A trailing bare '?' is no query constraint, not an unmatchable rule.
+    ['http://host/v2/items?', '^http://host/v2/items$', null],
+    // Everything after '#' is fragment, so that '?' never separates.
+    ['http://x/a#frag?b=1', '^http://x/a$', null],
+    ['http://x/a?b=1#frag', '^http://x/a$', { b: '1' }],
+  ];
+  for (const [index, [url, pattern, query]] of cases.entries()) {
+    const rule = await tools.create_map_local({
+      rule_id: `split-case-${index}`, url,
+      status: 203, content_type: 'text/plain', body: 'case',
+    });
+    assert.equal(rule.url_pattern, pattern, url);
+    if (query) assert.deepEqual(rule.match_query, query, url);
+    else assert.equal(rule.match_query, null, url);
+    await tools.remove_rule({ rule_id: rule.rule_id });
+  }
+
+  // A caller-supplied url_pattern short-circuits the split, so '?' keeps every
+  // regex meaning there.
+  const patternRule = await tools.create_map_local({
+    rule_id: 'pattern-live', url_pattern: `^${escapedOrigin}/v./users$`,
+    status: 213, content_type: 'text/plain', body: 'pattern-hit',
+  });
+  assert.equal(patternRule.match_query, null);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/users?ignored=1`)).body, 'pattern-hit');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v12/users`)).body, 'upstream:/v12/users');
+  await tools.remove_rule({ rule_id: 'pattern-live' });
+
+  // Live traffic: a flag parameter matches only when the flag is present.
+  await tools.create_map_local({
+    rule_id: 'flag-live', url: `${origin}/v1/flag?debug`,
+    status: 214, content_type: 'text/plain', body: 'flag-hit',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/flag?debug`)).body, 'flag-hit');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/flag`)).body, 'upstream:/v1/flag');
+  await tools.remove_rule({ rule_id: 'flag-live' });
+
+  // Live traffic: a trailing bare '?' constrains nothing, and a fragment is cut.
+  await tools.create_map_local({
+    rule_id: 'bare-live', url: `${origin}/v1/items?`,
+    status: 215, content_type: 'text/plain', body: 'bare-hit',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/items`)).body, 'bare-hit');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/items?any=1`)).body, 'bare-hit');
+  await tools.remove_rule({ rule_id: 'bare-live' });
+
+  await tools.create_map_local({
+    rule_id: 'fragment-live', url: `${origin}/v1/frag#section?a=1`,
+    status: 216, content_type: 'text/plain', body: 'fragment-hit',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/frag`)).body, 'fragment-hit');
+  await tools.remove_rule({ rule_id: 'fragment-live' });
+
+  // Live traffic: the wildcard form the schema advertises splits its query off.
+  const wildcardRule = await tools.create_map_local({
+    rule_id: 'wildcard-live', url: '*/v1/users?active=1',
+    status: 206, content_type: 'text/plain', body: 'wildcard-hit',
+  });
+  assert.deepEqual(wildcardRule.match_query, { active: '1' });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/users?active=1`)).body, 'wildcard-hit');
+  assert.equal(
+    (await requestViaProxy(engine.port, `${origin}/v1/users?active=0`)).body,
+    'upstream:/v1/users?active=0',
+  );
+  await tools.remove_rule({ rule_id: 'wildcard-live' });
+
+  // Live traffic: a blacklist built from a query-bearing absolute URL blocks.
+  await tools.create_blacklist({
+    rule_id: 'blocked-live', url: `${origin}/v1/secret?token=abc`,
+    status: 403, body_inline: 'denied',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/secret?token=abc`)).status, 403);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/secret?token=xyz`)).status, 200);
+  await tools.remove_rule({ rule_id: 'blocked-live' });
+
+  // Live traffic: a '__proto__' query key has to stay an own property. Built on
+  // a '{}' literal it writes the prototype slot instead, leaving match_query
+  // {}, and withQuery({}) matches every request — so this blacklist would block
+  // the whole path rather than the one query it names.
+  const protoRule = await tools.create_blacklist({
+    rule_id: 'proto-live', url: `${origin}/v1/proto?__proto__=evil&constructor=c&prototype=p`,
+    status: 403, body_inline: 'denied',
+  });
+  assert.deepEqual(Object.keys(protoRule.match_query), ['__proto__', 'constructor', 'prototype']);
+  assert.equal(JSON.stringify(protoRule.match_query), '{"__proto__":"evil","constructor":"c","prototype":"p"}');
+  const pollutedQuery = '__proto__=evil&constructor=c&prototype=p';
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/proto?${pollutedQuery}`)).status, 403);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/proto?other=1`)).status, 200);
+  assert.equal({}.evil, undefined);
+  await tools.remove_rule({ rule_id: 'proto-live' });
+
+  // '__proto__' alone is the worst case: lose it and match_query is {}, which
+  // blocks every request to the path instead of the one query.
+  const onlyProto = await tools.create_blacklist({
+    rule_id: 'only-proto-live', url: `${origin}/v1/only-proto?__proto__=evil`,
+    status: 403, body_inline: 'denied',
+  });
+  assert.deepEqual(Object.keys(onlyProto.match_query), ['__proto__']);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/only-proto?__proto__=evil`)).status, 403);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/only-proto?other=1`)).status, 200);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/only-proto`)).status, 200);
+});
+
+test('dry-run URL matching mirrors mockttp on default ports and method-specific path matchers', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`upstream:${req.url}`);
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const engine = new ProxyEngine();
+  await engine.start({ port: 0 });
+  t.after(() => engine.stop());
+  const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
+  const origin = `http://127.0.0.1:${upstreamPort}`;
+
+  // Mockttp normalizes a default port away before matching, so a pattern that
+  // keeps ':80' can never fire. The dry run has to report that, not a match.
+  // '.invalid' never resolves, so a live 502 proves the rule did not fire.
+  const wireUrl = 'http://port-parity.invalid:80/v1/x';
+  const withPort = await tools.create_map_local({
+    rule_id: 'default-port', url: wireUrl,
+    status: 217, content_type: 'text/plain', body: 'port-hit',
+  });
+  assert.equal(withPort.url_pattern, '^http://port-parity\\.invalid:80/v1/x$');
+  assert.equal(engine.testRuleMatch('default-port', { url: wireUrl, method: 'GET' }).matched, false);
+  assert.equal((await requestViaProxy(engine.port, wireUrl)).status, 502);
+  await tools.remove_rule({ rule_id: 'default-port' });
+
+  // The same wire request against the port-less pattern matches both ways.
+  await tools.create_map_local({
+    rule_id: 'no-port', url: 'http://port-parity.invalid/v1/x',
+    status: 217, content_type: 'text/plain', body: 'port-hit',
+  });
+  assert.equal(engine.testRuleMatch('no-port', { url: wireUrl, method: 'GET' }).matched, true);
+  assert.equal((await requestViaProxy(engine.port, wireUrl)).body, 'port-hit');
+  await tools.remove_rule({ rule_id: 'no-port' });
+
+  // A method-specific rule compiles to a RegexPathMatcher, which tests the
+  // pattern against the path alone as well as the full URL, so a path-only
+  // pattern blocks live and the dry run must agree.
+  await tools.create_blacklist({
+    rule_id: 'path-get', url_pattern: '^/v1/secret$', method: 'GET',
+    status: 403, body_inline: 'denied',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/secret`)).status, 403);
+  assert.equal(engine.testRuleMatch('path-get', { url: `${origin}/v1/secret`, method: 'GET' }).matched, true);
+  // The method still has to match, path matcher or not.
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/secret`, { method: 'POST' })).status, 200);
+  assert.equal(engine.testRuleMatch('path-get', { url: `${origin}/v1/secret`, method: 'POST' }).matched, false);
+  await tools.remove_rule({ rule_id: 'path-get' });
+
+  // Method 'ANY' goes through withUrlMatching instead, which tests the full URL
+  // only, so the same path-only pattern misses live and in the dry run.
+  await tools.create_blacklist({
+    rule_id: 'path-any', url_pattern: '^/v1/secret$', method: 'ANY',
+    status: 403, body_inline: 'denied',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/secret`)).status, 200);
+  assert.equal(engine.testRuleMatch('path-any', { url: `${origin}/v1/secret`, method: 'GET' }).matched, false);
+});
+
 test('rule persistence version 2 keeps lifecycle metadata and portable directories', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-rules-assets-'));
   await fs.writeFile(path.join(directory, 'one.json'), '{"one":true}');
@@ -232,4 +462,228 @@ test('rule persistence version 2 keeps lifecycle metadata and portable directori
   assert.equal(imported[0].enabled, false);
   assert.equal(imported[0].hit_count, 4);
   assert.equal(await fs.readFile(path.join(imported[0].directory, 'one.json'), 'utf8'), '{"one":true}');
+});
+
+test('an empty, malformed, or unbounded match_query is refused instead of matching everything', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`upstream:${req.url}`);
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const engine = new ProxyEngine();
+  await engine.start({ port: 0 });
+  t.after(() => engine.stop());
+  const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
+  const origin = `http://127.0.0.1:${upstreamPort}`;
+
+  // How an empty match_query actually reaches the engine: zod's z.record drops
+  // a '__proto__' key, so the caller's one-parameter constraint arrives as {}.
+  const matchQuerySchema = z.record(z.string(), z.union([z.string(), z.array(z.string())]));
+  assert.deepEqual(Object.keys(matchQuerySchema.parse(JSON.parse('{"__proto__":"evil"}'))), []);
+
+  // mockttp runs _.isMatch(query, {}), which is unconditionally true, so this
+  // blacklist would have blocked every request to /v1/only rather than one.
+  await assert.rejects(
+    tools.create_blacklist({
+      rule_id: 'empty-query', url: `${origin}/v1/only`, match_query: {}, status: 403, body_inline: 'denied',
+    }),
+    (error) => {
+      assert.equal(error.code, 'MATCH_QUERY_EMPTY');
+      assert.equal(error.retryable, false);
+      assert.ok(error.recovery.length > 0);
+      return true;
+    },
+  );
+  assert.deepEqual(engine.listRuleConfigs(), []);
+  // Live: nothing was registered, so the whole path still reaches upstream.
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/only`)).body, 'upstream:/v1/only');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/only?a=1`)).body, 'upstream:/v1/only?a=1');
+
+  await assert.rejects(
+    tools.create_map_local({ rule_id: 'bad-query', url: `${origin}/v1/bad`, match_query: 'a=1' }),
+    (error) => error.code === 'MATCH_QUERY_INVALID',
+  );
+
+  // Bound (a): past mockttp's parser cap the rule is permanently dead, because
+  // url.parse(url, true) stops at 1000 pairs and never sees key 1001.
+  const overCap = Object.fromEntries(Array.from({ length: 1001 }, (_, index) => [`k${index}`, 'v']));
+  await assert.rejects(
+    tools.create_map_local({ rule_id: 'huge-query', url: `${origin}/v1/many`, match_query: overCap }),
+    (error) => error.code === 'QUERY_TOO_LARGE' && error.retryable === false,
+  );
+
+  // Bound (b): moving the query out of url_pattern removed its 500-character
+  // bound, so a megabyte-scale query registered and was persisted verbatim.
+  await assert.rejects(
+    tools.create_blacklist({ rule_id: 'fat-query', url: `${origin}/v1/fat?k=${'v'.repeat(200_000)}` }),
+    (error) => error.code === 'QUERY_TOO_LARGE',
+  );
+  assert.deepEqual(engine.listRuleConfigs(), []);
+
+  // Every registration path is covered, not just the create tools.
+  await tools.create_map_local({
+    rule_id: 'patchable', url: `${origin}/v1/patch?a=1`, status: 201, content_type: 'text/plain', body: 'patched',
+  });
+  await assert.rejects(
+    tools.update_rule({ rule_id: 'patchable', patch: { match_query: {} } }),
+    (error) => error.code === 'MATCH_QUERY_EMPTY',
+  );
+  await assert.rejects(
+    engine.registerRule({ rule_id: 'imported', url_pattern: '^http://x/$', match_query: {} }),
+    (error) => error.code === 'MATCH_QUERY_EMPTY',
+  );
+  // The rejected patch left the rule exactly as it was.
+  assert.deepEqual(engine.listRuleConfigs()[0].match_query, { a: '1' });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/patch?a=1`)).body, 'patched');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/patch?a=2`)).body, 'upstream:/v1/patch?a=2');
+});
+
+test('dry-run query matching agrees with the live proxy on scalar and repeated parameters', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`upstream:${req.url}`);
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const engine = new ProxyEngine();
+  await engine.start({ port: 0 });
+  t.after(() => engine.stop());
+  const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
+  const origin = `http://127.0.0.1:${upstreamPort}`;
+
+  await tools.create_map_local({
+    rule_id: 'array-query', url: `${origin}/v1/x`, match_query: { b: ['1'] },
+    status: 218, content_type: 'text/plain', body: 'array-hit',
+  });
+  // querystring only builds an array for a repeated key, and lodash compares an
+  // array expectation against a scalar by tag, so ?b=1 does NOT match. The dry
+  // run used to wrap the actual in an array and claim it did.
+  const single = `${origin}/v1/x?b=1`;
+  assert.equal((await requestViaProxy(engine.port, single)).body, 'upstream:/v1/x?b=1');
+  assert.equal(engine.testRuleMatch('array-query', { url: single, method: 'GET' }).matched, false);
+  // Repeat the key and both agree the other way.
+  const repeated = `${origin}/v1/x?b=1&b=2`;
+  assert.equal((await requestViaProxy(engine.port, repeated)).body, 'array-hit');
+  assert.equal(engine.testRuleMatch('array-query', { url: repeated, method: 'GET' }).matched, true);
+
+  // The mirror image: a scalar expectation never matches a repeated key.
+  await tools.create_map_local({
+    rule_id: 'scalar-query', url: `${origin}/v1/y?b=1`,
+    status: 219, content_type: 'text/plain', body: 'scalar-hit',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/y?b=1`)).body, 'scalar-hit');
+  assert.equal(engine.testRuleMatch('scalar-query', { url: `${origin}/v1/y?b=1`, method: 'GET' }).matched, true);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/y?b=1&b=2`)).body, 'upstream:/v1/y?b=1&b=2');
+  assert.equal(engine.testRuleMatch('scalar-query', { url: `${origin}/v1/y?b=1&b=2`, method: 'GET' }).matched, false);
+
+  // A '__proto__' parameter is an ordinary own key on both sides.
+  await tools.create_blacklist({
+    rule_id: 'proto-query', url: `${origin}/v1/z?__proto__=evil`, status: 403, body_inline: 'denied',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/z?__proto__=evil`)).status, 403);
+  assert.equal(engine.testRuleMatch('proto-query', { url: `${origin}/v1/z?__proto__=evil`, method: 'GET' }).matched, true);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/z?other=1`)).status, 200);
+  assert.equal(engine.testRuleMatch('proto-query', { url: `${origin}/v1/z?other=1`, method: 'GET' }).matched, false);
+});
+
+test('capture_to_mock anchors the captured endpoint instead of every path containing it', async (t) => {
+  let capturedBody = '{"marker":"captured"}';
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(req.url === '/v1/users' ? capturedBody : JSON.stringify({ path: req.url }));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const engine = new ProxyEngine();
+  await engine.start({ port: 0 });
+  t.after(() => engine.stop());
+  const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
+  const origin = `http://127.0.0.1:${upstreamPort}`;
+  const escapedOrigin = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/users`)).body, capturedBody);
+  const { flows } = await tools.get_flows({ limit: 10 });
+  const flow = flows.find((item) => item.url === `${origin}/v1/users`);
+  const mock = await tools.capture_to_mock({ flow_id: flow.id, rule_id: 'captured-users' });
+
+  // Live first, because pattern text alone proves nothing. A path that merely
+  // contains the captured one is not mocked.
+  capturedBody = '{"marker":"upstream-moved-on"}';
+  const extended = await requestViaProxy(engine.port, `${origin}/x/v1/users/extra`);
+  assert.equal(extended.body, JSON.stringify({ path: '/x/v1/users/extra' }));
+  // Live: and neither is another host, which the unanchored pattern matched too
+  // because a method-specific rule tests the path on its own.
+  assert.equal((await requestViaProxy(engine.port, 'http://capture-anchor.invalid/x/v1/users/extra')).status, 502);
+  assert.equal(engine.listRuleConfigs()[0].hit_count, 0);
+  // Live: the captured endpoint itself is mocked, so it keeps answering the
+  // captured body after upstream moves on.
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/users`)).body, '{"marker":"captured"}');
+  assert.equal(engine.listRuleConfigs()[0].hit_count, 1);
+  // The old builder produced the unanchored, host-less '/v1/users'.
+  assert.equal(mock.url_pattern, `^${escapedOrigin}/v1/users$`);
+  assert.equal(mock.match_query, null);
+
+  // A captured query travels as match_query, like every other rule url: the
+  // mock replays the request it was captured from, not the whole endpoint.
+  await requestViaProxy(engine.port, `${origin}/v1/orders?page=2`);
+  const paged = (await tools.get_flows({ limit: 10 })).flows.find((item) => item.url === `${origin}/v1/orders?page=2`);
+  const pagedMock = await tools.capture_to_mock({ flow_id: paged.id, rule_id: 'captured-orders' });
+  assert.deepEqual(pagedMock.match_query, { page: '2' });
+  assert.equal(
+    (await requestViaProxy(engine.port, `${origin}/v1/orders?page=2`)).body,
+    JSON.stringify({ path: '/v1/orders?page=2' }),
+  );
+  assert.equal(
+    (await requestViaProxy(engine.port, `${origin}/v1/orders?page=3`)).body,
+    JSON.stringify({ path: '/v1/orders?page=3' }),
+  );
+  assert.equal(engine.listRuleConfigs().find((rule) => rule.rule_id === 'captured-orders').hit_count, 1);
+});
+
+test('update_rule retargets a rule through url instead of silently ignoring it', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`upstream:${req.url}`);
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const engine = new ProxyEngine();
+  await engine.start({ port: 0 });
+  t.after(() => engine.stop());
+  const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
+  const origin = `http://127.0.0.1:${upstreamPort}`;
+  const escapedOrigin = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  await tools.create_map_local({
+    rule_id: 'retarget', url: `${origin}/v1/old`, status: 220, content_type: 'text/plain', body: 'mocked',
+  });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/old`)).body, 'mocked');
+
+  // `url` is the documented friendly surface, so a patch that uses it has to
+  // move the rule; it used to be merged, ignored, and reported as 'updated'.
+  const patched = await tools.update_rule({ rule_id: 'retarget', patch: { url: `${origin}/v1/new?a=1` } });
+  assert.equal(patched.status, 'updated');
+  assert.equal(patched.rule.url_pattern, `^${escapedOrigin}/v1/new$`);
+  assert.deepEqual(patched.rule.match_query, { a: '1' });
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/new?a=1`)).body, 'mocked');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/old`)).body, 'upstream:/v1/old');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/new?a=2`)).body, 'upstream:/v1/new?a=2');
+
+  // Retargeting again drops the query the previous url left behind.
+  const requeried = await tools.update_rule({ rule_id: 'retarget', patch: { url: `${origin}/v1/new` } });
+  assert.equal(requeried.rule.match_query, null);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/new?a=2`)).body, 'mocked');
+
+  // An explicit url_pattern in the same patch still wins, as everywhere else.
+  const overridden = await tools.update_rule({
+    rule_id: 'retarget', patch: { url: `${origin}/v1/ignored`, url_pattern: `^${escapedOrigin}/v1/explicit$` },
+  });
+  assert.equal(overridden.rule.url_pattern, `^${escapedOrigin}/v1/explicit$`);
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/explicit`)).body, 'mocked');
+  assert.equal((await requestViaProxy(engine.port, `${origin}/v1/ignored`)).body, 'upstream:/v1/ignored');
 });
