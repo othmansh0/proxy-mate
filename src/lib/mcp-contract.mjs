@@ -188,6 +188,70 @@ const setRoutingSchema = {
   pac_port: z.number().int().min(1).max(65535).optional(),
 };
 
+// zod 4's z.record skips a '__proto__' key outright ("if (key === '__proto__')
+// continue", zod/v4/core/schemas.js), and JSON-RPC really does deliver one:
+// JSON.parse makes '__proto__' an own enumerable property, unlike an object
+// literal. A record-typed matcher therefore arrived one key short, and a rule
+// that drops a constraint matches MORE than the caller asked for. So every
+// matcher object is checked by hand and rebuilt onto a null-prototype target,
+// where '__proto__' is an ordinary key, and .meta() keeps the advertised JSON
+// Schema identical to the record it replaces.
+function matcherRecordSchema({ objectMessage, valueMessage, isValue, valueSchema }) {
+  return z.any()
+    .superRefine((value, ctx) => {
+      if (value === undefined) return;
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        ctx.addIssue({ code: 'custom', message: objectMessage });
+        return;
+      }
+      for (const key of Object.keys(value)) {
+        if (isValue(value[key])) continue;
+        ctx.addIssue({ code: 'custom', path: [key], message: valueMessage });
+      }
+    })
+    .transform((value) => {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+      const rebuilt = Object.create(null);
+      // defineProperty, not assignment: assigning '__proto__' would write the
+      // prototype slot and lose the very key this schema exists to keep.
+      for (const key of Object.keys(value)) {
+        Object.defineProperty(rebuilt, key, { value: value[key], enumerable: true, writable: true, configurable: true });
+      }
+      return rebuilt;
+    })
+    .meta({ type: 'object', propertyNames: { type: 'string' }, additionalProperties: valueSchema });
+}
+
+const matchQuerySchema = matcherRecordSchema({
+  objectMessage: 'match_query must be an object of query parameters',
+  valueMessage: 'match_query values must be a string or an array of strings',
+  isValue: (value) => typeof value === 'string'
+    || (Array.isArray(value) && value.every((item) => typeof item === 'string')),
+  valueSchema: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+});
+
+// The same hole, one field over: mockttp's HeaderMatcher is _.isMatch too, so a
+// dropped 'match_headers' key widens the rule the same way a dropped query key
+// does. The advertised shape stays the z.record's — an object of strings.
+const matchHeadersSchema = matcherRecordSchema({
+  objectMessage: 'match_headers must be an object of header names and values',
+  valueMessage: 'match_headers values must be strings',
+  isValue: (value) => typeof value === 'string',
+  valueSchema: { type: 'string' },
+});
+
+// The same hole again, in the third and last matcher of this shape: mockttp
+// compiles match_json_body_including to a JsonBodyFlexibleMatcher, which is
+// _.isMatch as well. Only the top level is rebuilt here — a nested empty object
+// or array stays permissive, because tightening that needs a semantics decision
+// about arbitrary depth. That residue is documented rather than half-fixed.
+const matchJsonBodySchema = matcherRecordSchema({
+  objectMessage: 'match_json_body_including must be an object of JSON fields',
+  valueMessage: 'match_json_body_including values must be JSON',
+  isValue: () => true,
+  valueSchema: {},
+});
+
 const flowsFilterSchema = {
   domain: z.string().optional().describe('Legacy substring match against hostname. Prefer host_contains, host_equals, or host_regex.'),
   method: z.string().optional(),
@@ -221,9 +285,9 @@ const mapLocalSchema = {
   body_inline: z.string().optional(),
   body_file: z.string().optional().describe('Absolute path to a file containing the response body.'),
   headers: z.record(z.string(), z.string()).optional(),
-  match_headers: z.record(z.string(), z.string()).optional(),
-  match_query: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
-  match_json_body_including: z.record(z.string(), z.any()).optional(),
+  match_headers: matchHeadersSchema.optional(),
+  match_query: matchQuerySchema.optional(),
+  match_json_body_including: matchJsonBodySchema.optional(),
   match_body_regex: z.string().optional(),
   directory: z.string().optional().describe('Serve files relative to this authorized directory.'),
   body_directory: z.string().optional().describe('Alias for directory.'),
@@ -442,9 +506,9 @@ export const MCP_TOOLS = Object.freeze([
     url_pattern: z.string().min(1).max(500).optional().describe("Regular expression, not a glob: '.' matches one character and '.*' many, while a bare '?' or '*' is a regex quantifier on the previous atom. Overrides url and its derived match_query."),
     method: z.string().optional(), enabled: z.boolean().optional(),
     priority: z.number().int().min(-10000).max(10000).optional(),
-    match_headers: z.record(z.string(), z.string()).optional(),
-    match_query: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
-    match_json_body_including: z.record(z.string(), z.any()).optional(),
+    match_headers: matchHeadersSchema.optional(),
+    match_query: matchQuerySchema.optional(),
+    match_json_body_including: matchJsonBodySchema.optional(),
     match_body_regex: z.string().optional(),
   }, MUTATE),
 
@@ -458,7 +522,7 @@ export const MCP_TOOLS = Object.freeze([
     priority: z.number().int().min(-10000).max(10000).optional(),
     delay_ms: z.number().int().min(0).max(300000).optional(),
     fault: z.enum(['timeout', 'close', 'reset']).optional(),
-    match_query: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+    match_query: matchQuerySchema.optional(),
     request_transform: z.record(z.string(), z.any()).optional(),
     response_transform: z.record(z.string(), z.any()).optional(),
   }, OPEN_MUTATE),
@@ -471,7 +535,7 @@ export const MCP_TOOLS = Object.freeze([
     enabled: z.boolean().optional(), priority: z.number().int().min(-10000).max(10000).optional(),
     delay_ms: z.number().int().min(0).max(300000).optional(),
     fault: z.enum(['timeout', 'close', 'reset']).optional(),
-    match_query: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+    match_query: matchQuerySchema.optional(),
     request_transform: z.record(z.string(), z.any()).optional(),
     response_transform: z.record(z.string(), z.any()).optional(),
   }, MUTATE),
@@ -484,7 +548,7 @@ export const MCP_TOOLS = Object.freeze([
     delay_ms: z.number().int().min(0).max(300000).optional(),
     fault: z.enum(['timeout', 'close', 'reset']).optional(),
     enabled: z.boolean().optional(), priority: z.number().int().min(-10000).max(10000).optional(),
-    match_query: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+    match_query: matchQuerySchema.optional(),
   }, MUTATE),
   tool('create_no_cache_rule', 'Create or replace a rule that removes conditional request headers and disables response caching.', {
     rule_id: z.string().regex(/^[A-Za-z0-9._-]+$/).max(128).optional(),
@@ -492,7 +556,7 @@ export const MCP_TOOLS = Object.freeze([
     url_pattern: z.string().min(1).max(500).optional().describe("Regular expression, not a glob: '.' matches one character and '.*' many, while a bare '?' or '*' is a regex quantifier on the previous atom. Overrides url and its derived match_query."),
     method: z.string().optional(),
     enabled: z.boolean().optional(), priority: z.number().int().min(-10000).max(10000).optional(),
-    match_query: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+    match_query: matchQuerySchema.optional(),
   }, MUTATE),
   tool('create_breakpoint', 'Create or replace a headless request/response breakpoint rule. Matching traffic pauses until resolved or its deadline applies the configured fallback.', {
     rule_id: z.string().regex(/^[A-Za-z0-9._-]+$/).max(128).optional(),
@@ -503,9 +567,9 @@ export const MCP_TOOLS = Object.freeze([
     timeout_ms: z.number().int().min(10).max(300000).optional(),
     default_action: z.enum(['continue', 'abort', 'close', 'reset']).optional(),
     enabled: z.boolean().optional(), priority: z.number().int().min(-10000).max(10000).optional(),
-    match_headers: z.record(z.string(), z.string()).optional(),
-    match_query: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
-    match_json_body_including: z.record(z.string(), z.any()).optional(),
+    match_headers: matchHeadersSchema.optional(),
+    match_query: matchQuerySchema.optional(),
+    match_json_body_including: matchJsonBodySchema.optional(),
     match_body_regex: z.string().optional(),
   }, MUTATE),
   tool('list_pending_breakpoints', 'List currently paused headless breakpoints. Sensitive previews are redacted unless server policy grants sensitive access.', {
@@ -874,9 +938,14 @@ function redactBoundaryValue(value, seen = new WeakSet()) {
   }
   const output = {};
   for (const [key, child] of Object.entries(value)) {
-    output[key] = SENSITIVE_RESULT_KEYS.has(key.toLowerCase())
+    const redacted = SENSITIVE_RESULT_KEYS.has(key.toLowerCase())
       ? '[REDACTED]'
       : redactBoundaryValue(child, seen);
+    // defineProperty, not assignment: 'output.__proto__ = x' writes the
+    // prototype slot, so a rule constrained on a '__proto__' query parameter
+    // would be reported back without it — reading as broader than it is — and
+    // an object-valued one would reparent this result object.
+    Object.defineProperty(output, key, { value: redacted, enumerable: true, writable: true, configurable: true });
   }
   seen.delete(value);
   return output;

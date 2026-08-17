@@ -16,7 +16,8 @@ import { BreakpointManager, createMockttpBreakpointCallbacks } from './breakpoin
 import { redactBody, redactHeaders, redactUrl } from './redaction.mjs';
 import { PluginStore } from './plugin-store.mjs';
 import {
-  normalizeMatchUrl, matchUrlPath, queryMatches, ruleUrlMatchers, validateMatchQuery,
+  normalizeMatchUrl, matchUrlPath, matcherError, parseRequestQuery, queryMatches, ruleUrlMatchers,
+  validateMatcherObject, validateMatchQuery,
 } from './url-match.mjs';
 
 const CA_DIR = path.join(STATE_DIR, 'ca');
@@ -979,9 +980,25 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
     throw new Error('breakpoint default_action must be continue, abort, close, or reset');
   }
   validateHeaders(input.headers, 'headers');
-  validateHeaders(input.match_headers, 'match_headers');
+  validateHeaders(input.match_headers, 'match_headers', { matcher: true });
   validateMatchQuery(input.match_query);
-  validatePlainObject(input.match_json_body_including, 'match_json_body_including');
+  // Top-level only: mockttp matches this with _.isMatch, so an empty object at
+  // the root matches every JSON-bodied request. A nested empty object is still
+  // permissive; see docs/CAPABILITIES.md.
+  validateMatcherObject(input.match_json_body_including, 'match_json_body_including', {
+    code: 'MATCH_JSON_BODY',
+    invalidMessage: 'match_json_body_including must be an object of JSON fields',
+    invalidRecovery: [
+      'Pass match_json_body_including as {"field": value}; it matches a subset of the request JSON.',
+      'Omit match_json_body_including entirely for no body constraint.',
+    ],
+    emptyMessage: 'match_json_body_including has no fields, and an empty body matcher matches every JSON request',
+    emptyRecovery: [
+      'Omit match_json_body_including entirely for no body constraint.',
+      'Name at least one field, e.g. {"action": "checkout"}.',
+      'A rule written, imported, or stored before this guard can carry match_json_body_including: {} meaning "any JSON body"; re-create it with the fields it meant to constrain.',
+    ],
+  });
   if (input.match_body_regex) compileSafeRegex(input.match_body_regex, 'match_body_regex');
 
   const requestTransform = normalizeTransform(input.request_transform ?? requestTransformFromFlatFields(input), 'request');
@@ -1136,13 +1153,47 @@ function validatePlainObject(value, label) {
   if (typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
 }
 
-function validateHeaders(value, label) {
-  validatePlainObject(value, label);
+// `matcher` marks the one caller whose headers are a constraint rather than
+// headers to send: match_headers goes through the same gate as match_query,
+// because mockttp's HeaderMatcher runs _.isMatch(request.headers, expected) —
+// exactly what withQuery does one field over. Headers a rule sends are not a
+// matcher, and an empty set of them adds nothing and constrains nothing, so
+// they keep the plain-object check.
+function validateHeaders(value, label, { matcher = false } = {}) {
+  if (matcher) {
+    validateMatcherObject(value, label, {
+      code: 'MATCH_HEADERS',
+      invalidMessage: `${label} must be an object of header names and values`,
+      invalidRecovery: [
+        `Pass ${label} as {"header-name": "value"}; matching is by exact value, on a lower-cased name.`,
+        `Omit ${label} entirely for no header constraint.`,
+      ],
+      emptyMessage: `${label} has no headers, and an empty header matcher matches every request`,
+      emptyRecovery: [
+        `Omit ${label} entirely for no header constraint.`,
+        `Name at least one header in ${label}, e.g. {"authorization": "Bearer token"}.`,
+        `A rule written, imported, or stored before this guard can carry ${label}: {} meaning "any headers"; re-create it with the headers it meant to constrain.`,
+      ],
+    });
+  } else {
+    validatePlainObject(value, label);
+  }
   if (!value) return;
   for (const [name, headerValue] of Object.entries(value)) {
     if (!name || /[\r\n:]/.test(name)) throw new Error(`${label} contains an invalid header name`);
     if (headerValue != null && typeof headerValue !== 'string' && !Array.isArray(headerValue)) {
       throw new Error(`${label}.${name} must be a string, string array, null, or undefined`);
+    }
+    // The empty matcher one level down, and the same lodash rule that produces
+    // MATCH_QUERY_EMPTY_VALUE: isMatch reads an expected [] as a vacuous subset
+    // of an array actual, so it matches whatever values a repeated header
+    // (set-cookie and friends) arrives with, while a single-valued header does
+    // not match at all.
+    if (matcher && Array.isArray(headerValue) && headerValue.length === 0) {
+      throw matcherError('MATCH_HEADERS_EMPTY_VALUE', `${label}.${name} is an empty array, which matches any values a repeated ${name} arrives with`, [
+        `Name the value ${name} must have, e.g. {"${name}": "value"}.`,
+        `Drop ${name} from ${label} if any value of it is acceptable.`,
+      ]);
     }
     if (String(headerValue ?? '').includes('\r') || String(headerValue ?? '').includes('\n')) {
       throw new Error(`${label}.${name} cannot contain newlines`);
@@ -1661,14 +1712,13 @@ function contentTypeForPath(filePath) {
 
 function normalizeDryRunRequest(request) {
   const url = String(request.url ?? 'http://invalid.local/');
-  let parsed;
-  try { parsed = new URL(url); }
-  catch { throw new Error('dry-run request.url must be an absolute URL'); }
+  if (!URL.canParse(url)) throw new Error('dry-run request.url must be an absolute URL');
   const headers = Object.fromEntries(Object.entries(request.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]));
-  const query = request.query ?? Object.fromEntries([...parsed.searchParams.keys()].map((key) => {
-    const values = parsed.searchParams.getAll(key);
-    return [key, values.length > 1 ? values : values[0]];
-  }));
+  // url-match.mjs owns the parser the live proxy matches with. URLSearchParams
+  // has no key cap and mockttp's url.parse(url, true) stops at
+  // MAX_QUERY_PARAMS, so building the dry-run query any other way makes the two
+  // disagree on every request carrying more parameters than that.
+  const query = request.query ?? parseRequestQuery(url);
   let jsonBody = request.json_body;
   if (jsonBody === undefined && typeof request.body === 'string') {
     try { jsonBody = JSON.parse(request.body); } catch { /* not JSON */ }

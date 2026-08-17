@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import legacyUrl from 'node:url';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 import {
   normalizeMatchUrl, matchUrlPath, splitRuleUrl, queryMatches, validateMatchQuery,
+  literalUrlPattern, parseRequestQuery, ruleUrlMatchers, urlPattern,
   MAX_QUERY_PARAMS, MAX_QUERY_BYTES,
 } from '../src/lib/url-match.mjs';
 
@@ -199,6 +201,12 @@ test('validateMatchQuery refuses a match_query that can only match everything', 
     assert.equal(error.code, 'MATCH_QUERY_EMPTY');
     assert.equal(error.retryable, false);
     assert.ok(error.recovery.some((hint) => /Omit match_query/.test(hint)));
+    // The hints have to help the callers who can actually see this error, and
+    // every surface that raises it is already JSON: MCP arguments arrive via
+    // JSON.parse, rules.json is JSON, import_rules reads JSON. "Build it with
+    // JSON, not a '{}' literal" was advice none of them could act on.
+    assert.ok(!error.recovery.some((hint) => /JSON/.test(hint)));
+    assert.ok(error.recovery.some((hint) => /imported, or stored/.test(hint)));
     return true;
   });
   // The realistic way to arrive here: a '__proto__' key assigned onto a '{}'
@@ -226,10 +234,13 @@ test('validateMatchQuery rejects values that are not query-parameter objects', (
 });
 
 test('validateMatchQuery rejects an empty-array value instead of letting it cost nothing', () => {
-  // mockttp runs _.isMatch, for which an expected [] is a vacuous subset: it
-  // matches whatever value the key holds. It is the same "empty constraint
-  // matches everything" mistake as MATCH_QUERY_EMPTY, one level down.
+  // mockttp runs _.isMatch, for which an expected [] is a vacuous subset of an
+  // array actual: it matches whatever values a repeated parameter arrives with.
+  // It is the same "empty constraint matches everything" mistake as
+  // MATCH_QUERY_EMPTY, one level down — and it is worse than merely broad,
+  // because a single-valued parameter does not match it at all.
   assert.equal(new QueryMatcher({ b: [] }).matches({ url: 'http://h.test/a?b=1&b=2' }), true);
+  assert.equal(new QueryMatcher({ b: [] }).matches({ url: 'http://h.test/a?b=1' }), false);
   assert.throws(() => validateMatchQuery({ b: [] }), (error) => {
     assert.equal(error.code, 'MATCH_QUERY_EMPTY_VALUE');
     assert.equal(error.retryable, false);
@@ -277,9 +288,128 @@ test('validateMatchQuery bounds a match_query by wire pairs and total size', () 
     () => validateMatchQuery({ k: 'v'.repeat(MAX_QUERY_BYTES) }),
     (error) => error.code === 'QUERY_TOO_LARGE' && /bytes/.test(error.message),
   );
+  // The bound is on what a rule persists and replays, and the message says only
+  // that; it must not claim a query this long could never arrive.
+  assert.throws(() => validateMatchQuery({ k: 'v'.repeat(MAX_QUERY_BYTES) }), (error) => {
+    assert.doesNotMatch(error.message, /cannot reach the proxy/);
+    assert.match(error.message, /persist/);
+    return true;
+  });
   // Multi-byte characters are counted as the bytes they occupy on the wire.
   assert.throws(
     () => validateMatchQuery({ k: 'é'.repeat(MAX_QUERY_BYTES / 2) }),
     (error) => error.code === 'QUERY_TOO_LARGE',
   );
+});
+
+test('the byte bound is justified by what this server persists, not by what others accept', () => {
+  // Two rationales for this number have already been wrong: the first said a
+  // longer query could not reach the proxy, the second said 8 KiB sits under
+  // the request-line limits servers commonly enforce. The bound needs neither
+  // claim — it caps what a rule writes to rules.json and replays on every
+  // start_proxy — so the code comment and the doc bullet state that and stop.
+  const source = readFileSync(new URL('../src/lib/url-match.mjs', import.meta.url), 'utf8');
+  const rationale = source.split('export const MAX_QUERY_BYTES')[0].split(`${MAX_QUERY_PARAMS};`)[1];
+  const docs = readFileSync(new URL('../docs/CAPABILITIES.md', import.meta.url), 'utf8');
+  const bullet = docs.split('\n').find((line) => line.includes('`QUERY_TOO_LARGE`'));
+  for (const text of [rationale, bullet]) {
+    assert.match(text, /persist/);
+    assert.doesNotMatch(text, /commonly enforce|request.line|Apache|nginx|IIS|LimitRequestLine|maxQueryString/i);
+  }
+});
+
+test('a machine-derived url is escaped literally while a hand-written one keeps its globs', () => {
+  // A hand-written url is a glob, and that is what '*' is for.
+  assert.equal(urlPattern('http://h.test/a*b'), '^http://h\\.test/a.*b$');
+  assert.equal(new RegExp(urlPattern('http://h.test/a*b')).test('http://h.test/aXXXb'), true);
+
+  // A captured url is text off the wire. Leaving '*' as '.*' there produced a
+  // rule broader than the flow it was derived from.
+  assert.equal(literalUrlPattern('http://h.test/a*b'), '^http://h\\.test/a\\*b$');
+  assert.equal(new RegExp(literalUrlPattern('http://h.test/a*b')).test('http://h.test/aXXXb'), false);
+  assert.equal(new RegExp(literalUrlPattern('http://h.test/a*b')).test('http://h.test/a*b'), true);
+  // Every other metacharacter is literal too, '+' and '?' included.
+  const awkward = 'http://h.test/a+b?c(d)|e[f]';
+  assert.equal(new RegExp(literalUrlPattern(awkward)).test(awkward), true);
+  assert.equal(new RegExp(literalUrlPattern(awkward)).test('http://h.test/aab?cd|ef'), false);
+  assert.equal(literalUrlPattern(''), null);
+
+  // Through the builder: normalize:true is the machine-derived path.
+  assert.equal(
+    ruleUrlMatchers('http://h.test/v1/a*b', {}, { normalize: true }).url_pattern,
+    '^http://h\\.test/v1/a\\*b$',
+  );
+  assert.equal(ruleUrlMatchers('http://h.test/v1/a*b', {}).url_pattern, '^http://h\\.test/v1/a.*b$');
+});
+
+test('ruleUrlMatchers rejects a non-object match_query instead of spreading it into one', () => {
+  // Spreading 'a=1' produces {0:'a',1:'=',2:'1'} and an array produces
+  // {0:'a',1:'b'} — shapes that read as real constraints and match nothing the
+  // caller meant. The non-schema paths (import_rules, a hand-written
+  // rules.json, a direct registerRule) reach the engine through here.
+  for (const value of ['a=1', ['a', 'b'], 42, true]) {
+    assert.throws(
+      () => ruleUrlMatchers('http://h.test/v1/x?keep=1', { match_query: value }),
+      (error) => {
+        assert.equal(error.code, 'MATCH_QUERY_INVALID');
+        assert.equal(error.retryable, false);
+        assert.ok(error.recovery.length > 0);
+        return true;
+      },
+      JSON.stringify(value) ?? String(value),
+    );
+  }
+  // The url_pattern escape hatch passes match_query straight through, so it is
+  // gated by the same check.
+  assert.throws(
+    () => ruleUrlMatchers('http://h.test/v1/x', { url_pattern: '^http://h\\.test/v1/x$', match_query: 'a=1' }),
+    (error) => error.code === 'MATCH_QUERY_INVALID',
+  );
+  // A real object still merges, with the caller's value winning.
+  assert.deepEqual(
+    { ...ruleUrlMatchers('http://h.test/v1/x?keep=1&win=url', { match_query: { win: 'args' } }).match_query },
+    { keep: '1', win: 'args' },
+  );
+});
+
+test('a query derived from a capture recovers by changing the capture, not by editing match_query', () => {
+  const overSized = `http://h.test/v1/x?k=${'v'.repeat(MAX_QUERY_BYTES)}`;
+  const overCap = `http://h.test/v1/x?${Array.from({ length: MAX_QUERY_PARAMS + 1 }, (_, index) => `k${index}=v`).join('&')}`;
+  for (const url of [overSized, overCap]) {
+    assert.throws(() => ruleUrlMatchers(url, {}, { normalize: true }), (error) => {
+      assert.equal(error.code, 'QUERY_TOO_LARGE');
+      // capture_to_mock derives the query from the flow, so the caller has no
+      // match_query and no url to shorten.
+      assert.ok(error.recovery.every((hint) => !/match_query|\burl\b/.test(hint)), error.recovery.join(' | '));
+      assert.ok(error.recovery.some((hint) => /captur/i.test(hint)));
+      assert.ok(error.recovery.some((hint) => /url_pattern/.test(hint)));
+      return true;
+    }, url.slice(0, 40));
+    // A hand-written url keeps the hints that fit it.
+    assert.throws(() => ruleUrlMatchers(url, {}), (error) => {
+      assert.equal(error.code, 'QUERY_TOO_LARGE');
+      assert.ok(error.recovery.some((hint) => /match_query|url/.test(hint)));
+      return true;
+    });
+  }
+});
+
+test('parseRequestQuery reads a request query through the capped parser mockttp matches with', () => {
+  const filler = Array.from({ length: MAX_QUERY_PARAMS }, (_, index) => `k${index}=v`).join('&');
+  const url = `http://h.test/a?${filler}&late=yes`;
+
+  // Parity by construction: this is the parse QueryMatcher runs.
+  assert.deepEqual({ ...parseRequestQuery(url) }, { ...legacyUrl.parse(url, true).query });
+  assert.equal(Object.keys(parseRequestQuery(url)).length, MAX_QUERY_PARAMS);
+  assert.equal(Object.hasOwn(parseRequestQuery(url), 'late'), false);
+  assert.equal(new QueryMatcher({ late: 'yes' }).matches({ url }), false);
+
+  // URLSearchParams, which the dry run used to build its query with, has no cap
+  // and reported the 1001st parameter the live proxy never sees.
+  assert.equal([...new URL(url).searchParams.keys()].length, MAX_QUERY_PARAMS + 1);
+  assert.equal(new URL(url).searchParams.get('late'), 'yes');
+
+  // Inside the cap the two agree, and a repeated key still collapses to array.
+  assert.deepEqual({ ...parseRequestQuery('http://h.test/a?b=1&b=2&c=3') }, { b: ['1', '2'], c: '3' });
+  assert.equal(Object.getPrototypeOf(parseRequestQuery('http://h.test/a?b=1')), null);
 });
