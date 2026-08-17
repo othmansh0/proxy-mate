@@ -1,0 +1,668 @@
+#!/usr/bin/env node
+// proxy-mcp — free Proxyman-equivalent MCP server backed by mockttp (MIT).
+// Single-file implementation. Captures HTTP(S) flows and supports clean map-local mocking.
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import * as mockttp from 'mockttp';
+import { promises as fs } from 'node:fs';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import http from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileP = promisify(execFile);
+
+const STATE_DIR = path.join(os.homedir(), '.proxy-mcp');
+const CA_DIR = path.join(STATE_DIR, 'ca');
+const CA_KEY = path.join(CA_DIR, 'key.pem');
+const CA_CERT = path.join(CA_DIR, 'cert.pem');
+const PAC_FILE = path.join(STATE_DIR, 'proxy.pac');
+const ROUTING_STATE = path.join(STATE_DIR, 'routing.json');
+const MAX_BODY_PREVIEW = 2000;
+const MAX_FLOWS = 500; // ring-buffer cap to keep memory bounded
+const DEFAULT_PAC_PORT = 8081;
+
+// ---- in-process state ----
+let proxy = null;            // Mockttp server instance
+let proxyPort = null;
+let pacServer = null;        // http.Server for PAC delivery
+let pacPort = null;
+let pacBody = '';            // last-served PAC text
+let routingActive = false;   // tracks networksetup state we configured
+let routingNetworkService = null; // e.g. 'Wi-Fi'
+const flows = new Map();     // flowId -> { id, request, response }
+const flowOrder = [];        // insertion order for ring buffer
+const mockRules = new Map(); // rule_id -> { config, endpoint, removed }
+
+// ---- CA management ----
+async function ensureCA() {
+  await fs.mkdir(CA_DIR, { recursive: true, mode: 0o755 });
+  if (existsSync(CA_KEY) && existsSync(CA_CERT)) return { keyPath: CA_KEY, certPath: CA_CERT };
+  const { key, cert } = await mockttp.generateCACertificate({
+    commonName: 'proxy-mcp CA',
+    organizationName: 'proxy-mcp',
+  });
+  await fs.writeFile(CA_KEY, key, { mode: 0o600 });
+  await fs.writeFile(CA_CERT, cert, { mode: 0o644 });
+  return { keyPath: CA_KEY, certPath: CA_CERT };
+}
+
+// ---- PAC + networksetup (selective routing) ----
+//
+// Why this exists: a system-wide HTTP proxy forces every Mac app's traffic through
+// mockttp, which re-issues a per-host cert. Cert-pinning apps (Slack, banking, brew,
+// Spotify…) reject our cert → host Wi-Fi feels broken. A PAC file is the surgical
+// fix: macOS and the iOS Simulator both honor "Automatic Proxy Configuration" URLs,
+// so we send only the domains we want to intercept through 127.0.0.1:<proxyPort> and
+// leave the rest DIRECT — Proxyman's selective behavior, without a sysext.
+
+function globToShExpMatchArg(pattern) {
+  // We use shExpMatch which accepts glob-style * and ?. Strip surrounding whitespace.
+  return pattern.trim();
+}
+
+function buildPacText(domains, targetHost, targetPort) {
+  const safe = domains
+    .filter((d) => typeof d === 'string' && d.trim().length > 0)
+    .map(globToShExpMatchArg);
+  const matches = safe.map((d) => `shExpMatch(host, ${JSON.stringify(d)})`).join(' || ');
+  const fallback = matches || 'false';
+  return `// proxy-mcp generated PAC — sends only listed hosts through the intercepting proxy.
+function FindProxyForURL(url, host) {
+  if (${fallback}) {
+    return "PROXY ${targetHost}:${targetPort}";
+  }
+  return "DIRECT";
+}
+`;
+}
+
+async function startPacServer(port) {
+  if (pacServer) return pacPort;
+  await new Promise((resolve, reject) => {
+    const srv = http.createServer((req, res) => {
+      if (req.url === '/proxy.pac' || req.url === '/') {
+        res.writeHead(200, { 'content-type': 'application/x-ns-proxy-autoconfig' });
+        res.end(pacBody);
+      } else {
+        res.writeHead(404); res.end();
+      }
+    });
+    srv.once('error', reject);
+    srv.listen(port, '127.0.0.1', () => {
+      pacServer = srv; pacPort = port; resolve();
+    });
+  });
+  return pacPort;
+}
+
+async function stopPacServer() {
+  if (!pacServer) return;
+  await new Promise((resolve) => pacServer.close(() => resolve()));
+  pacServer = null; pacPort = null;
+}
+
+async function listEnabledNetworkServices() {
+  // networksetup prints one service per line; the first line is a banner ("An asterisk…").
+  // Disabled services are prefixed with '*' — skip those.
+  const { stdout } = await execFileP('networksetup', ['-listallnetworkservices']);
+  return stdout
+    .split('\n')
+    .slice(1)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('*'));
+}
+
+async function pickActiveNetworkService(preferred) {
+  const services = await listEnabledNetworkServices();
+  if (preferred && services.includes(preferred)) return preferred;
+  // Prefer Wi-Fi, then anything with "Ethernet" in the name, then the first enabled.
+  if (services.includes('Wi-Fi')) return 'Wi-Fi';
+  const eth = services.find((s) => /ethernet/i.test(s));
+  if (eth) return eth;
+  if (services.length === 0) throw new Error('no enabled network services found');
+  return services[0];
+}
+
+async function setAutoProxyOn(networkService, pacUrl) {
+  await execFileP('networksetup', ['-setautoproxyurl', networkService, pacUrl]);
+  await execFileP('networksetup', ['-setautoproxystate', networkService, 'on']);
+}
+
+async function setAutoProxyOff(networkService) {
+  // Ignore failures: the service may have been renamed or disconnected.
+  try { await execFileP('networksetup', ['-setautoproxystate', networkService, 'off']); }
+  catch { /* ignore */ }
+}
+
+async function writeRoutingState(state) {
+  await fs.mkdir(STATE_DIR, { recursive: true });
+  await fs.writeFile(ROUTING_STATE, JSON.stringify(state, null, 2));
+}
+
+async function readRoutingState() {
+  try { return JSON.parse(await fs.readFile(ROUTING_STATE, 'utf8')); }
+  catch { return null; }
+}
+
+async function clearRoutingState() {
+  try { await fs.unlink(ROUTING_STATE); } catch { /* ignore */ }
+}
+
+// ---- simctl CA trust ----
+//
+// xcrun simctl keychain <udid|booted> add-root-cert <pem> installs the cert into the
+// simulator's trust store. Available since Xcode 12.5. No reboot needed in modern Xcode.
+
+async function listBootedSimulators() {
+  try {
+    const { stdout } = await execFileP('xcrun', ['simctl', 'list', 'devices', 'booted', '-j']);
+    const data = JSON.parse(stdout);
+    const out = [];
+    for (const arr of Object.values(data.devices || {})) {
+      for (const dev of arr) {
+        if (dev?.state === 'Booted') out.push({ udid: dev.udid, name: dev.name });
+      }
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+async function trustCaOnSimulator(udid, certPath) {
+  await execFileP('xcrun', ['simctl', 'keychain', udid, 'add-root-cert', certPath]);
+}
+
+// ---- flow capture ----
+function rememberFlow(flow) {
+  flows.set(flow.id, flow);
+  flowOrder.push(flow.id);
+  while (flowOrder.length > MAX_FLOWS) {
+    const stale = flowOrder.shift();
+    flows.delete(stale);
+  }
+}
+
+async function bodyToText(body) {
+  if (!body) return null;
+  try {
+    if (typeof body.getText === 'function') {
+      const t = await body.getText();
+      return t == null ? null : String(t);
+    }
+    if (body.buffer) return Buffer.from(body.buffer).toString('utf8');
+    if (body.text != null) return String(body.text);
+  } catch { /* ignore decode errors */ }
+  return null;
+}
+
+async function attachCaptureHandlers(server) {
+  await server.on('request', async (req) => {
+    const flow = {
+      id: req.id,
+      timestamp: Date.now(),
+      request: {
+        method: req.method,
+        url: req.url,
+        protocol: req.protocol,
+        hostname: req.hostname,
+        path: req.path,
+        headers: req.headers,
+        body: await bodyToText(req.body),
+      },
+      response: null,
+    };
+    rememberFlow(flow);
+  });
+  await server.on('response', async (res) => {
+    const existing = flows.get(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
+    existing.response = {
+      statusCode: res.statusCode,
+      statusMessage: res.statusMessage,
+      headers: res.headers,
+      body: await bodyToText(res.body),
+      size: res.body && res.body.buffer ? res.body.buffer.length : 0,
+    };
+    flows.set(res.id, existing);
+  });
+}
+
+// ---- helpers for mock rule registration ----
+async function registerMockRule(config) {
+  if (!proxy) throw new Error('Proxy is not running. Call start_proxy first.');
+  const {
+    rule_id,
+    url_pattern,
+    method,
+    status = 200,
+    content_type = 'application/json',
+    body,
+    headers = {},
+  } = config;
+
+  if (mockRules.has(rule_id)) {
+    // remove existing rule with same id
+    const old = mockRules.get(rule_id);
+    if (old.endpoint && typeof old.endpoint.stop === 'function') {
+      await old.endpoint.stop();
+    }
+    mockRules.delete(rule_id);
+  }
+
+  const regex = new RegExp(url_pattern);
+  let builder;
+  switch ((method || 'ANY').toUpperCase()) {
+    case 'GET':    builder = proxy.forGet(regex); break;
+    case 'POST':   builder = proxy.forPost(regex); break;
+    case 'PUT':    builder = proxy.forPut(regex); break;
+    case 'PATCH':  builder = proxy.forPatch(regex); break;
+    case 'DELETE': builder = proxy.forDelete(regex); break;
+    case 'HEAD':   builder = proxy.forHead(regex); break;
+    case 'OPTIONS':builder = proxy.forOptions(regex); break;
+    case 'ANY':
+    default:       builder = proxy.forAnyRequest().forUrl(regex); break;
+  }
+  const respHeaders = { 'content-type': content_type, ...headers };
+  const endpoint = await builder.thenReply(status, body ?? '', respHeaders);
+
+  mockRules.set(rule_id, { config, endpoint });
+  return { rule_id, url_pattern, method: method || 'ANY', status };
+}
+
+// ---- tool result helpers ----
+const ok = (obj) => ({ content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] });
+const err = (msg) => ({ isError: true, content: [{ type: 'text', text: typeof msg === 'string' ? msg : String(msg) }] });
+
+// ---- MCP server ----
+const mcp = new McpServer(
+  { name: 'proxy-mcp', version: '0.1.0' },
+  { capabilities: { tools: {} } },
+);
+
+async function startProxyImpl({ port } = {}) {
+  if (proxy) return { status: 'already_running', port: proxyPort, ca_cert: CA_CERT };
+  const { keyPath, certPath } = await ensureCA();
+  proxy = mockttp.getLocal({ https: { keyPath, certPath } });
+  await proxy.start(port ?? 8080);
+  proxyPort = proxy.port;
+  await attachCaptureHandlers(proxy);
+  // unmocked → passthrough so real backend still answers, and we still capture
+  await proxy.forUnmatchedRequest().thenPassThrough();
+  return { status: 'started', port: proxyPort, ca_cert: CA_CERT };
+}
+
+async function stopProxyImpl() {
+  // Clear any routing we configured before tearing down the proxy itself,
+  // so the host network stays usable even if the daemon exits abruptly.
+  await clearProxyRoutingImpl({ silent: true });
+  if (!proxy) return { status: 'not_running' };
+  try { await proxy.stop(); } catch { /* ignore */ }
+  proxy = null; proxyPort = null;
+  mockRules.clear();
+  return { status: 'stopped' };
+}
+
+async function setProxyRoutingImpl({ domains, network_service, pac_port = DEFAULT_PAC_PORT }) {
+  if (!proxy) throw new Error('Proxy is not running. Call start_proxy first.');
+  if (!Array.isArray(domains) || domains.length === 0) {
+    throw new Error('domains must be a non-empty array of hostnames or globs.');
+  }
+  const service = await pickActiveNetworkService(network_service);
+  pacBody = buildPacText(domains, '127.0.0.1', proxyPort);
+  await fs.mkdir(STATE_DIR, { recursive: true });
+  await fs.writeFile(PAC_FILE, pacBody);
+  await startPacServer(pac_port);
+  const pacUrl = `http://127.0.0.1:${pacPort}/proxy.pac`;
+  await setAutoProxyOn(service, pacUrl);
+  routingActive = true;
+  routingNetworkService = service;
+  await writeRoutingState({ network_service: service, pac_url: pacUrl, domains });
+  return { status: 'routing_on', network_service: service, pac_url: pacUrl, domains };
+}
+
+async function clearProxyRoutingImpl({ network_service, silent = false } = {}) {
+  const persisted = await readRoutingState();
+  const service = network_service || routingNetworkService || persisted?.network_service;
+  if (service) await setAutoProxyOff(service);
+  await stopPacServer();
+  await clearRoutingState();
+  routingActive = false;
+  routingNetworkService = null;
+  return silent ? null : { status: 'routing_off', network_service: service ?? null };
+}
+
+async function trustCaOnSimulatorsImpl() {
+  await ensureCA();
+  const sims = await listBootedSimulators();
+  if (sims.length === 0) return { trusted: [], skipped: 'no booted simulators found' };
+  const trusted = [];
+  const failed = [];
+  for (const sim of sims) {
+    try {
+      await trustCaOnSimulator(sim.udid, CA_CERT);
+      trusted.push(sim);
+    } catch (e) {
+      failed.push({ ...sim, error: e?.message ?? String(e) });
+    }
+  }
+  return { trusted, failed };
+}
+
+mcp.registerTool('start_proxy', {
+  description: 'Start the HTTP(S) intercepting proxy. Unmocked requests pass through to their real destination. Generates a CA on first run. When auto_setup is true, also configures PAC routing for the supplied domains and trusts the CA on every booted iOS Simulator — leaving host traffic for everything else untouched.',
+  inputSchema: {
+    port: z.number().int().min(1).max(65535).optional().describe('TCP port to listen on. Defaults to 8080.'),
+    auto_setup: z.boolean().optional().describe('When true, also configure PAC routing + CA trust in one call. Requires domains.'),
+    domains: z.array(z.string()).optional().describe('Host globs to route through the proxy (e.g. ["*.almosafer.com"]). Required when auto_setup=true.'),
+    network_service: z.string().optional().describe('macOS network service to configure (e.g. "Wi-Fi"). Auto-detected if omitted.'),
+    pac_port: z.number().int().min(1).max(65535).optional().describe(`Port to serve PAC on. Defaults to ${DEFAULT_PAC_PORT}.`),
+  },
+}, async ({ port, auto_setup, domains, network_service, pac_port }) => {
+  try {
+    const started = await startProxyImpl({ port });
+    if (!auto_setup) return ok(started);
+    if (!domains || domains.length === 0) {
+      return err('auto_setup=true requires a non-empty domains array.');
+    }
+    const routing = await setProxyRoutingImpl({ domains, network_service, pac_port });
+    const trust = await trustCaOnSimulatorsImpl();
+    return ok({ ...started, routing, trust });
+  } catch (e) { return err(`start_proxy failed: ${e?.message ?? e}`); }
+});
+
+mcp.registerTool('stop_proxy', {
+  description: 'Stop the proxy and clear PAC routing. Captured flows are kept in memory; mock rules are cleared. Safe to call even when not running.',
+  inputSchema: {},
+}, async () => ok(await stopProxyImpl()));
+
+mcp.registerTool('set_proxy_routing', {
+  description: 'Send only the listed host globs through the proxy via a PAC file. Other host traffic stays DIRECT, so Slack/Chrome/brew/etc. are unaffected. Updates the macOS network service (Wi-Fi by default) and serves the PAC over HTTP. iOS Simulator inherits the host PAC automatically.',
+  inputSchema: {
+    domains: z.array(z.string()).min(1).describe('Host globs to route through the proxy. shExpMatch syntax: "*.almosafer.com", "next-staging.almosafer.com".'),
+    network_service: z.string().optional().describe('macOS network service name (run `networksetup -listallnetworkservices`). Auto-detects Wi-Fi if omitted.'),
+    pac_port: z.number().int().min(1).max(65535).optional().describe(`Port to serve PAC on. Defaults to ${DEFAULT_PAC_PORT}.`),
+  },
+}, async (args) => {
+  try { return ok(await setProxyRoutingImpl(args)); }
+  catch (e) { return err(`set_proxy_routing failed: ${e?.message ?? e}`); }
+});
+
+mcp.registerTool('clear_proxy_routing', {
+  description: 'Disable PAC routing on the configured network service and stop the PAC server. Idempotent.',
+  inputSchema: {
+    network_service: z.string().optional().describe('Override the network service to clear. Defaults to whichever one was configured.'),
+  },
+}, async (args) => {
+  try { return ok(await clearProxyRoutingImpl(args)); }
+  catch (e) { return err(`clear_proxy_routing failed: ${e?.message ?? e}`); }
+});
+
+mcp.registerTool('trust_ca_on_simulators', {
+  description: 'Install and trust the proxy CA on every currently booted iOS Simulator via `xcrun simctl keychain <udid> add-root-cert`. Idempotent — re-running is harmless. Required at least once per simulator before HTTPS traffic decrypts cleanly.',
+  inputSchema: {},
+}, async () => {
+  try { return ok(await trustCaOnSimulatorsImpl()); }
+  catch (e) { return err(`trust_ca_on_simulators failed: ${e?.message ?? e}`); }
+});
+
+mcp.registerTool('get_proxy_status', {
+  description: 'Return whether the proxy is running, its port, CA cert path, mock-rule and flow counts.',
+  inputSchema: {},
+}, async () => ok({
+  running: !!proxy,
+  port: proxyPort,
+  ca_cert: CA_CERT,
+  mock_rules_count: mockRules.size,
+  flows_count: flows.size,
+}));
+
+mcp.registerTool('clear_session', {
+  description: 'Drop all captured flows from memory. Mock rules are kept.',
+  inputSchema: {},
+}, async () => {
+  flows.clear(); flowOrder.length = 0;
+  return ok({ status: 'cleared', flows_count: 0 });
+});
+
+mcp.registerTool('create_map_local', {
+  description: 'Register a mock rule that replaces the response for matching requests. Unlike replace-body regex hacks, this is a clean URL+method match; the proxy returns the supplied body before any real backend call. Inspector returns exactly this body.',
+  inputSchema: {
+    rule_id: z.string().min(1).describe('Stable identifier. Re-using an id replaces the existing rule.'),
+    url_pattern: z.string().min(1).describe('Regex matched against the full request URL.'),
+    method: z.string().optional().describe('HTTP method (GET/POST/PATCH/...). Omit for any method.'),
+    status: z.number().int().min(100).max(599).optional().describe('Response status code. Default 200.'),
+    content_type: z.string().optional().describe('Content-Type header. Default application/json.'),
+    body: z.string().describe('Raw response body served to the client.'),
+    headers: z.record(z.string()).optional().describe('Additional response headers (merged after content-type).'),
+  },
+}, async (args) => {
+  try {
+    const result = await registerMockRule(args);
+    return ok({ status: 'registered', ...result });
+  } catch (e) { return err(`create_map_local failed: ${e.message}`); }
+});
+
+mcp.registerTool('list_rules', {
+  description: 'List currently active mock rules.',
+  inputSchema: {},
+}, async () => ok({
+  rules: Array.from(mockRules.entries()).map(([id, r]) => ({
+    rule_id: id,
+    url_pattern: r.config.url_pattern,
+    method: r.config.method || 'ANY',
+    status: r.config.status ?? 200,
+    content_type: r.config.content_type ?? 'application/json',
+  })),
+}));
+
+mcp.registerTool('remove_rule', {
+  description: 'Remove a mock rule by id.',
+  inputSchema: { rule_id: z.string().min(1) },
+}, async ({ rule_id }) => {
+  const r = mockRules.get(rule_id);
+  if (!r) return ok({ status: 'not_found', rule_id });
+  try { if (r.endpoint?.stop) await r.endpoint.stop(); } catch { /* ignore */ }
+  mockRules.delete(rule_id);
+  return ok({ status: 'removed', rule_id });
+});
+
+mcp.registerTool('clear_rules', {
+  description: 'Remove all mock rules.',
+  inputSchema: {},
+}, async () => {
+  for (const r of mockRules.values()) {
+    try { if (r.endpoint?.stop) await r.endpoint.stop(); } catch { /* ignore */ }
+  }
+  mockRules.clear();
+  return ok({ status: 'cleared' });
+});
+
+mcp.registerTool('get_flows', {
+  description: 'Return a summary list of captured flows (newest first). Supports domain / method / status filters.',
+  inputSchema: {
+    domain: z.string().optional().describe('Substring filter against hostname.'),
+    method: z.string().optional().describe('HTTP method filter, e.g. POST.'),
+    url_contains: z.string().optional().describe('Substring filter against full URL.'),
+    status_min: z.number().int().optional(),
+    status_max: z.number().int().optional(),
+    limit: z.number().int().min(1).max(200).optional().describe('Max items. Default 50.'),
+  },
+}, async ({ domain, method, url_contains, status_min, status_max, limit = 50 }) => {
+  const items = [];
+  for (let i = flowOrder.length - 1; i >= 0 && items.length < limit; i--) {
+    const f = flows.get(flowOrder[i]);
+    if (!f) continue;
+    if (domain && !(f.request?.hostname ?? '').includes(domain)) continue;
+    if (method && (f.request?.method ?? '').toUpperCase() !== method.toUpperCase()) continue;
+    if (url_contains && !(f.request?.url ?? '').includes(url_contains)) continue;
+    if (status_min != null && (f.response?.statusCode ?? -1) < status_min) continue;
+    if (status_max != null && (f.response?.statusCode ?? 999) > status_max) continue;
+    items.push({
+      id: f.id,
+      method: f.request?.method,
+      url: f.request?.url,
+      status: f.response?.statusCode,
+      size: f.response?.size ?? 0,
+      timestamp: f.timestamp,
+    });
+  }
+  return ok({ flows: items });
+});
+
+mcp.registerTool('get_flow_detail', {
+  description: 'Return full request + response detail for one flow. The response body is the body the client actually received (post-mock if a rule matched).',
+  inputSchema: {
+    flow_id: z.string().min(1),
+    full_body: z.boolean().optional().describe('Return full bodies. Default true. When false, bodies are truncated to 2000 chars.'),
+  },
+}, async ({ flow_id, full_body = true }) => {
+  const f = flows.get(flow_id);
+  if (!f) return err(`flow not found: ${flow_id}`);
+  const trim = (s) => (s == null ? null : (full_body ? s : (s.length > MAX_BODY_PREVIEW ? s.slice(0, MAX_BODY_PREVIEW) + '…[truncated]' : s)));
+  return ok({
+    id: f.id,
+    timestamp: f.timestamp,
+    request: f.request && { ...f.request, body: trim(f.request.body) },
+    response: f.response && { ...f.response, body: trim(f.response.body) },
+  });
+});
+
+mcp.registerTool('get_ca_cert_path', {
+  description: 'Return the path to the CA certificate. Trust this on the iOS Simulator (drag-drop onto the running simulator, then Settings → General → About → Certificate Trust Settings → enable).',
+  inputSchema: {},
+}, async () => ok({ ca_cert: CA_CERT, ca_dir: CA_DIR }));
+
+// ---- CLI / daemon mode ----
+//
+// Two run modes share the same internals:
+//   • stdio MCP server (default)             — for Claude Code.
+//   • `--daemon`                              — long-running, no MCP, used by the
+//                                                team `Tools/proxy/proxy-on.sh`.
+//
+// In --daemon mode we boot the proxy, apply PAC routing, trust the CA on every
+// booted simulator, then sleep until killed. Daemon teardown (SIGTERM/SIGINT)
+// undoes routing so the host network is never left mis-configured.
+
+function parseArgs(argv) {
+  const args = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--daemon') args.daemon = true;
+    else if (a === '--proxy-port') args.proxyPort = parseInt(argv[++i], 10);
+    else if (a === '--pac-port') args.pacPort = parseInt(argv[++i], 10);
+    else if (a === '--domains-file') args.domainsFile = argv[++i];
+    else if (a === '--domains') args.domainsInline = argv[++i];
+    else if (a === '--network-service') args.networkService = argv[++i];
+    else if (a === '--no-trust-ca') args.skipTrust = true;
+    else if (a === '--no-routing') args.skipRouting = true;
+    else if (a === '--help' || a === '-h') args.help = true;
+    else args._.push(a);
+  }
+  return args;
+}
+
+async function loadDomains(args) {
+  if (args.domainsInline) {
+    return args.domainsInline.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (args.domainsFile) {
+    const raw = await fs.readFile(args.domainsFile, 'utf8');
+    const data = JSON.parse(raw);
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data?.domains)) return data.domains;
+    throw new Error(`domains file ${args.domainsFile} must be a JSON array or { "domains": [...] }`);
+  }
+  return [];
+}
+
+function printHelp() {
+  process.stderr.write(`proxy-mcp — selective HTTP(S) interception for iOS Simulator testing
+
+Default (no args): runs as a stdio MCP server.
+
+Daemon mode (used by Tools/proxy/proxy-on.sh):
+  node src/server.mjs --daemon [options]
+
+Options:
+  --proxy-port <n>          Proxy port (default 8080)
+  --pac-port <n>            PAC server port (default ${DEFAULT_PAC_PORT})
+  --domains-file <path>     JSON file containing { "domains": ["*.example.com", …] }
+  --domains <list>          Comma-separated host globs (overrides --domains-file)
+  --network-service <name>  macOS network service to configure (default: auto-detect Wi-Fi)
+  --no-routing              Start proxy only; skip PAC + networksetup
+  --no-trust-ca             Skip simctl CA trust step
+  -h, --help                Show this help
+
+State lives in ${STATE_DIR}.
+`);
+}
+
+async function runDaemon(args) {
+  const domains = await loadDomains(args);
+  if (!args.skipRouting && domains.length === 0) {
+    process.stderr.write('[proxy-mcp] daemon: no domains supplied; pass --domains-file or --domains, or use --no-routing.\n');
+    process.exit(2);
+  }
+  const started = await startProxyImpl({ port: args.proxyPort });
+  process.stderr.write(`[proxy-mcp] proxy listening on :${started.port} (ca: ${started.ca_cert})\n`);
+
+  let routing = null;
+  if (!args.skipRouting) {
+    routing = await setProxyRoutingImpl({
+      domains,
+      network_service: args.networkService,
+      pac_port: args.pacPort ?? DEFAULT_PAC_PORT,
+    });
+    process.stderr.write(`[proxy-mcp] routing on for ${routing.network_service} via ${routing.pac_url}\n`);
+    process.stderr.write(`[proxy-mcp] routed domains: ${routing.domains.join(', ')}\n`);
+  }
+
+  if (!args.skipTrust) {
+    const trust = await trustCaOnSimulatorsImpl();
+    if (trust.trusted?.length) {
+      process.stderr.write(`[proxy-mcp] trusted CA on ${trust.trusted.length} simulator(s): ${trust.trusted.map((s) => s.name).join(', ')}\n`);
+    }
+    if (trust.failed?.length) {
+      process.stderr.write(`[proxy-mcp] CA trust FAILED on: ${trust.failed.map((s) => `${s.name} (${s.error})`).join('; ')}\n`);
+    }
+    if (trust.skipped) {
+      process.stderr.write(`[proxy-mcp] ${trust.skipped}\n`);
+    }
+  }
+
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    process.stderr.write(`[proxy-mcp] received ${signal}, restoring network…\n`);
+    try { await stopProxyImpl(); } catch (e) {
+      process.stderr.write(`[proxy-mcp] stop error: ${e?.message ?? e}\n`);
+    }
+    process.exit(0);
+  };
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGHUP',  () => shutdown('SIGHUP'));
+  // Keep the event loop alive.
+  setInterval(() => {}, 1 << 30);
+}
+
+// ---- bootstrap ----
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help) { printHelp(); return; }
+  if (args.daemon) { await runDaemon(args); return; }
+  const transport = new StdioServerTransport();
+  await mcp.connect(transport);
+}
+
+main().catch((e) => {
+  // Errors before transport connects shouldn't crash silently; print to stderr.
+  process.stderr.write(`[proxy-mcp] fatal: ${e?.stack || e}\n`);
+  process.exit(1);
+});

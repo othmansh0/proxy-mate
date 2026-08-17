@@ -1,0 +1,6 @@
+src/server.mjs.v0.1.bak
+test/
+.agents/
+.codex/
+.DS_Store
+*.tgz
