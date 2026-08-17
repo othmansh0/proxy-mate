@@ -8,13 +8,16 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { BlockList, isIP } from 'node:net';
 import { storeFlowBody, writeMockBody, deleteFlowBodies } from './bodies.mjs';
-import { STATE_DIR } from './config.mjs';
+import { STATE_DIR, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { atomicWriteFile } from './state.mjs';
 import { SessionStore } from './session-store.mjs';
 import { JsonlWebSocketStoreBackend, WebSocketStore, mockttpWebSocketHandlers } from './websocket-store.mjs';
 import { BreakpointManager, createMockttpBreakpointCallbacks } from './breakpoints.mjs';
 import { redactBody, redactHeaders, redactUrl } from './redaction.mjs';
 import { PluginStore } from './plugin-store.mjs';
+import {
+  normalizeMatchUrl, matchUrlPath, queryMatches, ruleUrlMatchers, validateMatchQuery,
+} from './url-match.mjs';
 
 const CA_DIR = path.join(STATE_DIR, 'ca');
 const CA_KEY = path.join(CA_DIR, 'key.pem');
@@ -624,11 +627,24 @@ export class ProxyEngine {
   async #registerRuleUnlocked(rule) {
     this.#assertRunning();
     if (rule?.type === 'plugin_transform') {
+      // Every registration path — tool call, startup replay, rule import —
+      // funnels through here, so the live grant is enforced once at the choke
+      // point instead of per caller. Stage validity is checked before the
+      // grant: a websocket_offline plugin is never a valid live rule stage,
+      // grant or no grant, so that diagnosis must win over the grant error.
+      // Only a plugin that could otherwise run live (request/response) is
+      // gated behind PROXY_MCP_ENABLE_TRANSFORM_PLUGINS.
       const plugin = await this.pluginStore.get(rule.plugin_id);
       if (!plugin) throw codedEngineError('PLUGIN_NOT_FOUND', `Plugin was not found: ${rule.plugin_id}`);
       if (!plugin.enabled) throw codedEngineError('PLUGIN_DISABLED', `Plugin is disabled: ${rule.plugin_id}`);
       if (!['request', 'response'].includes(plugin.stage)) {
         throw codedEngineError('PLUGIN_STAGE_MISMATCH', 'Live plugin rules require a request or response plugin.');
+      }
+      if (!liveTransformGrantEnabled()) {
+        throw codedEngineError(
+          'TRANSFORM_PLUGINS_NOT_ENABLED',
+          `Live transform plugin rules require ${TRANSFORM_PLUGIN_GRANT_ENV}=1 on the server.`,
+        );
       }
       if (rule.plugin_stage != null && rule.plugin_stage !== plugin.stage) {
         throw codedEngineError('PLUGIN_STAGE_MISMATCH', `Plugin ${plugin.id} is registered for ${plugin.stage}, not ${rule.plugin_stage}.`);
@@ -914,6 +930,14 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
   if (!['map_local', 'map_remote', 'blacklist', 'network_condition', 'breakpoint', 'plugin_transform'].includes(type)) {
     throw new Error(`unsupported rule type: ${type}`);
   }
+  // `url` is the friendly surface, and the rule-creating tools convert it up
+  // front — but an update_rule patch, an imported rule and a replayed rule all
+  // arrive here unconverted, where url_pattern and match_query are the only
+  // fields read. Converting at the choke point means a patched url retargets
+  // the rule instead of being silently dropped.
+  if (input.url != null && input.url_pattern == null) {
+    input = { ...input, ...ruleUrlMatchers(input.url, input) };
+  }
   compileSafeRegex(input.url_pattern, 'url_pattern');
   const method = String(input.method ?? 'ANY').toUpperCase();
   if (!['ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(method)) {
@@ -956,7 +980,7 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
   }
   validateHeaders(input.headers, 'headers');
   validateHeaders(input.match_headers, 'match_headers');
-  validatePlainObject(input.match_query, 'match_query');
+  validateMatchQuery(input.match_query);
   validatePlainObject(input.match_json_body_including, 'match_json_body_including');
   if (input.match_body_regex) compileSafeRegex(input.match_body_regex, 'match_body_regex');
 
@@ -1070,6 +1094,13 @@ function mergeRulePatch(current, patch, ruleId) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('rule patch must be an object');
   const merged = { ...cloneRuleConfig(current), ...structuredClone(patch), rule_id: ruleId };
   if (patch.rule_id && patch.rule_id !== ruleId) throw new Error('rule_id cannot be changed');
+  // A patched url retargets the rule, so the pattern and query derived from the
+  // old one must not survive it; an explicit url_pattern or match_query in the
+  // same patch still wins, as everywhere else.
+  if (patch.url != null && patch.url_pattern == null) {
+    delete merged.url_pattern;
+    if (patch.match_query == null) delete merged.match_query;
+  }
   if ('body' in patch || 'body_inline' in patch) merged.body_file = null;
   if ('directory' in patch || 'body_directory' in patch) merged.body_file = null;
   if ('body_file' in patch) merged.directory = null;
@@ -1654,16 +1685,28 @@ function evaluateRule(rule, request) {
   criteria.push(matchCriterion('enabled', rule.enabled, true));
   const methodMatched = rule.method === 'ANY' || rule.method === request.method;
   criteria.push(matchCriterion('method', methodMatched, rule.method, request.method));
+  // Mockttp tests url_pattern against the normalized URL (query and fragment
+  // cut, default port dropped), and a method-specific rule compiles to a
+  // RegexPathMatcher that also tests the path alone, while method 'ANY' goes
+  // through withUrlMatching and tests the full URL only. The dry run mirrors
+  // both, or it reports matches the live proxy never makes and misses ones it
+  // does.
+  const matchableUrl = normalizeMatchUrl(request.url);
   let urlMatched = false;
-  try { urlMatched = compileSafeRegex(rule.url_pattern, 'url_pattern').test(request.url); } catch { /* normalized rules should compile */ }
-  criteria.push(matchCriterion('url_pattern', urlMatched, rule.url_pattern, request.url));
+  try {
+    const pattern = compileSafeRegex(rule.url_pattern, 'url_pattern');
+    urlMatched = pattern.test(matchableUrl)
+      || (rule.method !== 'ANY' && pattern.test(matchUrlPath(matchableUrl)));
+  } catch { /* normalized rules should compile */ }
+  criteria.push(matchCriterion('url_pattern', urlMatched, rule.url_pattern, matchableUrl));
   if (rule.match_headers) {
     const matched = Object.entries(rule.match_headers).every(([name, expected]) => valuesEqual(request.headers[name.toLowerCase()], expected));
     criteria.push(matchCriterion('headers', matched, rule.match_headers));
   }
   if (rule.match_query) {
-    const matched = Object.entries(rule.match_query).every(([name, expected]) => valuesEqual(request.query[name], expected));
-    criteria.push(matchCriterion('query', matched, rule.match_query));
+    // Query matching is lodash isMatch inside mockttp, not the loose header
+    // comparison: url-match.mjs owns that parity so the two cannot drift.
+    criteria.push(matchCriterion('query', queryMatches(request.query, rule.match_query), rule.match_query, request.query));
   }
   if (rule.match_json_body_including) {
     criteria.push(matchCriterion('json_body_including', jsonIncludes(request.jsonBody, rule.match_json_body_including), rule.match_json_body_including));

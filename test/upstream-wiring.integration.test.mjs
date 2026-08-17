@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
@@ -28,7 +29,7 @@ function requestViaProxy(proxyPort, targetUrl) {
       port: proxyPort,
       method: 'GET',
       path: targetUrl,
-      headers: { connection: 'close' },
+      headers: { connection: 'close', host: new URL(targetUrl).host },
     }, (response) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
@@ -42,29 +43,73 @@ function requestViaProxy(proxyPort, targetUrl) {
   });
 }
 
+// Mockttp routes every upstream-proxied request through an HttpsProxyAgent, so
+// even plain http:// targets are CONNECT-tunnelled. The fake upstream therefore
+// has to terminate CONNECT and bridge the tunnel to a real origin server.
 test('unmatched and enabled pass-through traffic use the authenticated upstream without exposing credentials', async (t) => {
   const expectedAuthorization = `Basic ${Buffer.from('alice:very-secret').toString('base64')}`;
   const observed = [];
-  const upstream = http.createServer((request, response) => {
-    observed.push({
+  const originRequests = [];
+  const sockets = new Set();
+
+  const track = (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  };
+
+  const origin = http.createServer((request, response) => {
+    originRequests.push({
       url: request.url,
+      host: request.headers.host,
+      marker: request.headers['x-rule-marker'] ?? null,
+    });
+    response.writeHead(200, { 'content-type': 'text/plain', connection: 'close' });
+    response.end(`via-upstream:${request.url}`);
+  });
+  origin.on('connection', track);
+  const originPort = await listen(origin);
+
+  const upstream = http.createServer((request, response) => {
+    // Nothing should reach the upstream as a plain proxied request.
+    response.writeHead(400, { 'content-type': 'text/plain', connection: 'close' });
+    response.end('unexpected non-tunnelled request');
+  });
+  upstream.on('connection', track);
+  upstream.on('connect', (request, clientSocket, head) => {
+    track(clientSocket);
+    observed.push({
+      authority: request.url,
       authorization: request.headers['proxy-authorization'] ?? null,
     });
+    clientSocket.on('error', () => {});
     if (request.headers['proxy-authorization'] !== expectedAuthorization) {
-      response.writeHead(407, { 'proxy-authenticate': 'Basic realm="test"' });
-      response.end('proxy authentication required');
+      clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="test"\r\n\r\n');
       return;
     }
-    response.writeHead(200, { 'content-type': 'text/plain' });
-    response.end(`via-upstream:${request.url}`);
+    const tunnel = net.connect(originPort, '127.0.0.1', () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head?.length) tunnel.write(head);
+      clientSocket.pipe(tunnel);
+      tunnel.pipe(clientSocket);
+    });
+    track(tunnel);
+    tunnel.on('error', () => clientSocket.destroy());
   });
   const upstreamPort = await listen(upstream);
 
   const engine = new ProxyEngine({ sessionId: `upstream-wiring-${Date.now()}` });
   const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
+  // Sockets and listeners are torn down in a finally so a rejected engine.stop()
+  // cannot strand them on the event loop and hang the whole runner.
   t.after(async () => {
-    await engine.stop();
-    await close(upstream);
+    try {
+      await engine.stop();
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await close(upstream);
+      await close(origin);
+    }
   });
 
   const credentialedUrl = `http://alice:very-secret@127.0.0.1:${upstreamPort}`;
@@ -79,10 +124,11 @@ test('unmatched and enabled pass-through traffic use the authenticated upstream 
   assert.equal(JSON.stringify(started).includes('alice'), false);
   assert.equal(JSON.stringify(started).includes('very-secret'), false);
 
-  const unmatchedTarget = 'http://origin.invalid/unmatched?case=default';
+  const unmatchedPath = '/unmatched?case=default';
+  const unmatchedTarget = `http://origin.invalid${unmatchedPath}`;
   const unmatched = await requestViaProxy(engine.port, unmatchedTarget);
   assert.equal(unmatched.status, 200);
-  assert.equal(unmatched.body, `via-upstream:${unmatchedTarget}`);
+  assert.equal(unmatched.body, `via-upstream:${unmatchedPath}`);
 
   const status = await tools.get_proxy_status();
   assert.equal(status.upstream_proxy.proxyUrl, `http://127.0.0.1:${upstreamPort}/`);
@@ -91,20 +137,40 @@ test('unmatched and enabled pass-through traffic use the authenticated upstream 
   assert.equal(JSON.stringify(status.upstream_proxy).includes('very-secret'), false);
   assert.equal(status.upstream_proxy.proxyUrl.includes('@'), false);
 
-  const ruledTarget = 'http://origin.invalid/enabled-rule?case=passthrough';
+  // The rule URL carries a query string on purpose: since 0.7.0 the first '?'
+  // in `url` is always the query separator, split into `match_query` rather
+  // than matched against mockttp's query-stripped url_pattern. This is a live
+  // regression guard that the split still lets the rule fire end to end.
+  const ruledPath = '/enabled-rule?case=passthrough';
+  const ruledTarget = `http://origin.invalid${ruledPath}`;
   const registered = await tools.create_network_condition({
     rule_id: 'upstream-pass-through',
     url: ruledTarget,
     delay_ms: 1,
+    request_transform: { update_headers: { 'x-rule-marker': 'network-condition' } },
   });
   assert.equal(registered.rule.enabled, true);
   assert.equal(registered.rule.type, 'network_condition');
 
   const ruled = await requestViaProxy(engine.port, ruledTarget);
   assert.equal(ruled.status, 200);
-  assert.equal(ruled.body, `via-upstream:${ruledTarget}`);
-  assert.deepEqual(observed.map(({ url }) => url), [unmatchedTarget, ruledTarget]);
+  assert.equal(ruled.body, `via-upstream:${ruledPath}`);
+
+  // Both the unmatched pass-through and the rule-matched pass-through must have
+  // been tunnelled through the configured upstream, with credentials attached.
+  assert.deepEqual(observed.map(({ authority }) => authority), [
+    'origin.invalid:80',
+    'origin.invalid:80',
+  ]);
   assert(observed.every(({ authorization }) => authorization === expectedAuthorization));
+
+  // The tunnelled requests reached the real origin addressed to the original
+  // host, and the marker proves the second one was served by the rule rather
+  // than falling back to the unmatched pass-through.
+  assert.deepEqual(originRequests, [
+    { url: unmatchedPath, host: 'origin.invalid', marker: null },
+    { url: ruledPath, host: 'origin.invalid', marker: 'network-condition' },
+  ]);
 });
 
 test('makeTools exposes adapter and extended capability surfaces without starting sockets', async () => {
