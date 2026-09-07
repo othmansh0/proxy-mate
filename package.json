@@ -42,12 +42,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "async-exit-hook": "^2.0.1",
-    "mockttp": "^4.6.0",
+    "mockttp": "^4.6.2",
     "quickjs-emscripten": "0.32.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^12.6.2"
+    "better-sqlite3": "^13.0.3"
   },
   "overrides": {
     "@hono/node-server": "1.19.15",
