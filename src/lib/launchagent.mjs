@@ -10,8 +10,11 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { STATE_DIR } from './config.mjs';
+import { readHandshake, atomicWriteFile } from './state.mjs';
+import { probeDaemon } from './control.mjs';
 
 const execFileP = promisify(execFile);
+const LAUNCHCTL_OPTIONS = { timeout: 30_000, maxBuffer: 1024 * 1024 };
 
 const LABEL = 'dev.proxy-mcp.daemon';
 const LEGACY_LABEL = 'com.almosafer.proxy-mcp';
@@ -22,8 +25,14 @@ const LOG_DIR = path.join(STATE_DIR, 'logs');
 
 export { LABEL, PLIST_PATH };
 
-function plistXml({ programArgs }) {
+export function plistXml({ programArgs, environment = {} }) {
   const argsXml = programArgs.map((a) => `    <string>${escapeXml(a)}</string>`).join('\n');
+  const env = {
+    PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    ...environment,
+    PROXY_MCP_HOME: STATE_DIR,
+  };
+  const envXml = Object.entries(env).map(([key, value]) => `    <key>${escapeXml(key)}</key><string>${escapeXml(value)}</string>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -37,22 +46,22 @@ ${argsXml}
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key><false/>
-    <key>Crashed</key><true/>
-  </dict>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(path.dirname(path.dirname(programArgs[1])))}</string>
   <key>ExitTimeOut</key>
   <integer>20</integer>
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>${path.join(LOG_DIR, 'daemon.out.log')}</string>
+  <string>${escapeXml(path.join(LOG_DIR, 'daemon.out.log'))}</string>
   <key>StandardErrorPath</key>
-  <string>${path.join(LOG_DIR, 'daemon.err.log')}</string>
+  <string>${escapeXml(path.join(LOG_DIR, 'daemon.err.log'))}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
-    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+${envXml}
   </dict>
 </dict>
 </plist>
@@ -71,37 +80,60 @@ export async function installLaunchAgent({ nodeBin, serverPath, domainsFile, pro
   await fs.mkdir(PLIST_DIR, { recursive: true });
   await fs.mkdir(LOG_DIR, { recursive: true });
   const programArgs = [
-    nodeBin || process.execPath,
-    serverPath,
+    await stableNodePath(nodeBin || process.execPath),
+    path.resolve(serverPath),
     '--daemon',
   ];
   if (proxyPort) programArgs.push('--proxy-port', String(proxyPort));
   if (pacPort)   programArgs.push('--pac-port', String(pacPort));
   if (controlPort) programArgs.push('--control-port', String(controlPort));
-  if (domainsFile) programArgs.push('--domains-file', domainsFile);
+  if (domainsFile) programArgs.push('--domains-file', path.resolve(domainsFile));
   for (const a of extraArgs) programArgs.push(a);
 
-  await fs.writeFile(PLIST_PATH, plistXml({ programArgs }), { mode: 0o600 });
+  const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PROXY_MCP_') || key === 'DEVELOPER_DIR'));
+  await atomicWriteFile(PLIST_PATH, plistXml({ programArgs, environment }), 0o600);
+  const previousHandshake = await readHandshake();
 
   // Upgrade older development installs that used an organization-specific
   // label. This only runs when the user explicitly invokes `install`.
   if (existsSync(LEGACY_PLIST_PATH)) {
-    try { await execFileP('launchctl', ['bootout', `gui/${process.getuid()}`, LEGACY_PLIST_PATH]); } catch { /* not loaded */ }
+    try { await execFileP('launchctl', ['bootout', `gui/${process.getuid()}`, LEGACY_PLIST_PATH], LAUNCHCTL_OPTIONS); } catch { /* not loaded */ }
     try { await fs.unlink(LEGACY_PLIST_PATH); } catch { /* best effort */ }
   }
 
   // bootout first (idempotent) so we re-load fresh args.
-  try { await execFileP('launchctl', ['bootout', `gui/${process.getuid()}`, PLIST_PATH]); }
+  try { await execFileP('launchctl', ['bootout', `gui/${process.getuid()}`, PLIST_PATH], LAUNCHCTL_OPTIONS); }
   catch { /* may not be loaded */ }
-  await execFileP('launchctl', ['bootstrap', `gui/${process.getuid()}`, PLIST_PATH]);
-  return { plistPath: PLIST_PATH, label: LABEL, programArgs };
+  await execFileP('launchctl', ['bootstrap', `gui/${process.getuid()}`, PLIST_PATH], LAUNCHCTL_OPTIONS);
+  const ready = await waitForDaemonReady({ previousToken: previousHandshake?.token });
+  return { plistPath: PLIST_PATH, label: LABEL, programArgs, ready };
+}
+
+export async function stableNodePath(executable) {
+  const real = await fs.realpath(executable);
+  for (const candidate of ['/opt/homebrew/bin/node', '/usr/local/bin/node']) {
+    if (await fs.realpath(candidate).catch(() => null) === real) return candidate;
+  }
+  return path.resolve(executable);
+}
+
+export async function waitForDaemonReady({ previousToken, timeoutMs = 90_000,
+  read = readHandshake, probe = probeDaemon,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const handshake = await read();
+    if (handshake && handshake.token !== previousToken && await probe(handshake.controlUrl, handshake.token)) return true;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(250, Math.max(1, deadline - Date.now()))));
+  }
+  throw Object.assign(new Error(`LaunchAgent was loaded but did not become ready. Check ${path.join(LOG_DIR, 'daemon.err.log')} and run proxy-mcp status.`), { code: 'DAEMON_STARTUP_TIMEOUT' });
 }
 
 export async function uninstallLaunchAgent() {
   const removed = [];
   for (const plistPath of [PLIST_PATH, LEGACY_PLIST_PATH]) {
     if (!existsSync(plistPath)) continue;
-    try { await execFileP('launchctl', ['bootout', `gui/${process.getuid()}`, plistPath]); } catch { /* may not be loaded */ }
+    try { await execFileP('launchctl', ['bootout', `gui/${process.getuid()}`, plistPath], LAUNCHCTL_OPTIONS); } catch { /* may not be loaded */ }
     try { await fs.unlink(plistPath); removed.push(plistPath); } catch { /* ignore */ }
   }
   return removed.length ? { removed: true, plistPaths: removed } : { removed: false, reason: 'not installed' };
@@ -112,7 +144,7 @@ export async function launchAgentStatus() {
   const activeLabel = activePath === LEGACY_PLIST_PATH ? LEGACY_LABEL : LABEL;
   if (!activePath) return { installed: false };
   try {
-    const { stdout } = await execFileP('launchctl', ['print', `gui/${process.getuid()}/${activeLabel}`]);
+    const { stdout } = await execFileP('launchctl', ['print', `gui/${process.getuid()}/${activeLabel}`], LAUNCHCTL_OPTIONS);
     return { installed: true, plistPath: activePath, label: activeLabel, legacy: activeLabel === LEGACY_LABEL, launchctl_state: stdout.slice(0, 400) };
   } catch (e) {
     return { installed: true, plistPath: activePath, label: activeLabel, legacy: activeLabel === LEGACY_LABEL, launchctl_state: `not loaded (${e?.message ?? e})` };

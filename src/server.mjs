@@ -15,9 +15,10 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import asyncExitHook from 'async-exit-hook';
 import { promises as fs } from 'node:fs';
 import url from 'node:url';
+import path from 'node:path';
+import { acquireRuntime, reconcileRuntime, installShutdownHandlers } from './lib/runtime.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
@@ -26,7 +27,7 @@ import {
   readState, isStateStale, defensiveNetworkResetAllServices,
   writePidFile, readPidFile, clearPidFile, clearState, patchState, readHandshake,
 } from './lib/state.mjs';
-import { ControlServer, callDaemon, probeDaemon, DEFAULT_CONTROL_PORT } from './lib/control.mjs';
+import { ControlServer, callDaemon, probeDaemon, DEFAULT_CONTROL_PORT, SERIAL_TOOL_NAMES } from './lib/control.mjs';
 import { doctorSweep, PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT } from './lib/doctor.mjs';
 import { installLaunchAgent, uninstallLaunchAgent, launchAgentStatus } from './lib/launchagent.mjs';
 import { applyPacRouting, clearPacRouting } from './lib/pac.mjs';
@@ -52,41 +53,59 @@ const STATUS_MUTATION_TOOLS = new Set([
 
 // ---- run modes ----
 async function runStdio() {
-  // On every Claude session start, first reconcile any half-configured network
-  // state from a prior dirty exit (Issue #13 partial fix).
-  if (await isStateStale()) {
-    try {
-      const reset = await defensiveNetworkResetAllServices();
-      if (reset.failed?.length) throw new Error(reset.failed.map((item) => item.error).join('; '));
-      await clearState();
+  let localReady = null, localTools = null, releaseRuntime = null;
+  let daemonSeen = false, closing = false;
+  let stopResourceMonitor = () => {};
+  let localQueue = Promise.resolve();
+  installShutdownHandlers(async () => {
+    closing = true;
+    stopResourceMonitor();
+    await localReady?.catch(() => {});
+    await localQueue;
+    if (localTools) {
+      await localTools.stop_operator_ui();
+      await localTools.stop_proxy();
     }
-    catch { /* best effort */ }
-  }
-
-  // Detect a running daemon and use client mode if present (Phase 2).
-  const handshake = await readHandshake();
-  let dispatch;
-  if (handshake && await probeDaemon(handshake.controlUrl, handshake.token)) {
-    process.stderr.write(`[proxy-mcp] connecting to daemon at ${handshake.controlUrl} (PID file: ${await readPidFile()})\n`);
-    dispatch = async (tool, args, context = {}) => callDaemon({ ...handshake, tool, args, signal: context.signal });
-  } else {
-    // Fallback: in-process, like v0.1. Slimmer feature surface — no sim
-    // watcher, no daemon-shared state across MCP sessions.
-    const engine = new ProxyEngine();
-    const pacServer = new PacServer();
-    const tools = makeTools({ engine, pacServer, mode: 'in-process' });
-    dispatch = async (tool, args, context = {}) => {
-      const fn = tools[tool];
-      if (typeof fn !== 'function') throw new Error(`unknown tool: ${tool}`);
-      return await fn(args ?? {}, context);
+    if (releaseRuntime) await releaseRuntime();
+  }, { stdin: true });
+  const dispatch = async (tool, args, context = {}) => {
+    if (closing) throw new Error('proxy-mcp is shutting down.');
+    // Resolve the handshake for EVERY call: launchd restarts rotate the token
+    // and can change the port. Never retry a mutation after an ambiguous error.
+    if (!localReady) {
+      const handshake = await readHandshake();
+      if (handshake && await probeDaemon(handshake.controlUrl, handshake.token)) {
+        daemonSeen = true;
+        return callDaemon({ ...handshake, tool, args, signal: context.signal });
+      }
+      if (daemonSeen || ((await readState())?.pid && !await isStateStale())) {
+        throw Object.assign(new Error('The daemon is restarting or unavailable. Retry this call; the client will reconnect automatically.'), {
+          code: 'DAEMON_UNAVAILABLE', retryable: true,
+        });
+      }
+      // Claim state lazily: initializing/listing MCP tools must never change
+      // network settings or create a competing proxy.
+      if (!localReady) localReady = (async () => {
+        releaseRuntime = await acquireRuntime();
+        await reconcileRuntime();
+        localTools = makeTools({ engine: new ProxyEngine(), pacServer: new PacServer(), mode: 'in-process' });
+      })();
+    }
+    try { await localReady; }
+    catch (error) {
+      localReady = null;
+      if (releaseRuntime) { await releaseRuntime(); releaseRuntime = null; }
+      throw error;
+    }
+    const invoke = () => {
+      if (closing || context.signal?.aborted) throw Object.assign(new Error('Request cancelled.'), { code: 'REQUEST_CANCELLED' });
+      if (!Object.hasOwn(localTools, tool)) throw new Error(`unknown tool: ${tool}`);
+      return localTools[tool](args ?? {}, context);
     };
-    asyncExitHook(async (done) => {
-      try { await tools.stop_operator_ui(); } catch { /* ignore */ }
-      try { await tools.stop_proxy(); } catch { /* ignore */ }
-      done();
-    });
-    process.stderr.write('[proxy-mcp] no daemon detected — running in-process. Run `proxy-mcp install` for a persistent zero-config daemon.\n');
-  }
+    const operation = SERIAL_TOOL_NAMES.has(tool) ? localQueue.then(invoke) : Promise.resolve().then(invoke);
+    if (SERIAL_TOOL_NAMES.has(tool)) localQueue = operation.catch(() => {});
+    return operation;
+  };
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -105,8 +124,7 @@ async function runStdio() {
   registerMcpPrompts(mcp);
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
-  const stopResourceMonitor = startResourceSubscriptionMonitor(dispatch, resourceSubscriptions);
-  asyncExitHook((done) => { stopResourceMonitor(); done(); });
+  stopResourceMonitor = startResourceSubscriptionMonitor(dispatch, resourceSubscriptions);
 }
 
 function startResourceSubscriptionMonitor(dispatch, subscriptions, intervalMs = 750) {
@@ -152,16 +170,9 @@ function resourceFlowId(uri) {
 }
 
 async function runDaemon(args) {
-  // Reconcile any prior dirty state before binding ports.
-  if (await isStateStale()) {
-    process.stderr.write('[proxy-mcp] daemon: stale state.json found, reconciling network state…\n');
-    try {
-      const reset = await defensiveNetworkResetAllServices();
-      if (reset.failed?.length) throw new Error(reset.failed.map((item) => item.error).join('; '));
-      await clearState();
-    }
-    catch (e) { process.stderr.write(`[proxy-mcp] daemon: reconcile failed (ignored): ${e?.message}\n`); }
-  }
+  const releaseRuntime = await acquireRuntime();
+  try { await reconcileRuntime(); }
+  catch (error) { await releaseRuntime(); throw error; }
 
   const engine = new ProxyEngine();
   const pacServer = new PacServer();
@@ -178,6 +189,19 @@ async function runDaemon(args) {
   }
 
   let ctrl = null;
+  let finishStartup;
+  const startupSettled = new Promise((resolve) => { finishStartup = resolve; });
+  const cleanup = async () => {
+    await startupSettled;
+    // Cancel control work before draining capture or restoring routing.
+    await ctrl?.stop();
+    await tools.stop_operator_ui();
+    const stopped = await tools.stop_proxy();
+    await clearPidFile();
+    if (!stopped.routing_cleanup_error) await clearState();
+    await releaseRuntime();
+  };
+  const shutdown = installShutdownHandlers(cleanup);
   try {
   if ((args.caKeyPath == null) !== (args.caCertPath == null)) {
     throw new Error('--ca-key and --ca-cert must be provided together');
@@ -224,14 +248,6 @@ async function runDaemon(args) {
     }
   }
 
-  // Start the control plane so MCP clients can forward tool calls to us.
-  ctrl = new ControlServer({ port: controlPort, tools });
-  await ctrl.start();
-  process.stderr.write(`[proxy-mcp] control plane listening on :${ctrl.port}\n`);
-
-  await writePidFile(process.pid);
-  await patchState({ control_port: ctrl.port, pid: process.pid });
-
   // Replay any previously persisted rules.
   try {
     const persisted = await loadRules();
@@ -254,37 +270,20 @@ async function runDaemon(args) {
   }
 
   // Start the sim watcher in the daemon (Phase 3.4).
-  await tools.start_sim_watcher({ interval: 5000 });
+  if (!args.skipTrust) await tools.start_sim_watcher({ interval: 5000 });
+  // Publish readiness only after routing, trust and persisted rules are ready.
+  ctrl = new ControlServer({ port: controlPort, tools });
+  await ctrl.start();
+  process.stderr.write(`[proxy-mcp] control plane listening on :${ctrl.port}\n`);
+  await writePidFile(process.pid);
+  await patchState({ control_port: ctrl.port, pid: process.pid });
   } catch (error) {
     process.stderr.write(`[proxy-mcp] daemon startup failed; rolling back: ${error?.message ?? error}\n`);
-    try { await tools.stop_sim_watcher(); } catch { /* best effort */ }
-    let routingRestored = true;
-    try { await clearPacRouting({ pacServer }); } catch { routingRestored = false; }
-    try { await ctrl?.stop(); } catch { /* best effort */ }
-    try { await engine.stop(); } catch { /* best effort */ }
-    try { await clearPidFile(); } catch { /* best effort */ }
-    if (routingRestored) { try { await clearState(); } catch { /* best effort */ } }
-    throw error;
+    finishStartup();
+    await shutdown(1);
+    return;
   }
-
-  // Graceful shutdown — async-exit-hook gives us real awaits before launchd
-  // escalates to SIGKILL (plist ExitTimeOut=20).
-  asyncExitHook(async (done) => {
-    process.stderr.write('[proxy-mcp] shutting down, restoring network…\n');
-    try { await tools.stop_operator_ui(); } catch { /* ignore */ }
-    try { await tools.stop_sim_watcher(); } catch { /* ignore */ }
-    let routingRestored = true;
-    try { await clearPacRouting({ pacServer }); }
-    catch (error) {
-      routingRestored = false;
-      process.stderr.write(`[proxy-mcp] failed to restore PAC state; retaining recovery state: ${error?.message ?? error}\n`);
-    }
-    try { await ctrl.stop(); } catch { /* ignore */ }
-    try { await engine.stop(); } catch { /* ignore */ }
-    try { await clearPidFile(); } catch { /* ignore */ }
-    if (routingRestored) { try { await clearState(); } catch { /* ignore */ } }
-    done();
-  });
+  finishStartup();
 
   // Keep the loop alive.
   setInterval(() => {}, 1 << 30);
@@ -293,29 +292,35 @@ async function runDaemon(args) {
 // ---- CLI ----
 function parseArgs(argv) {
   const args = { _: [] };
+  const value = (index, flag) => {
+    const entry = argv[index];
+    if (!entry || entry.startsWith('--')) throw new Error(`${flag} requires a value`);
+    return entry;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--daemon') args.daemon = true;
-    else if (a === '--proxy-port')   args.proxyPort = parseInt(argv[++i], 10);
-    else if (a === '--pac-port')     args.pacPort = parseInt(argv[++i], 10);
-    else if (a === '--control-port') args.controlPort = parseInt(argv[++i], 10);
-    else if (a === '--domains-file') args.domainsFile = argv[++i];
-    else if (a === '--domains')      args.domainsInline = argv[++i];
-    else if (a === '--network-service') args.networkService = argv[++i];
+    else if (a === '--proxy-port')   args.proxyPort = Number(value(++i, a));
+    else if (a === '--pac-port')     args.pacPort = Number(value(++i, a));
+    else if (a === '--control-port') args.controlPort = Number(value(++i, a));
+    else if (a === '--domains-file') args.domainsFile = path.resolve(value(++i, a));
+    else if (a === '--domains')      args.domainsInline = value(++i, a);
+    else if (a === '--network-service') args.networkService = value(++i, a);
     else if (a === '--no-trust-ca')  args.skipTrust = true;
     else if (a === '--no-host-trust') args.skipHostTrust = true;
     else if (a === '--keep-ca') args.keepCa = true;
     else if (a === '--no-routing')   args.skipRouting = true;
     else if (a === '--allow-remote-proxy') args.allowRemoteProxy = true;
-    else if (a === '--remote-allowlist') args.remoteAllowlist = (argv[++i] ?? '').split(',').map(s => s.trim()).filter(Boolean);
-    else if (a === '--remote-access-ttl') args.remoteAccessTtlSeconds = parseInt(argv[++i], 10);
-    else if (a === '--capture-body-mode') args.captureBodyMode = argv[++i];
+    else if (a === '--remote-allowlist') args.remoteAllowlist = value(++i, a).split(',').map(s => s.trim()).filter(Boolean);
+    else if (a === '--remote-access-ttl') args.remoteAccessTtlSeconds = Number(value(++i, a));
+    else if (a === '--capture-body-mode') args.captureBodyMode = value(++i, a);
     else if (a === '--enable-socks') args.enableSocks = true;
-    else if (a === '--ca-key') args.caKeyPath = argv[++i];
-    else if (a === '--ca-cert') args.caCertPath = argv[++i];
-    else if (a === '--tls-passthrough') args.tlsPassthrough = (argv[++i] ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    else if (a === '--ca-key') args.caKeyPath = path.resolve(value(++i, a));
+    else if (a === '--ca-cert') args.caCertPath = path.resolve(value(++i, a));
+    else if (a === '--tls-passthrough') args.tlsPassthrough = value(++i, a).split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--help' || a === '-h') args.help = true;
-    else args._.push(a);
+    else if (['install', 'uninstall', 'doctor', 'status'].includes(a) && !args._.length) args._.push(a);
+    else throw new Error(`Unknown argument: ${a}. Use --help for supported commands.`);
   }
   return args;
 }
@@ -341,6 +346,7 @@ async function loadDomainsConfig(args) {
 }
 
 function validateCliArgs(args) {
+  if (args.daemon && args._.length) throw new Error('--daemon cannot be combined with a subcommand.');
   for (const [name, value] of [
     ['proxy-port', args.proxyPort], ['pac-port', args.pacPort], ['control-port', args.controlPort],
   ]) {

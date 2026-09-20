@@ -11,11 +11,12 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { patchState, readState } from './state.mjs';
+import { patchState, readState, isStateStale } from './state.mjs';
 import { STATE_DIR } from './config.mjs';
 
 const execFileP = promisify(execFile);
 const NETWORKSETUP = '/usr/sbin/networksetup';
+const COMMAND_OPTIONS = { timeout: 5_000, maxBuffer: 1024 * 1024 };
 
 const PAC_FILE = path.join(STATE_DIR, 'proxy.pac');
 
@@ -53,7 +54,7 @@ export class PacServer {
       await new Promise((resolve, reject) => {
         const srv = http.createServer((req, res) => {
           if (req.url === '/proxy.pac' || req.url === '/') {
-            res.writeHead(200, { 'content-type': 'application/x-ns-proxy-autoconfig' });
+            res.writeHead(200, { 'content-type': 'application/x-ns-proxy-autoconfig', 'cache-control': 'no-store' });
             res.end(this.body);
           } else {
             res.writeHead(404); res.end();
@@ -62,7 +63,7 @@ export class PacServer {
         srv.once('error', reject);
         srv.listen(port, '127.0.0.1', () => {
           this.server = srv;
-          this.port = port;
+          this.port = srv.address().port;
           resolve();
         });
       });
@@ -87,7 +88,9 @@ export class PacServer {
 
   async stop() {
     if (!this.server) return;
-    await new Promise((resolve) => this.server.close(() => resolve()));
+    const closed = new Promise((resolve) => this.server.close(() => resolve()));
+    this.server.closeAllConnections();
+    await closed;
     this.server = null;
     this.port = null;
   }
@@ -117,7 +120,7 @@ async function fetchExistingPac(port) {
 }
 
 export async function listEnabledNetworkServices() {
-  const { stdout } = await execFileP(NETWORKSETUP, ['-listallnetworkservices']);
+  const { stdout } = await execFileP(NETWORKSETUP, ['-listallnetworkservices'], COMMAND_OPTIONS);
   return stdout
     .split('\n')
     .slice(1)
@@ -127,7 +130,10 @@ export async function listEnabledNetworkServices() {
 
 export async function pickActiveNetworkService(preferred) {
   const services = await listEnabledNetworkServices();
-  if (preferred && services.includes(preferred)) return preferred;
+  if (preferred) {
+    if (services.includes(preferred)) return preferred;
+    throw Object.assign(new Error(`Network service is missing or disabled: ${preferred}`), { code: 'NETWORK_SERVICE_UNAVAILABLE' });
+  }
   if (services.includes('Wi-Fi')) return 'Wi-Fi';
   const eth = services.find((s) => /ethernet/i.test(s));
   if (eth) return eth;
@@ -135,14 +141,14 @@ export async function pickActiveNetworkService(preferred) {
   return services[0];
 }
 
-export async function setAutoProxyOn(networkService, pacUrl) {
-  await execFileP(NETWORKSETUP, ['-setautoproxyurl', networkService, pacUrl]);
-  await execFileP(NETWORKSETUP, ['-setautoproxystate', networkService, 'on']);
+export async function setAutoProxyOn(networkService, pacUrl, run = execFileP) {
+  await run(NETWORKSETUP, ['-setautoproxyurl', networkService, pacUrl], COMMAND_OPTIONS);
+  await run(NETWORKSETUP, ['-setautoproxystate', networkService, 'on'], COMMAND_OPTIONS);
 }
 
-export async function getAutoProxyState(networkService) {
+export async function getAutoProxyState(networkService, run = execFileP) {
   try {
-    const { stdout } = await execFileP(NETWORKSETUP, ['-getautoproxyurl', networkService]);
+    const { stdout } = await run(NETWORKSETUP, ['-getautoproxyurl', networkService], COMMAND_OPTIONS);
     const url = stdout.match(/^URL:\s*(.*)$/mi)?.[1]?.trim() ?? '';
     const enabled = /^Enabled:\s*Yes$/mi.test(stdout);
     return { enabled, url };
@@ -151,13 +157,9 @@ export async function getAutoProxyState(networkService) {
   }
 }
 
-export async function setAutoProxyOff(networkService) {
-  // Belt-and-braces: also clear the URL so a half-configured handoff doesn't
-  // point macOS at a dead PAC server.
-  try { await execFileP(NETWORKSETUP, ['-setautoproxystate', networkService, 'off']); }
-  catch { /* ignore */ }
-  try { await execFileP(NETWORKSETUP, ['-setautoproxyurl', networkService, '']); }
-  catch { /* ignore */ }
+export async function setAutoProxyOff(networkService, run = execFileP) {
+  await run(NETWORKSETUP, ['-setautoproxystate', networkService, 'off'], COMMAND_OPTIONS);
+  await run(NETWORKSETUP, ['-setautoproxyurl', networkService, ''], COMMAND_OPTIONS);
 }
 
 // Compose a full PAC setup: writes the PAC file, starts the PAC server, applies
@@ -165,10 +167,18 @@ export async function setAutoProxyOff(networkService) {
 // kills can be reconciled on next boot.
 export async function applyPacRouting({ domains, networkService, pacPort, proxyPort, pacServer }) {
   const service = await pickActiveNetworkService(networkService);
-  const currentState = await readState();
+  let currentState = await readState();
+  if (currentState?.routing_active && currentState.pid !== process.pid) {
+    throw Object.assign(new Error('Routing is owned by another runtime.'), { code: 'ROUTING_OWNED' });
+  }
+  if (currentState?.routing_active && currentState.network_service !== service) {
+    await clearPacRouting({ pacServer });
+    currentState = await readState();
+  }
   const priorAutoProxy = currentState?.routing_active && currentState?.network_service === service
     ? currentState.prior_auto_proxy
     : await getAutoProxyState(service);
+  if (priorAutoProxy?.unreadable) throw Object.assign(new Error('Cannot snapshot the current PAC configuration; routing was not changed.'), { code: 'ROUTING_SNAPSHOT_FAILED' });
   const pacBody = buildPacText(domains, '127.0.0.1', proxyPort);
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.writeFile(PAC_FILE, pacBody);
@@ -195,15 +205,27 @@ export async function applyPacRouting({ domains, networkService, pacPort, proxyP
   return { networkService: service, pacUrl, domains };
 }
 
-export async function clearPacRouting({ pacServer, networkService } = {}) {
+export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP } = {}) {
   const persisted = await readState();
-  const service = networkService || persisted?.network_service;
-  if (service && persisted?.prior_auto_proxy?.enabled && persisted.prior_auto_proxy.url) {
-    await setAutoProxyOn(service, persisted.prior_auto_proxy.url);
-  } else if (service) {
-    await setAutoProxyOff(service);
+  if (!persisted?.routing_active) {
+    await pacServer?.stop();
+    return { networkService: null, status: 'not_active' };
+  }
+  if (persisted.pid !== process.pid && !(recoverStale && await isStateStale())) {
+    throw Object.assign(new Error('Routing is owned by another runtime.'), { code: 'ROUTING_OWNED' });
+  }
+  const service = persisted.network_service;
+  if (networkService && networkService !== service) throw new Error('Only the recorded network service can be restored.');
+  const current = await getAutoProxyState(service, run);
+  if (current.unreadable) throw Object.assign(new Error('Cannot read current PAC settings; recovery state retained.'), { code: 'ROUTING_READ_FAILED' });
+  // Leave changes made by a VPN, another proxy, or the user alone.
+  const stillOwned = current.url === persisted.pac_url;
+  if (stillOwned) {
+    const prior = persisted.prior_auto_proxy ?? { enabled: false, url: '' };
+    await run(NETWORKSETUP, ['-setautoproxyurl', service, prior.url ?? ''], COMMAND_OPTIONS);
+    await run(NETWORKSETUP, ['-setautoproxystate', service, prior.enabled ? 'on' : 'off'], COMMAND_OPTIONS);
   }
   if (pacServer) await pacServer.stop();
   await patchState({ routing_active: false, cleared_at: new Date().toISOString() });
-  return { networkService: service ?? null };
+  return { networkService: service ?? null, status: stillOwned ? 'restored' : 'changed_externally' };
 }

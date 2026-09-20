@@ -211,10 +211,12 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       upstreamProxyConfig: upstream?.proxyConfig ?? null,
       upstreamProxyPublicConfig: upstream?.publicConfig ?? null,
     });
+    const newlyStarted = started.status === 'started';
+    if (!newlyStarted && !auto_setup) return { ...started, auto_setup: false };
     // Replay valid rules and surface invalid persisted entries instead of
     // silently claiming that every rule was restored.
     try {
-      const persisted = await loadRules();
+      const persisted = newlyStarted ? await loadRules() : [];
       const failures = [];
       for (const r of persisted) {
         try { await engine.registerRule(r); }
@@ -228,15 +230,14 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     await patchState({ pid: process.pid, proxy_port: engine.port, started_at: new Date().toISOString() });
     if (!auto_setup) return { ...started, auto_setup: false };
 
-    if (!caCertPath) await ensureCA();
-    const activeCaCert = caCertPath ?? CA_CERT;
+    const activeCaCert = await activeCaCertificate();
     const hostCertificate = trust_host_ca
       ? await setupHostCertificate(activeCaCert)
       : await getHostCertificateStatus(activeCaCert);
     const broadRouting = domains.includes('*');
     if ((trust_host_ca && (!hostCertificate.ok || !hostCertificate.trusted))
       || (!hostCertificate.trusted && broadRouting)) {
-      await engine.stop();
+      if (newlyStarted) await engine.stop();
       const error = new Error(hostCertificate.recovery ?? hostCertificate.error
         ?? 'Broad routing requires the proxy CA to be trusted in the user login keychain. Enable trust_host_ca or supply narrow domains.');
       error.code = hostCertificate.code ?? 'HOST_CA_NOT_TRUSTED';
@@ -253,9 +254,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         pacServer,
       });
     } catch (error) {
-      try { await clearPacRouting({ pacServer }); } catch { /* preserve setup error */ }
-      await engine.stop();
-      await patchState({ proxy_port: null, routing_active: false, setup_error: error.message });
+      try { await clearPacRouting({ pacServer }); } catch { /* retain routing breadcrumbs */ }
+      if (newlyStarted) await engine.stop();
+      await patchState({ proxy_port: engine.port, setup_error: error.message });
       throw error;
     }
     const trust = await trustCaOnSimulators(activeCaCert);
@@ -356,8 +357,15 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       xcode: preflight,
       booted_simulators: simulators,
       xcode_previews: previews,
-      verification: 'Per-device TLS trust currently uses simctl trusted-root import success; end-to-end URLSession probing is not bundled yet.',
+      verification: 'Use verify_simulator_certificate with a booted device UDID to check native URLSession trust. Import success alone is not end-to-end verification.',
     };
+  }
+
+  async function verify_simulator_certificate(args = {}, context = {}) {
+    const certPath = await activeCaCertificate();
+    const { verifySimulatorCertificate } = await import('./simulator-probe.mjs');
+    return verifySimulatorCertificate({ udid: args.udid, certPath, keyPath: engine.caKeyPath,
+      developer_dir: args.developer_dir, signal: context.signal });
   }
 
   async function start_device_onboarding(args = {}) {
@@ -415,7 +423,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       checks,
       hostname: args.hostname ?? null,
       findings,
-      verification: 'This diagnostic distinguishes observed proxy/TLS failures. Full system trust verification requires the optional Simulator URLSession probe.',
+      verification: 'This diagnostic distinguishes observed proxy/TLS failures. Call verify_simulator_certificate to test native URLSession trust.',
     };
   }
 
@@ -494,6 +502,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       storage,
       capture_storage_policy: engine.captureBodyMode,
       persistence_queue_depth: engine.flowPersistence.size,
+      capture_queue_depth: engine.captureWork.size,
+      capture_dropped_events: engine.captureDropped,
       persistence_queue_limit: engine.maxPendingPersistence,
       persistence_queue_high_water_mark: engine.persistenceHighWaterMark,
       persistence_backpressure_waits: engine.persistenceBackpressureWaits,
@@ -1737,6 +1747,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const f = await engine.getDurableFlow(flow_id, args.session_id);
     if (!f) throw new Error(`flow not found: ${flow_id}`);
     if (!f.response) throw new Error('flow has no response yet');
+    if (f.response.body_omitted) {
+      throw Object.assign(new Error(`Cannot create a mock from an omitted response: ${f.response.body_omitted}`), { code: 'BODY_UNAVAILABLE' });
+    }
     if (f.response.body_path && !includeSensitive) {
       const error = new Error('A spilled or binary captured response can only become a mock with include_sensitive=true and the server-level sensitive-data grant.');
       error.code = 'SENSITIVE_ACCESS_REQUIRED';
@@ -1935,9 +1948,6 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       interval: args.interval ?? 5000,
       certPath: caCert,
       developer_dir: preflight.developer_dir,
-      onNew: async (sim) => {
-        try { await restartSimApps({ udid: sim.udid }); } catch { /* ignore */ }
-      },
       onResult: async (result) => {
         simWatcherEvents.push({ ...result, timestamp: new Date().toISOString() });
         if (simWatcherEvents.length > 50) simWatcherEvents.splice(0, simWatcherEvents.length - 50);
@@ -1946,7 +1956,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { status: 'started', developer_dir: preflight.developer_dir, xcode_version: preflight.xcode_version };
   }
   async function stop_sim_watcher() {
-    if (simWatchStop) { simWatchStop(); simWatchStop = null; return { status: 'stopped' }; }
+    if (simWatchStop) { const stop = simWatchStop; simWatchStop = null; await stop(); return { status: 'stopped' }; }
     return { status: 'not_running' };
   }
 
@@ -1956,6 +1966,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     start_operator_ui, stop_operator_ui, get_operator_ui_status,
     trust_ca_on_simulators: trust_ca_on_simulators_tool,
     setup_simulator_certificate, setup_xcode_preview_certificate,
+    verify_simulator_certificate,
     setup_host_certificate, remove_host_certificate, rotate_certificate_authority, get_certificate_status,
     start_device_onboarding, stop_device_onboarding, diagnose_ios_capture,
     create_reverse_proxy, list_reverse_proxies, remove_reverse_proxy,
@@ -2034,7 +2045,7 @@ function flowNotFound(flowId) {
 function redactHeadersForReplay(headers) {
   if (!headers) return {};
   return Object.fromEntries(Object.entries(headers).filter(([name]) =>
-    !/^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|host|content-length)$/i.test(name)));
+    !/^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|host|content-length|content-encoding|transfer-encoding)$/i.test(name)));
 }
 
 function redactedFlowForComparison(flow) {

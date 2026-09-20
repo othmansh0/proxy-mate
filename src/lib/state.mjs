@@ -99,7 +99,8 @@ export async function readHandshake() {
   } catch { return null; }
 }
 
-export async function clearHandshake() {
+export async function clearHandshake(expectedToken) {
+  if (expectedToken && (await readHandshake())?.token !== expectedToken) return;
   try { await fs.unlink(HANDSHAKE_FILE); } catch { /* ignore */ }
 }
 
@@ -113,13 +114,8 @@ export async function defensiveNetworkResetAllServices() {
     return { reset: [], skipped: 'no recorded proxy-mcp routing mutation' };
   }
   try {
-    if (state?.prior_auto_proxy?.enabled && state.prior_auto_proxy.url) {
-      await execFileP(NETWORKSETUP, ['-setautoproxyurl', service, state.prior_auto_proxy.url], commandOptions());
-      await execFileP(NETWORKSETUP, ['-setautoproxystate', service, 'on'], commandOptions());
-    } else {
-      await execFileP(NETWORKSETUP, ['-setautoproxystate', service, 'off'], commandOptions());
-      await execFileP(NETWORKSETUP, ['-setautoproxyurl', service, ''], commandOptions());
-    }
+    const { clearPacRouting } = await import('./pac.mjs');
+    await clearPacRouting({ recoverStale: true });
     return { reset: [service] };
   } catch (error) {
     return { reset: [], failed: [{ service, error: error?.message ?? String(error) }] };
