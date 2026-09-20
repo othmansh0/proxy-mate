@@ -46,9 +46,9 @@ test('runtime pruning retains current and one prior snapshot without deleting fo
   const previous = await stageDaemonRuntime(fixturePaths);
   const current = await stageDaemonRuntime(fixturePaths);
   const stablePath = await publishDaemonRuntime(previous.directory);
-  assert.equal(await fs.realpath(stablePath), previous.serverPath);
+  assert.equal(await fs.realpath(stablePath), await fs.realpath(previous.serverPath));
   assert.equal(await publishDaemonRuntime(current.directory), stablePath);
-  assert.equal(await fs.realpath(stablePath), current.serverPath);
+  assert.equal(await fs.realpath(stablePath), await fs.realpath(current.serverPath));
   const foreign = path.join(fixturePaths.runtimeRoot, 'build-foreign');
   await fs.mkdir(foreign);
   await pruneDaemonRuntimes(current.directory);
