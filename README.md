@@ -8,10 +8,12 @@ Requires macOS and Node.js 20 or newer.
 
 ```bash
 npm install
-node src/server.mjs install
+node src/server.mjs install --domains 'api.example.com,*.example.com'
 ```
 
-`install` creates a per-user LaunchAgent, prepares a machine-local CA, configures selective PAC routing, and watches for newly booted Simulators. It does not use `sudo`.
+Replace the example domains with your app's API hosts. `install` creates a per-user LaunchAgent, prepares a machine-local CA, configures selective PAC routing, and watches for newly booted Simulators. It waits for authenticated daemon readiness and does not use `sudo`. Omitting `--domains` routes all hosts (`*`), which is intentionally broader than this recommended setup.
+
+Use a stable checkout path (not a temporary directory), an actively supported Node.js LTS release, and a full Xcode installation. See the [iOS Simulator setup and recovery guide](docs/IOS_SIMULATOR_SETUP.md) for the complete, Proxyman-style workflow.
 
 Add the server to your MCP client:
 
@@ -34,8 +36,11 @@ Ask your MCP client to:
 
 1. Call `get_proxy_status`.
 2. Call `setup_simulator_certificate` for a booted Simulator.
-3. Open or refresh the app.
-4. Call `wait_for_flow`, then `get_flow_detail` for the selected request.
+3. Call `verify_simulator_certificate` with that Simulator's `udid` to test native iOS TLS trust.
+4. Relaunch your app if it was already running when routing changed; trigger an API request.
+5. Call `wait_for_flow`, then `get_flow_detail` for the selected request.
+
+Certificate verification uses a native URLSession request through an explicit test proxy. It does **not** claim to verify your app's automatic PAC routing or certificate-pinning policy.
 
 If nothing appears, use the `diagnose-capture` prompt or call `diagnose_ios_capture`. Certificate-pinned apps still need a debug build that disables pinning or a TLS passthrough rule.
 
@@ -89,6 +94,8 @@ proxy-mcp doctor                 diagnose and recover verified stale state
 
 Useful daemon options include `--domains`, `--tls-passthrough`, `--capture-body-mode`, `--enable-socks`, paired `--ca-key`/`--ca-cert`, `--network-service`, and `--no-routing`. Physical-device use additionally requires `--allow-remote-proxy`, `--remote-allowlist`, and a bounded `--remote-access-ttl`. `start_proxy` also accepts an `upstream_proxy` to chain through an HTTP(S) or SOCKS proxy; credentials are never returned by status tools.
 
+`--no-trust-ca` disables automatic Simulator imports **and** the watcher; `--no-host-trust` skips macOS trust. Use all three `--no-routing --no-host-trust --no-trust-ca` flags for an isolated explicit-proxy daemon. Only one runtime may own a `PROXY_MCP_HOME`; use the installed daemon when several agents share this tool. Stdio clients reconnect on their next call after a daemon restart. Failed mutations are never automatically replayed.
+
 ## Deliberate limits
 
 `proxy-mcp` focuses on safe agent-driven HTTP debugging. It does not ship a desktop GUI, Android/Windows/Linux automation, packet-level shaping, DNS/TUN/WireGuard capture, HTTP/3, arbitrary user scripting, process attribution, or live WebSocket frame injection. Those require a different engine or product surface and are documented instead of being emulated inaccurately.
@@ -111,6 +118,8 @@ Before public publishing, add the canonical repository, homepage, issue tracker,
 
 - [Capabilities and limits](docs/CAPABILITIES.md)
 - [Competitor parity](docs/PARITY.md)
+- [iOS Simulator setup and recovery](docs/IOS_SIMULATOR_SETUP.md)
+- [Reliability audit and verification](docs/RELIABILITY_AUDIT.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)

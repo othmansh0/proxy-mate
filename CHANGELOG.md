@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Hardened daemon/stdio ownership, reconnect, shutdown, control-plane validation and LaunchAgent readiness; preserved routing ownership and failed-recovery state.
+- Disabled Mockttp's unbounded raw request history, coalesced WebSocket persistence with a global message budget, and bounded asynchronous capture work.
+- Validated and serialized CA lifecycle operations, preserved custom certificate files, and added native `verify_simulator_certificate` / `npm run verify:simulator` trust checks.
+- Made gzip/deflate/Brotli API bodies inspectable with bounded decoding and refused omitted-body mock creation.
+- Updated vulnerable production dependency pins; added regression coverage and detailed Simulator setup/reliability documentation.
+
 - Fixed the daemon crashing on the first captured body: `proxy.mjs` called `crypto.createHash` and `crypto.X509Certificate` without importing `node:crypto`, so it resolved the Web Crypto global, which has neither. `storeCapturedBody` threw `TypeError: crypto.createHash is not a function` on the first response body and took the whole daemon down; launchd then respawned it into the same crash on the next request. `rotateCA` had the same latent failure.
 - Fixed the control plane turning a serialization failure into a daemon crash. On a tool result that `JSON.stringify` refuses, the success path had already committed headers, so the `catch` called `writeHead` a second time and threw `ERR_HTTP_HEADERS_SENT` inside an async `'end'` handler where nothing could catch it. The result is now serialized before headers are committed, and the error path no longer writes to a committed response.
 - Fixed every certificate tool failing on an ordinary RSA CA. `inspectCertificate` spread `publicKey.asymmetricKeyDetails` into its result, and Node reports `publicExponent` as a BigInt, which `JSON.stringify` refuses — so `setup_simulator_certificate` and its siblings failed with `Do not know how to serialize a BigInt` for the CA the server generates by default.
