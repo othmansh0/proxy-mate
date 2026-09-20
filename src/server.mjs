@@ -19,6 +19,7 @@ import { promises as fs } from 'node:fs';
 import url from 'node:url';
 import path from 'node:path';
 import { acquireRuntime, reconcileRuntime, installShutdownHandlers } from './lib/runtime.mjs';
+import { startLogMaintenance } from './lib/log-maintenance.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
@@ -173,6 +174,7 @@ async function runDaemon(args) {
   const releaseRuntime = await acquireRuntime();
   try { await reconcileRuntime(); }
   catch (error) { await releaseRuntime(); throw error; }
+  const stopLogMaintenance = startLogMaintenance();
 
   const engine = new ProxyEngine();
   const pacServer = new PacServer();
@@ -192,6 +194,7 @@ async function runDaemon(args) {
   let finishStartup;
   const startupSettled = new Promise((resolve) => { finishStartup = resolve; });
   const cleanup = async () => {
+    stopLogMaintenance();
     await startupSettled;
     // Cancel control work before draining capture or restoring routing.
     await ctrl?.stop();

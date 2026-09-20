@@ -8,7 +8,8 @@ import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 
 import { CA_CERT, CA_DIR, ensureCA, rotateCA } from './proxy.mjs';
-import { applyPacRouting, clearPacRouting } from './pac.mjs';
+import { applyPacRouting, clearPacRouting, getAutoProxyState } from './pac.mjs';
+import { encodeAgentJson, mergeJsonPatch } from './agent-json.mjs';
 import {
   trustCaOnSimulators, restartSimApps, watchSimulators,
   setupSimulatorCertificates, setupXcodePreviewCertificate, discoverXcodePreviewDeviceSets,
@@ -97,6 +98,38 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function persistRules() {
     await saveRules(engine.listRuleConfigs());
+  }
+
+  async function readBodyBytes(part) {
+    if (!part || part.body_omitted) throw Object.assign(new Error(`Captured body is unavailable: ${part?.body_omitted ?? 'missing part'}`), { code: 'BODY_UNAVAILABLE' });
+    let bytes;
+    if (part.body_path) {
+      const file = await authorizeReadPath(part.body_path);
+      const handle = await fs.open(file, 'r');
+      try {
+        if ((await handle.stat()).size > 50 * 1024 * 1024) throw new Error('Stored body exceeds the 50 MiB replay limit.');
+        bytes = await handle.readFile();
+      } finally { await handle.close(); }
+    } else if (part.body_base64) {
+      bytes = Buffer.from(part.body_base64, 'base64');
+    } else {
+      if (part.body_inline == null && part.body_size > 0) throw Object.assign(new Error('Captured body bytes are missing.'), { code: 'BODY_UNAVAILABLE' });
+      bytes = Buffer.from(part.body_inline ?? '');
+    }
+    return bytes;
+  }
+
+  async function capturedBody(part, includeSensitive = false) {
+    const bytes = await readBodyBytes(part);
+    if (includeSensitive) return bytes;
+    const text = bytes.toString('utf8');
+    if (!Buffer.from(text).equals(bytes)) throw Object.assign(new Error('Binary replay requires the explicit sensitive-data grant.'), { code: 'SENSITIVE_ACCESS_REQUIRED' });
+    return Buffer.from(redactBody(text, part.headers));
+  }
+
+  function replayHeaders(headers, includeSensitive) {
+    const filtered = includeSensitive ? headers ?? {} : redactHeadersForReplay(headers);
+    return Object.fromEntries(Object.entries(filtered).filter(([name]) => !/^(host|content-length|transfer-encoding|content-encoding)$/i.test(name)));
   }
 
   function flowSummary(f, { includeSensitive = false } = {}) {
@@ -391,10 +424,12 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function diagnose_ios_capture(args = {}) {
     const [certificate, state] = await Promise.all([get_certificate_status(args), readState()]);
+    const actualPac = state?.network_service ? await getAutoProxyState(state.network_service) : null;
     const checks = {
       proxy_running: engine.isRunning(),
       recording: engine.recording,
       routing_active: state?.routing_active ?? false,
+      routing_matches_system: Boolean(state?.routing_active && actualPac?.enabled && actualPac.url === state.pac_url),
       host_ca_trusted: certificate.host?.trusted ?? false,
       simulator_tooling_ready: certificate.xcode?.ok ?? false,
       booted_simulators: certificate.booted_simulators?.length ?? 0,
@@ -404,6 +439,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const tlsFailures = diagnostics.filter((item) => item.kind === 'tls-client-error');
     const passthroughs = diagnostics.filter((item) => item.kind === 'tls-passthrough-opened');
     const findings = [];
+    if (checks.routing_active && !checks.routing_matches_system) findings.push(finding('ROUTING_CHANGED_EXTERNALLY', 'The recorded PAC no longer matches macOS. Check the active network service, VPN or other proxy, then explicitly reapply routing if appropriate.', 'warning'));
     if (!checks.proxy_running) findings.push(finding('PROXY_NOT_RUNNING', 'Start capture before diagnosing an iOS client.', 'error'));
     if (!checks.recording) findings.push(finding('RECORDING_PAUSED', 'Proxying is active but flows are not being recorded.', 'warning'));
     if (!checks.routing_active) findings.push(finding('ROUTING_INACTIVE', 'Automatic PAC routing is not active. Confirm the Simulator/device proxy configuration.', 'warning'));
@@ -771,6 +807,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   async function get_diagnostics() {
     return {
       diagnostics: engine.diagnostics.slice(),
+      memory: process.memoryUsage(),
+      capture_queue_bytes: engine.captureQueuedBytes,
+      capture_queue_limit_bytes: engine.maxCaptureQueuedBytes,
+      capture_dropped_events: engine.captureDropped,
+      flow_cache_bytes: engine.flowCacheBytes,
+      flow_cache_limit_bytes: engine.maxFlowCacheBytes,
+      log_retention: { max_file_bytes: 5 * 1024 * 1024, archives_per_stream: 3, interval_ms: 30000 },
       storage: await engine.sessionStore.storageStatus(),
       capture_storage_policy: engine.captureBodyMode,
       persistence_queue_depth: engine.flowPersistence.size,
@@ -1025,6 +1068,23 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const rule = await engine.registerRule(args);
     await persistRules();
     return { status: 'registered', ...rule };
+  }
+
+  async function mock_json_response(args = {}) {
+    return create_map_local({ rule_id: args.rule_id, url: args.url, method: args.method ?? 'GET',
+      status: args.status ?? 200, priority: args.priority, headers: args.headers,
+      body: encodeAgentJson(args.json), content_type: 'application/json; charset=utf-8' });
+  }
+
+  async function patch_mock_json(args = {}) {
+    const current = engine.listRuleConfigs().find((rule) => rule.rule_id === args.rule_id);
+    if (!current || current.type !== 'map_local' || current.directory) throw new Error('Select an existing non-directory Map Local rule.');
+    // Existing caller-provided fixture values are not captured credentials.
+    // Preserve them while editing; ordinary tool output redaction still applies.
+    const body = await readBodyBytes({ body_path: current.body_file, body_inline: current.body_inline });
+    let json;
+    try { json = JSON.parse(body.toString('utf8')); } catch { throw Object.assign(new Error('The mock body is not valid JSON.'), { code: 'INVALID_JSON_BODY' }); }
+    return update_rule({ rule_id: args.rule_id, patch: { body: encodeAgentJson(mergeJsonPatch(json, args.patch)), content_type: 'application/json; charset=utf-8' } });
   }
 
   async function create_map_remote(args = {}) {
@@ -1437,10 +1497,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return composeHttpRequest({
       url: includeSensitive ? flow.request.url : redactUrl(flow.request.url),
       method: flow.request.method,
-      headers: includeSensitive ? flow.request.headers : redactHeadersForReplay(flow.request.headers),
-      body: includeSensitive
-        ? (flow.request.body_inline ?? undefined)
-        : (redactBody(flow.request.body_inline, flow.request.headers) ?? undefined),
+      headers: replayHeaders(flow.request.headers, includeSensitive),
+      body: ['GET', 'HEAD'].includes(flow.request.method?.toUpperCase()) ? undefined : await capturedBody(flow.request, includeSensitive),
       timeout_ms: args.timeout_ms,
       signal: context.signal,
     });
@@ -1454,12 +1512,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       url: args.url ?? (includeSensitive ? flow.request.url : redactUrl(flow.request.url)),
       method: args.method ?? flow.request.method,
       headers: {
-        ...(includeSensitive ? flow.request.headers : redactHeadersForReplay(flow.request.headers)),
+        ...replayHeaders(flow.request.headers, includeSensitive),
+        ...(args.json !== undefined ? { 'content-type': 'application/json' } : {}),
         ...(args.headers ?? {}),
       },
-      body: args.body ?? (includeSensitive
-        ? (flow.request.body_inline ?? undefined)
-        : (redactBody(flow.request.body_inline, flow.request.headers) ?? undefined)),
+      body: args.body ?? (args.json !== undefined || args.form !== undefined || ['GET', 'HEAD'].includes((args.method ?? flow.request.method)?.toUpperCase()) ? undefined : await capturedBody(flow.request, includeSensitive)),
       json: args.json,
       form: args.form,
       timeout_ms: args.timeout_ms,
@@ -1750,19 +1807,16 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     if (f.response.body_omitted) {
       throw Object.assign(new Error(`Cannot create a mock from an omitted response: ${f.response.body_omitted}`), { code: 'BODY_UNAVAILABLE' });
     }
-    if (f.response.body_path && !includeSensitive) {
-      const error = new Error('A spilled or binary captured response can only become a mock with include_sensitive=true and the server-level sensitive-data grant.');
-      error.code = 'SENSITIVE_ACCESS_REQUIRED';
-      error.recovery = ['Keep the body redacted and create_map_local manually', 'Or explicitly grant sensitive access for this trusted local session'];
-      throw error;
-    }
     const id = rule_id ?? `capture-${flow_id}`;
+    let captured = await capturedBody(f.response, includeSensitive);
+    if (Object.hasOwn(args, 'json_merge_patch')) {
+      let json;
+      try { json = JSON.parse(captured.toString('utf8')); } catch { throw Object.assign(new Error('The captured response is not valid JSON.'), { code: 'INVALID_JSON_BODY' }); }
+      captured = Buffer.from(encodeAgentJson(mergeJsonPatch(json, args.json_merge_patch)));
+    }
     const bodyFile = await flowBodyToMockBody({
       ruleId: id,
-      srcPath: includeSensitive ? f.response.body_path : null,
-      inlineText: includeSensitive
-        ? f.response.body_inline
-        : redactBody(f.response.body_inline, f.response.headers),
+      inlineText: captured,
     });
     // The captured URL goes through the same builder every other rule uses, so
     // the mock is anchored on the endpoint it was captured from. The old
@@ -1981,6 +2035,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     export_capture_session, import_capture_session, purge_capture_session,
     // rules
     create_map_local, create_map_remote, create_blacklist, create_breakpoint,
+    mock_json_response, patch_mock_json,
     list_pending_breakpoints, get_pending_breakpoint, resolve_breakpoint,
     cancel_breakpoint, get_breakpoint_history,
     create_network_condition, create_no_cache_rule,
@@ -2044,7 +2099,7 @@ function flowNotFound(flowId) {
 
 function redactHeadersForReplay(headers) {
   if (!headers) return {};
-  return Object.fromEntries(Object.entries(headers).filter(([name]) =>
+  return Object.fromEntries(Object.entries(redactHeaders(headers)).filter(([name]) =>
     !/^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|host|content-length|content-encoding|transfer-encoding)$/i.test(name)));
 }
 

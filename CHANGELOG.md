@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added agent-friendly `mock_json_response`, `patch_mock_json`, captured-response JSON merge patches, and the `debug-ios-api` workflow prompt/playbook.
+- Replaced reset/rebuild with atomic HTTP-rule swaps that preserve pending breakpoints and WebSocket/capture subscriptions; tested concurrent traffic during edits.
+- Fixed spilled-body replay/mocking, bounded outbound previews and session hydration, added cache/queue byte budgets and sustained-memory-pressure cleanup/restart handling.
+- Added durable CA transaction recovery, bounded LaunchAgent log retention, live PAC-drift diagnostics, and scheduled audit/soak CI checks.
+- Fixed launchd `EPERM` startup loops for checkouts under macOS-protected folders: install an independent private runtime/dependency snapshot, serialize installs, and retain one previous snapshot. Re-run `install` after source/dependency upgrades.
+- Fixed unfinished-flow MCP schema validation; added real MCP workflow, CA recovery, memory-guard, replay and retention regressions plus an isolated configurable mixed-traffic soak runner.
+
 - Hardened daemon/stdio ownership, reconnect, shutdown, control-plane validation and LaunchAgent readiness; preserved routing ownership and failed-recovery state.
 - Disabled Mockttp's unbounded raw request history, coalesced WebSocket persistence with a global message budget, and bounded asynchronous capture work.
 - Validated and serialized CA lifecycle operations, preserved custom certificate files, and added native `verify_simulator_certificate` / `npm run verify:simulator` trust checks.

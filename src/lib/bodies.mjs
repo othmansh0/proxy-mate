@@ -115,7 +115,7 @@ export async function exportBody(srcPath, destPath) {
 export async function flowBodyToMockBody({ ruleId, srcPath, inlineText }) {
   await ensureDir(MOCK_BODIES_DIR);
   const dest = mockBodyPath(ruleId, crypto.randomBytes(8).toString('hex'));
-  if (srcPath && existsSync(srcPath)) {
+  if (srcPath) {
     await fs.copyFile(srcPath, dest);
   } else {
     await fs.writeFile(dest, inlineText ?? '', { encoding: 'utf8', mode: 0o600 });

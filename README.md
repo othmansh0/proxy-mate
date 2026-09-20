@@ -13,7 +13,7 @@ node src/server.mjs install --domains 'api.example.com,*.example.com'
 
 Replace the example domains with your app's API hosts. `install` creates a per-user LaunchAgent, prepares a machine-local CA, configures selective PAC routing, and watches for newly booted Simulators. It waits for authenticated daemon readiness and does not use `sudo`. Omitting `--domains` routes all hosts (`*`), which is intentionally broader than this recommended setup.
 
-Use a stable checkout path (not a temporary directory), an actively supported Node.js LTS release, and a full Xcode installation. See the [iOS Simulator setup and recovery guide](docs/IOS_SIMULATOR_SETUP.md) for the complete, Proxyman-style workflow.
+Use a stable checkout path (not a temporary directory), an actively supported Node.js LTS release, and a full Xcode installation. Installation snapshots the runtime and dependencies under `~/.proxy-mcp/runtime`, so launchd does not need to read a protected Documents/Desktop checkout. Re-run `install` after code/dependency upgrades; the daemon does not run directly from your edited source. See the [iOS Simulator setup and recovery guide](docs/IOS_SIMULATOR_SETUP.md) for the complete, Proxyman-style workflow.
 
 Add the server to your MCP client:
 
@@ -49,6 +49,7 @@ If nothing appears, use the `diagnose-capture` prompt or call `diagnose_ios_capt
 - Inspect traffic: `get_flows` → `get_flow_detail` → `compare_flows`.
 - Reproduce a request: `export_flow_curl`, `export_flow_code`, or `repeat_flow`.
 - Mock an API: `capture_to_mock` (anchored on the captured URL and its query, so a flow captured from `/v1/orders?page=2` mocks `page=2` only), `create_map_local`, or `create_map_remote`.
+- Mock/edit JSON without files: `mock_json_response` → `patch_mock_json`, or pass `json_merge_patch` to `capture_to_mock`.
 - Pause traffic: `create_breakpoint` → `list_pending_breakpoints` → `resolve_breakpoint`.
 - Check an API contract: `validate_flow_openapi` or `validate_capture_openapi`.
 - Gate CI captures: `npm run analyze:capture -- --input capture.har --assertions assertions.json`.
@@ -60,6 +61,8 @@ If nothing appears, use the `diagnose-capture` prompt or call `diagnose_ios_capt
 The MCP server also provides guided prompts, typed result envelopes, status/flow resources, progress notifications, and resource-update subscriptions. Captured content is marked as untrusted.
 
 See [capabilities and limits](docs/CAPABILITIES.md) for the complete surface.
+
+For coding agents, use the `debug-ios-api` MCP prompt or follow the [agent playbook](docs/AGENT_NETWORK_WORKFLOW.md). It includes copyable tool arguments, breakpoint JSON editing, rule precedence, and multi-agent cleanup rules.
 
 ## Security defaults
 
@@ -107,10 +110,13 @@ See the [Proxyman and competitor comparison](docs/PARITY.md).
 ```bash
 npm run check
 npm run benchmark:storage
+npm run test:soak -- 300
 npm pack --dry-run
 ```
 
 CI tests Node.js 20, 22, and 24 on macOS, audits production dependencies, runs the storage benchmark, and checks package contents. Dependabot covers npm and GitHub Actions updates.
+
+CI also runs a short mixed-traffic soak, with a longer soak and dependency audit on a weekly schedule. Daemon logs rotate at 5 MiB with three archives per stream; sustained RSS above 1 GiB triggers graceful recovery/restart. Set `PROXY_MCP_MAX_RSS_MB` (minimum 128) before reinstalling to adjust that guard; it is not an OS-enforced hard memory limit.
 
 Before public publishing, add the canonical repository, homepage, issue tracker, npm owner, and MCP Registry identity; these values are intentionally not guessed.
 

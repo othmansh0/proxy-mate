@@ -1,5 +1,7 @@
 # Agent guide
 
+For everyday iOS app debugging, start with [Agent network workflow](AGENT_NETWORK_WORKFLOW.md) or the `debug-ios-api` MCP prompt. This document describes implementation boundaries for agents modifying the MCP itself.
+
 ## Mental model
 
 `proxy-mcp` is a local MCP server for selectively intercepting HTTP(S) traffic,

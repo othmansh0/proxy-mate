@@ -44,8 +44,20 @@ export async function reconcileRuntime() {
 // during a slow certificate operation cannot race new listeners into existence.
 export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 18_000 } = {}) {
   let stopping = null;
+  let pressureSamples = 0;
+  const configuredRss = Number(process.env.PROXY_MCP_MAX_RSS_MB ?? 1024);
+  const maxRss = Number.isFinite(configuredRss) && configuredRss >= 128 ? configuredRss * 1024 * 1024 : 1024 * 1024 * 1024;
+  const memoryTimer = setInterval(() => {
+    pressureSamples = process.memoryUsage().rss > maxRss ? pressureSamples + 1 : 0;
+    if (pressureSamples >= 3) {
+      process.stderr.write('[proxy-mcp] sustained memory pressure: draining and restoring routing before exit; launchd will restart the daemon\n');
+      void shutdown(1);
+    }
+  }, 2000);
+  memoryTimer.unref();
   const shutdown = (code = 0) => {
     if (stopping) return stopping;
+    clearInterval(memoryTimer);
     const timer = setTimeout(() => {
       process.stderr.write('[proxy-mcp] shutdown deadline exceeded; recovery state retained\n');
       process.exit(1);

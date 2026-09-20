@@ -12,6 +12,8 @@ import { promisify } from 'node:util';
 import { STATE_DIR } from './config.mjs';
 import { readHandshake, atomicWriteFile } from './state.mjs';
 import { probeDaemon } from './control.mjs';
+import { stageDaemonRuntime, pruneDaemonRuntimes, publishDaemonRuntime } from './runtime-install.mjs';
+import lockfile from 'proper-lockfile';
 
 const execFileP = promisify(execFile);
 const LAUNCHCTL_OPTIONS = { timeout: 30_000, maxBuffer: 1024 * 1024 };
@@ -76,12 +78,20 @@ function escapeXml(s) {
     .replace(/"/g, '&quot;');
 }
 
-export async function installLaunchAgent({ nodeBin, serverPath, domainsFile, proxyPort, pacPort, controlPort, extraArgs = [] }) {
+export async function installLaunchAgent(options) {
+  await fs.mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+  const release = await lockfile.lock(path.join(STATE_DIR, 'install'), { realpath: false, stale: 30_000, update: 5_000 });
+  try { return await installLaunchAgentUnlocked(options); }
+  finally { await release(); }
+}
+
+async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, proxyPort, pacPort, controlPort, extraArgs = [] }) {
   await fs.mkdir(PLIST_DIR, { recursive: true });
   await fs.mkdir(LOG_DIR, { recursive: true });
+  const runtime = await stageDaemonRuntime({ serverPath });
   const programArgs = [
     await stableNodePath(nodeBin || process.execPath),
-    path.resolve(serverPath),
+    runtime.serverPath,
     '--daemon',
   ];
   if (proxyPort) programArgs.push('--proxy-port', String(proxyPort));
@@ -91,6 +101,9 @@ export async function installLaunchAgent({ nodeBin, serverPath, domainsFile, pro
   for (const a of extraArgs) programArgs.push(a);
 
   const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PROXY_MCP_') || key === 'DEVELOPER_DIR'));
+  // Retain the previous CWD authorization boundary for explicit fixture reads.
+  // Files under protected folders may still require macOS user permission.
+  environment.PROXY_MCP_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXY_MCP_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);
   await atomicWriteFile(PLIST_PATH, plistXml({ programArgs, environment }), 0o600);
   const previousHandshake = await readHandshake();
 
@@ -106,7 +119,9 @@ export async function installLaunchAgent({ nodeBin, serverPath, domainsFile, pro
   catch { /* may not be loaded */ }
   await execFileP('launchctl', ['bootstrap', `gui/${process.getuid()}`, PLIST_PATH], LAUNCHCTL_OPTIONS);
   const ready = await waitForDaemonReady({ previousToken: previousHandshake?.token });
-  return { plistPath: PLIST_PATH, label: LABEL, programArgs, ready };
+  const mcpServerPath = await publishDaemonRuntime(runtime.directory);
+  await pruneDaemonRuntimes(runtime.directory).catch((error) => process.stderr.write(`[proxy-mcp] old runtime cleanup failed: ${error.message}\n`));
+  return { plistPath: PLIST_PATH, label: LABEL, programArgs, runtime_directory: runtime.directory, mcp_server_path: mcpServerPath, ready };
 }
 
 export async function stableNodePath(executable) {

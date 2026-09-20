@@ -14,6 +14,7 @@ import { BlockList, isIP } from 'node:net';
 import { storeFlowBody, writeMockBody, deleteFlowBodies } from './bodies.mjs';
 import { STATE_DIR, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { atomicWriteFile } from './state.mjs';
+import { commitCaPair, recoverCaPair } from './ca-transaction.mjs';
 import { SessionStore } from './session-store.mjs';
 import { JsonlWebSocketStoreBackend, WebSocketStore, mockttpWebSocketHandlers } from './websocket-store.mjs';
 import { BreakpointManager, createMockttpBreakpointCallbacks } from './breakpoints.mjs';
@@ -45,6 +46,7 @@ export async function ensureCA() {
     retries: { retries: 60, minTimeout: 200, maxTimeout: 200, factor: 1 },
   });
   try {
+    await recoverCaPair(CA_DIR);
     if (existsSync(CA_KEY) !== existsSync(CA_CERT)) {
       throw codedEngineError('CA_INCOMPLETE', 'Only one CA file exists. Restore the matching key/certificate pair or explicitly rotate the CA; existing device trust was preserved.');
     }
@@ -52,8 +54,7 @@ export async function ensureCA() {
       const { key, cert } = await mockttp.generateCACertificate({
         subject: { commonName: 'proxy-mcp CA', organizationName: 'proxy-mcp' },
       });
-      await atomicWriteFile(CA_KEY, key, 0o600);
-      await atomicWriteFile(CA_CERT, cert, 0o644);
+      await commitCaPair(CA_DIR, { key, cert });
     }
     await fs.chmod(CA_KEY, 0o600);
     await validateCA(CA_KEY, CA_CERT);
@@ -95,8 +96,11 @@ export async function rotateCA({ archivePrivateKey = false } = {}) {
     retries: { retries: 60, minTimeout: 200, maxTimeout: 200, factor: 1 },
   });
   try {
+    await recoverCaPair(CA_DIR);
     const readIfPresent = (file) => fs.readFile(file).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
     const [oldKey, oldCert] = await Promise.all([readIfPresent(CA_KEY), readIfPresent(CA_CERT)]);
+    let oldPairValid = false;
+    try { await validateCA(CA_KEY, CA_CERT); oldPairValid = true; } catch { /* explicit repair may start with an invalid pair */ }
     let previousFingerprint = null;
     try { previousFingerprint = new crypto.X509Certificate(oldCert).fingerprint256.replaceAll(':', '').toLowerCase(); } catch { /* explicit repair of an incomplete/corrupt CA */ }
     // Generate before touching the working pair, under the same lock as ensureCA.
@@ -108,14 +112,12 @@ export async function rotateCA({ archivePrivateKey = false } = {}) {
       if (archivePrivateKey && oldKey) await atomicWriteFile(path.join(archive, 'key.pem'), oldKey, 0o600);
     }
     try {
-      await atomicWriteFile(CA_KEY, key, 0o600);
-      await atomicWriteFile(CA_CERT, cert, 0o644);
+      await commitCaPair(CA_DIR, { key, cert });
       await validateCA(CA_KEY, CA_CERT);
     } catch (error) {
-      if (oldKey) await atomicWriteFile(CA_KEY, oldKey, 0o600);
-      else await fs.rm(CA_KEY, { force: true });
-      if (oldCert) await atomicWriteFile(CA_CERT, oldCert, 0o644);
-      else await fs.rm(CA_CERT, { force: true });
+      // Rollback itself must be recoverable after a crash. If there was no
+      // valid previous identity, keep the intended replacement journal.
+      if (oldPairValid) await commitCaPair(CA_DIR, { key: oldKey.toString('utf8'), cert: oldCert.toString('utf8') });
       throw error;
     }
     const replacement = new crypto.X509Certificate(cert);
@@ -145,12 +147,17 @@ export class ProxyEngine {
     this.port = null;
     this.flows = new Map();       // flow_id -> flow
     this.flowOrder = [];
+    this.flowCacheSizes = new Map();
+    this.flowCacheBytes = 0;
+    this.maxFlowCacheBytes = 32 * 1024 * 1024;
     this.mockRules = new Map();   // rule_id -> { config, endpoint }
     this.ruleEndpointIds = new Map(); // mockttp endpoint id -> rule_id
     this.ruleMutation = Promise.resolve();
     this.lifecycleMutation = Promise.resolve();
     this.captureWork = new Map();
     this.captureDropped = 0;
+    this.captureQueuedBytes = 0;
+    this.maxCaptureQueuedBytes = 32 * 1024 * 1024;
     this.diagnostics = [];        // recent TLS/abort/client errors (ring buffer)
     this.maxDiagnostics = 100;
     this.recording = true;
@@ -286,6 +293,7 @@ export class ProxyEngine {
     }
 
     this.server = server;
+    if (server.server) server.server.maxConnections = 128;
     this.port = server.port;
     this.socksEnabled = enableSocks === true;
     this.caCertPath = certPath;
@@ -424,13 +432,13 @@ export class ProxyEngine {
       };
       this.#rememberFlow(flow);
       await this.#persistFlow(flow);
-    }));
+    }, req.body?.buffer?.length ?? 0));
     await this.server.on('response', (res) => this.#queueCapture(res.id, async () => {
       if (!this.recording) return;
       const resBody = await this.#bodyToBuffer(res.body);
       const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
       const stored = await storeCapturedBody(resBody, res.headers, res.id, 'res', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
-      const existing = this.flows.get(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
+      const existing = await this.getDurableFlow(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
       existing.response = {
         statusCode: res.statusCode,
         statusMessage: res.statusMessage,
@@ -452,16 +460,17 @@ export class ProxyEngine {
       };
       this.#rememberFlow(existing);
       await this.#persistFlow(existing);
-    }));
+    }, res.body?.buffer?.length ?? 0));
   }
 
-  #queueCapture(id, capture) {
+  #queueCapture(id, capture, bytes = 0) {
     // Mockttp emits asynchronously and does not await our listener promises.
     // Bound work BEFORE body conversion, and serialize both halves of a flow.
-    if (!this.captureWork.has(id) && this.captureWork.size >= 100) {
+    if ((!this.captureWork.has(id) && this.captureWork.size >= 100) || this.captureQueuedBytes + bytes > this.maxCaptureQueuedBytes) {
       this.captureDropped += 1;
       return;
     }
+    this.captureQueuedBytes += bytes;
     const operation = (this.captureWork.get(id) ?? Promise.resolve()).then(capture).catch((error) => {
       this.persistenceFailures += 1;
       this.lastPersistenceError = { timestamp: Date.now(), flow_id: id, code: error?.code ?? 'CAPTURE_FAILED', message: error?.message ?? String(error) };
@@ -472,6 +481,7 @@ export class ProxyEngine {
         setImmediate(() => this.stop().catch(() => {}));
       }
     }).finally(() => {
+      this.captureQueuedBytes -= bytes;
       if (this.captureWork.get(id) === operation) this.captureWork.delete(id);
     });
     this.captureWork.set(id, operation);
@@ -567,10 +577,16 @@ export class ProxyEngine {
 
   #rememberFlow(flow) {
     const isNew = !this.flows.has(flow.id);
+    if (isNew && this.flows.size === 0) { this.flowCacheSizes.clear(); this.flowCacheBytes = 0; }
+    const size = Buffer.byteLength(JSON.stringify(flow)) * 2;
+    this.flowCacheBytes += size - (this.flowCacheSizes.get(flow.id) ?? 0);
+    this.flowCacheSizes.set(flow.id, size);
     this.flows.set(flow.id, flow);
     if (isNew) this.flowOrder.push(flow.id);
-    while (this.flowOrder.length > MAX_FLOWS) {
+    while (this.flowOrder.length > MAX_FLOWS || this.flowCacheBytes > this.maxFlowCacheBytes) {
       const stale = this.flowOrder.shift();
+      this.flowCacheBytes -= this.flowCacheSizes.get(stale) ?? 0;
+      this.flowCacheSizes.delete(stale);
       this.flows.delete(stale);
     }
   }
@@ -587,6 +603,8 @@ export class ProxyEngine {
     this.flows.clear();
     this.flowOrder.length = 0;
     this.flowPersistence.clear();
+    this.flowCacheSizes.clear();
+    this.flowCacheBytes = 0;
     await this.sessionStore.purgeSession(this.sessionId);
     await this.sessionStore.createSession({ id: this.sessionId, name: this.sessionId });
     await Promise.all(priorIds.map((id) => deleteFlowBodies(id)));
@@ -617,17 +635,14 @@ export class ProxyEngine {
   async #hydrateSession() {
     this.flows.clear();
     this.flowOrder.length = 0;
+    this.flowCacheSizes.clear();
+    this.flowCacheBytes = 0;
     let cursor = null;
-    const collected = [];
     do {
-      const page = await this.sessionStore.listFlows({ sessionId: this.sessionId, cursor, limit: 1000 });
-      collected.push(...page.flows);
+      const page = await this.sessionStore.listFlows({ sessionId: this.sessionId, cursor, limit: 50 });
+      for (const flow of page.flows) this.#rememberFlow(flow);
       cursor = page.next_cursor;
     } while (cursor);
-    for (const flow of collected.slice(-MAX_FLOWS)) {
-      this.flows.set(flow.id, flow);
-      this.flowOrder.push(flow.id);
-    }
   }
 
   async #persistFlow(flow) {
@@ -861,40 +876,30 @@ export class ProxyEngine {
   }
 
   async #installRuleSet(configs) {
-    // reset() invalidates every active endpoint. Release paused callbacks first
-    // so clear/update/reorder operations cannot strand in-flight traffic. Keep
-    // the manager closed throughout reset to cover new requests racing reset.
-    this.breakpoints.close({ reason: 'Rules were rebuilt while the breakpoint was pending.' });
-    try {
-      // Let Mockttp consume the resolved callback values before reset removes
-      // the endpoint that owns those callbacks.
-      await new Promise((resolve) => setImmediate(resolve));
-      await this.server.reset();
-      await this.#attachCaptureHandlers();
-      await this.#attachWebSocketHandlers();
-      await this.#attachDiagnosticHandlers();
-      const entries = new Map();
-      const endpointIds = new Map();
-      const sorted = configs.map(cloneRuleConfig).sort(compareRules);
-      const enabled = sorted.filter((rule) => rule.enabled);
-      for (let index = 0; index < sorted.length; index++) {
-        const config = sorted[index];
-        let endpoint = null;
-        if (config.enabled) {
-          // Every active rule gets a unique Mockttp priority, so the order above
-          // is deterministic even though repeatable same-priority Mockttp rules
-          // otherwise prefer the last match after their first request.
-          endpoint = await this.#registerEndpoint(config, enabled.length - enabled.indexOf(config) + 1);
-          endpointIds.set(endpoint.id, config.rule_id);
-        }
-        entries.set(config.rule_id, { config, endpoint });
-      }
-      await this.#registerDefaultPassThroughs();
-      this.mockRules = entries;
-      this.ruleEndpointIds = endpointIds;
-    } finally {
-      this.breakpoints.reopen();
+    // Compile through a detached public builder sink, then swap all HTTP rules
+    // in one setRequestRules call. Leave subscriptions, WS and pauses intact.
+    const compiler = mockttp.getLocal({ recordTraffic: false });
+    const definitions = [];
+    compiler.addRequestRules = async (...rules) => {
+      definitions.push(...rules);
+      return rules.map(() => ({ id: crypto.randomUUID() }));
+    };
+    const sorted = configs.map(cloneRuleConfig).sort(compareRules);
+    const enabled = sorted.filter((rule) => rule.enabled);
+    for (let index = 0; index < enabled.length; index++) {
+      await this.#registerEndpoint(enabled[index], enabled.length - index + 1, compiler);
     }
+    await compiler.forUnmatchedRequest().thenPassThrough(proxyPassThroughOptions(this.upstreamProxyConfig));
+    const endpoints = await this.server.setRequestRules(...definitions);
+    const entries = new Map();
+    const endpointIds = new Map();
+    for (const config of sorted) {
+      const endpoint = config.enabled ? endpoints[enabled.indexOf(config)] : null;
+      if (endpoint) endpointIds.set(endpoint.id, config.rule_id);
+      entries.set(config.rule_id, { config, endpoint });
+    }
+    this.mockRules = entries;
+    this.ruleEndpointIds = endpointIds;
   }
 
   async #registerDefaultPassThroughs() {
@@ -908,9 +913,9 @@ export class ProxyEngine {
     }
   }
 
-  async #registerEndpoint(rule, runtimePriority) {
+  async #registerEndpoint(rule, runtimePriority, ruleServer = this.server) {
     const regex = compileSafeRegex(rule.url_pattern, 'url_pattern');
-    let builder = methodBuilder(this.server, rule.method, regex).asPriority(runtimePriority);
+    let builder = methodBuilder(ruleServer, rule.method, regex).asPriority(runtimePriority);
     if (rule.match_headers) builder = builder.withHeaders(rule.match_headers);
     if (rule.match_query) builder = builder.withQuery(rule.match_query);
     if (rule.match_json_body_including) builder = builder.withJsonBodyIncluding(rule.match_json_body_including);
@@ -1975,7 +1980,8 @@ async function storeCapturedBody(buffer, headers, flowId, kind, storeSensitiveDa
   const wireSize = body.length;
   const encodings = String(headers?.['content-encoding'] ?? '').toLowerCase().split(',').map((s) => s.trim()).filter((s) => s && s !== 'identity');
   let decoded = false;
-  let omission = !wireSize && Number(headers?.['content-length']) > 0 ? 'body unavailable or exceeded capture limit' : null;
+  let omission = !wireSize && (Number(headers?.['content-length']) > 0 || /chunked/i.test(String(headers?.['transfer-encoding'] ?? '')))
+    ? 'body unavailable: nonempty length or chunked framing with no retained bytes; possibly exceeded capture limit' : null;
   if (wireSize && encodings.length && captureBodyMode !== 'metadata_only') {
     try {
       if (encodings.length > 4) throw new Error('Too many content encodings');

@@ -27,6 +27,7 @@ export const SERIAL_TOOL_NAMES = new Set([
   'create_capture_session', 'select_capture_session', 'import_capture_session',
   'purge_capture_session', 'clear_session',
   'create_map_local', 'create_map_remote', 'create_blacklist', 'create_breakpoint',
+  'mock_json_response', 'patch_mock_json',
   'create_network_condition', 'create_no_cache_rule', 'capture_to_mock',
   'update_rule', 'set_rule_enabled', 'set_rule_priority', 'reorder_rules',
   'remove_rule', 'clear_rules', 'import_rules',
