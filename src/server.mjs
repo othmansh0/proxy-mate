@@ -20,6 +20,7 @@ import url from 'node:url';
 import path from 'node:path';
 import { acquireRuntime, reconcileRuntime, installShutdownHandlers } from './lib/runtime.mjs';
 import { startLogMaintenance } from './lib/log-maintenance.mjs';
+import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
@@ -53,7 +54,7 @@ const STATUS_MUTATION_TOOLS = new Set([
 ]);
 
 // ---- run modes ----
-async function runStdio() {
+async function runStdio({ requireDaemon = false } = {}) {
   let localReady = null, localTools = null, releaseRuntime = null;
   let daemonSeen = false, closing = false;
   let stopResourceMonitor = () => {};
@@ -74,14 +75,21 @@ async function runStdio() {
     // Resolve the handshake for EVERY call: launchd restarts rotate the token
     // and can change the port. Never retry a mutation after an ambiguous error.
     if (!localReady) {
-      const handshake = await readHandshake();
-      if (handshake && await probeDaemon(handshake.controlUrl, handshake.token)) {
+      const state = await readState();
+      const daemonExpected = requireDaemon || daemonSeen || (state?.pid && !await isStateStale());
+      const handshake = await waitForReadyDaemon({
+        timeoutMs: daemonExpected ? 15_000 : 0, signal: context.signal,
+      });
+      if (handshake) {
         daemonSeen = true;
         return callDaemon({ ...handshake, tool, args, signal: context.signal });
       }
-      if (daemonSeen || ((await readState())?.pid && !await isStateStale())) {
-        throw Object.assign(new Error('The daemon is restarting or unavailable. Retry this call; the client will reconnect automatically.'), {
+      if (daemonExpected) {
+        throw Object.assign(new Error('The shared daemon is unavailable after a bounded readiness wait. This MCP connection remains open.'), {
           code: 'DAEMON_UNAVAILABLE', retryable: true,
+          recovery: ['Run proxy-mcp status and inspect the daemon stderr log.',
+            'If not installed, run proxy-mcp install with the capture options for your workflow.',
+            'Retry the tool call after daemon recovery; do not restart the MCP client.'],
         });
       }
       // Claim state lazily: initializing/listing MCP tools must never change
@@ -303,6 +311,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--daemon') args.daemon = true;
+    else if (a === '--require-daemon') args.requireDaemon = true;
     else if (a === '--proxy-port')   args.proxyPort = Number(value(++i, a));
     else if (a === '--pac-port')     args.pacPort = Number(value(++i, a));
     else if (a === '--control-port') args.controlPort = Number(value(++i, a));
@@ -350,6 +359,7 @@ async function loadDomainsConfig(args) {
 
 function validateCliArgs(args) {
   if (args.daemon && args._.length) throw new Error('--daemon cannot be combined with a subcommand.');
+  if (args.requireDaemon && (args.daemon || args._.length)) throw new Error('--require-daemon is only supported by the stdio MCP client.');
   for (const [name, value] of [
     ['proxy-port', args.proxyPort], ['pac-port', args.pacPort], ['control-port', args.controlPort],
   ]) {
@@ -377,6 +387,7 @@ function printHelp() {
 
 USAGE
   proxy-mcp                         Run as stdio MCP server (auto-connects to a running daemon if present)
+  proxy-mcp --require-daemon        Shared-daemon MCP client; never owns capture or routing
   proxy-mcp --daemon [opts]         Long-lived daemon (manages proxy, PAC, sim trust, control plane)
   proxy-mcp doctor                  Inspect ports, stop only a verified stale daemon, restore recorded PAC state
   proxy-mcp install [opts]          Install LaunchAgent for persistent daemon (~/Library/LaunchAgents)
@@ -493,7 +504,7 @@ async function main() {
   if (cmd === 'uninstall') { await runUninstall(args); return; }
   if (cmd === 'status')    { await runStatus(); return; }
   if (args.daemon)         { await runDaemon(args); return; }
-  await runStdio();
+  await runStdio(args);
 }
 
 main().catch((e) => {

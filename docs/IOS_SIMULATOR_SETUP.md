@@ -25,7 +25,7 @@ After installation, point every MCP client at the stable runtime entry point rep
   "mcpServers": {
     "proxy-mcp": {
       "command": "/absolute/path/to/node",
-      "args": ["/Users/YOUR_USER/.proxy-mcp/runtime/current/src/server.mjs"]
+      "args": ["/Users/YOUR_USER/.proxy-mcp/runtime/current/src/server.mjs", "--require-daemon"]
     }
   }
 }
@@ -34,6 +34,8 @@ After installation, point every MCP client at the stable runtime entry point rep
 Use `command -v node` to locate the binary. GUI clients may not inherit your shell PATH. `runtime/current` is atomically updated after a successful install. A direct checkout entry point still works when the client has filesystem access, but the private runtime path also avoids GUI-client protected-folder failures. Restart existing MCP connections once after upgrading from older code so they load the reconnect fixes. Subsequent daemon restarts are picked up on the next tool call; an in-flight request can still fail and should be inspected before retrying a mutation.
 
 ## Trust, then verify, then capture
+
+Production MCP registrations should include `--require-daemon`. Without it, a missing daemon permits the legacy in-process fallback: the first client owns the runtime, other clients can receive `RUNTIME_BUSY`, and capture ends when the owner disconnects. The required-daemon mode keeps stdio clients independent of capture ownership, waits up to 15 seconds for authenticated recovery, and reports a structured outage without closing the MCP connection. A connection lost after submitting a mutation has an unknown outcome; inspect shared state before repeating it.
 
 1. Boot your target Simulator normally in Xcode or Simulator.
 2. Call `get_proxy_status`, then `setup_simulator_certificate` targeting that device (or the booted scope).

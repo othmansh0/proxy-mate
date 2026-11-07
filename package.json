@@ -42,23 +42,24 @@
     "check": "node --check src/server.mjs && node --test --test-reporter=spec"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "mockttp": "^4.6.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "mockttp": "^4.6.5",
     "proper-lockfile": "^4.1.2",
     "quickjs-emscripten": "0.32.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "better-sqlite3": "^12.6.2"
   },
   "overrides": {
-    "@hono/node-server": "1.19.15",
-    "body-parser": "2.3.0",
-    "fast-uri": "3.1.6",
-    "hono": "4.13.5",
-    "ip-address": "10.5.0",
+    "@hono/node-server": "2.1.6",
+    "body-parser": "2.4.0",
+    "fast-uri": "3.1.9",
+    "hono": "4.13.17",
+    "ip-address": "10.7.6",
     "ws": "8.21.3",
-    "qs": "6.16.0"
+    "qs": "6.17.1",
+    "basic-ftp": "6.2.6"
   },
   "engines": {
     "node": ">=20"

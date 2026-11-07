@@ -7,6 +7,8 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { callDaemon } from '../src/lib/control.mjs';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -54,6 +56,19 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   };
   const first = start();
   const initial = await ready(first);
+  const clients = [];
+  t.after(async () => { await Promise.all(clients.map((client) => client.close())); });
+  for (let index = 0; index < 2; index++) {
+    const client = new Client({ name: `shared-${index}`, version: '1' });
+    clients.push(client);
+    await client.connect(new StdioClientTransport({ command: process.execPath,
+      args: ['src/server.mjs', '--require-daemon'], cwd: root,
+      env: { ...process.env, PROXY_MCP_HOME: directory }, stderr: 'pipe' }));
+    const result = await client.callTool({ name: 'get_proxy_status', arguments: {} });
+    assert.equal(result.structuredContent.data.daemon_pid, first.pid);
+  }
+  await clients[0].close();
+  assert.equal((await clients[1].callTool({ name: 'get_proxy_status', arguments: {} })).structuredContent.data.running, true);
   const concurrent = start();
   const denied = await concurrent.finished;
   assert.notEqual(denied.code, 0);
@@ -66,9 +81,14 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   const restarted = await ready(second, initial.token);
   second.kill('SIGKILL');
   await second.finished;
+  const pendingRead = clients[1].callTool({ name: 'get_proxy_status', arguments: {} });
+  await delay(200);
   const recovered = start();
   const finalHandshake = await ready(recovered, restarted.token);
   assert.notEqual(finalHandshake.token, restarted.token);
+  const resumed = await pendingRead;
+  assert.equal(resumed.isError, undefined);
+  assert.equal(resumed.structuredContent.data.daemon_pid, recovered.pid);
   const persisted = JSON.parse(await fs.readFile(path.join(directory, 'state.json'), 'utf8'));
   assert.equal(persisted.pid, recovered.pid);
   assert.ok(!persisted.routing_active);

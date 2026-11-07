@@ -352,8 +352,8 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rp
         if (bytes > 32 * 1024 * 1024) req.destroy(Object.assign(new Error('Daemon response exceeds 32 MiB; request a smaller page.'), { code: 'RESPONSE_TOO_LARGE' }));
         else chunks.push(c);
       });
-      res.on('error', (error) => finish(reject, error));
-      res.on('aborted', () => finish(reject, Object.assign(new Error('Daemon response was interrupted.'), { code: 'DAEMON_DISCONNECTED', retryable: true })));
+      res.on('error', (error) => finish(reject, transportFailure(error, tool)));
+      res.on('aborted', () => finish(reject, transportFailure(Object.assign(new Error('Daemon response was interrupted.'), { code: 'ECONNRESET' }), tool)));
       res.on('end', () => {
         let parsed;
         try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
@@ -375,7 +375,7 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rp
     });
     signal?.addEventListener('abort', onAbort, { once: true });
     deadline = setTimeout(() => req.destroy(Object.assign(new Error('daemon rpc deadline exceeded'), { code: 'DAEMON_TIMEOUT' })), timeoutMs + 1000);
-    req.on('error', (error) => finish(reject, error));
+    req.on('error', (error) => finish(reject, transportFailure(error, tool)));
     req.on('timeout', () => {
       const error = new Error('daemon rpc timeout');
       error.code = 'DAEMON_TIMEOUT';
@@ -383,6 +383,20 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rp
     });
     req.write(body);
     req.end();
+  });
+}
+
+function transportFailure(error, tool) {
+  if (!['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'DAEMON_TIMEOUT'].includes(error?.code)) return error;
+  const readOnly = READ_ONLY_TOOL_NAMES.has(tool);
+  return Object.assign(new Error(readOnly
+    ? 'The daemon connection failed. Retry this read after recovery.'
+    : 'The daemon connection failed; the operation may have completed. Inspect shared state before resubmitting.'), {
+    code: error.code === 'DAEMON_TIMEOUT' ? 'DAEMON_TIMEOUT' : 'DAEMON_DISCONNECTED',
+    retryable: readOnly,
+    details: { transport_code: error.code, completion_unknown: !readOnly },
+    recovery: readOnly ? ['Retry after the daemon is healthy.']
+      : ['Reconnect and inspect status, rules or captured flows to determine whether the operation completed.'],
   });
 }
 

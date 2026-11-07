@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `--require-daemon` for shared production MCP clients, a cancellable 15-second authenticated readiness wait across daemon restarts, and actionable outage results without taking capture ownership.
+- Mark interrupted mutation RPCs as having an unknown outcome and unsafe to retry; covered two persistent MCP clients, owner disconnect, daemon SIGKILL recovery and a response lost after mutation acceptance.
+- Refreshed the MCP SDK, Mockttp, Zod and vulnerable transitive overrides; the 7 November production dependency audit reports zero advisories. Added the current replacement-readiness assessment to the reliability audit.
+
 - Added agent-friendly `mock_json_response`, `patch_mock_json`, captured-response JSON merge patches, and the `debug-ios-api` workflow prompt/playbook.
 - Replaced reset/rebuild with atomic HTTP-rule swaps that preserve pending breakpoints and WebSocket/capture subscriptions; tested concurrent traffic during edits.
 - Fixed spilled-body replay/mocking, bounded outbound previews and session hydration, added cache/queue byte budgets and sustained-memory-pressure cleanup/restart handling.

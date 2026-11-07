@@ -22,6 +22,8 @@ the loopback control server; stdio instances discover it through the local
 handshake and forward calls. CLI subcommands are `doctor`, `install`,
 `uninstall`, and `status`.
 
+Use `--require-daemon` for shared production clients. It removes the in-process fallback and waits up to 15 seconds for daemon readiness before dispatch. [daemon-connection.mjs](../src/lib/daemon-connection.mjs) owns this pre-dispatch wait; submitted mutations are never replayed after a transport failure. The fallback remains a single-client compatibility mode.
+
 ## Entry points and boundaries
 
 | Area | Source of truth | Responsibility |

@@ -22,13 +22,15 @@ Add the server to your MCP client:
   "mcpServers": {
     "proxy-mcp": {
       "command": "node",
-      "args": ["/absolute/path/to/proxy-mcp/src/server.mjs"]
+      "args": ["/absolute/path/to/proxy-mcp/src/server.mjs", "--require-daemon"]
     }
   }
 }
 ```
 
-After an npm release, `"command": "proxy-mcp"` is enough.
+After an npm release, use `"command": "proxy-mcp"` with `"args": ["--require-daemon"]`.
+
+Use `--require-daemon` for everyday work with multiple MCP clients. The clients share one installed daemon and never acquire capture ownership themselves. If it restarts, a call waits up to 15 seconds for its new authenticated handshake; a longer outage returns `DAEMON_UNAVAILABLE` while the MCP connection remains open. Without this flag, the legacy single-client in-process fallback remains available, but another client can receive `RUNTIME_BUSY`, and closing the owning client stops capture.
 
 ## First capture
 
@@ -88,6 +90,7 @@ See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).
 
 ```text
 proxy-mcp                         run the stdio MCP server
+proxy-mcp --require-daemon        run a shared-daemon MCP client without in-process fallback
 proxy-mcp --daemon [options]     run the persistent daemon in foreground
 proxy-mcp install [options]      install or reload the user LaunchAgent
 proxy-mcp uninstall [--keep-ca]  unload and remove this CA trust
