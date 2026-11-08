@@ -18,6 +18,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { promises as fs } from 'node:fs';
 import url from 'node:url';
 import path from 'node:path';
+import { createInterface } from 'node:readline/promises';
+import { runCaptureSetup } from './lib/setup.mjs';
 import { acquireRuntime, reconcileRuntime, installShutdownHandlers } from './lib/runtime.mjs';
 import { startLogMaintenance } from './lib/log-maintenance.mjs';
 import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
@@ -48,6 +50,7 @@ import {
 } from './lib/mcp-contract.mjs';
 
 const STATUS_MUTATION_TOOLS = new Set([
+  'start_app_capture',
   'start_proxy', 'stop_proxy', 'set_proxy_routing', 'clear_proxy_routing',
   'toggle_recording', 'clear_session', 'select_capture_session',
   'create_capture_session', 'update_capture_session', 'purge_capture_session',
@@ -254,7 +257,7 @@ async function runDaemon(args) {
   // Publish readiness only after routing, trust and persisted rules are ready.
   ctrl = new ControlServer({ port: controlPort, tools });
   await writePidFile(process.pid);
-  await patchState({ control_port: controlPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
+  await patchState({ control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
   await ctrl.start();
   process.stderr.write(`[proxy-mcp] control plane listening on :${ctrl.port}\n`);
   await recordRuntimeEvent('ready');
@@ -272,7 +275,7 @@ async function runDaemon(args) {
 
 // ---- CLI ----
 function parseArgs(argv) {
-  const args = { _: [] };
+  const args = { _: [], skipHostTrust: true, skipTrust: true };
   const value = (index, flag) => {
     const entry = argv[index];
     if (!entry || entry.startsWith('--')) throw new Error(`${flag} requires a value`);
@@ -291,7 +294,9 @@ function parseArgs(argv) {
     else if (a === '--domains')      args.domainsInline = value(++i, a);
     else if (a === '--network-service') args.networkService = value(++i, a);
     else if (a === '--no-trust-ca')  args.skipTrust = true;
+    else if (a === '--trust-simulators') args.skipTrust = false;
     else if (a === '--no-host-trust') args.skipHostTrust = true;
+    else if (a === '--trust-host-ca') args.skipHostTrust = false;
     else if (a === '--keep-ca') args.keepCa = true;
     else if (a === '--no-routing')   args.skipRouting = true;
     else if (a === '--allow-remote-proxy') args.allowRemoteProxy = true;
@@ -303,7 +308,7 @@ function parseArgs(argv) {
     else if (a === '--ca-cert') args.caCertPath = path.resolve(value(++i, a));
     else if (a === '--tls-passthrough') args.tlsPassthrough = value(++i, a).split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--help' || a === '-h') args.help = true;
-    else if (['install', 'uninstall', 'doctor', 'status'].includes(a) && !args._.length) args._.push(a);
+    else if (['install', 'uninstall', 'doctor', 'status', 'setup'].includes(a) && !args._.length) args._.push(a);
     else throw new Error(`Unknown argument: ${a}. Use --help for supported commands.`);
   }
   return args;
@@ -367,6 +372,7 @@ USAGE
   proxy-mcp install [opts]          Install LaunchAgent for persistent daemon (~/Library/LaunchAgents)
   proxy-mcp uninstall               Remove the LaunchAgent
   proxy-mcp status                  Daemon + LaunchAgent + handshake state
+  proxy-mcp setup                   Friendly interactive capture setup; app-only by default
 
 DAEMON OPTIONS
   --proxy-port <n>          Proxy port (default ${PROXY_PORT_DEFAULT})
@@ -385,7 +391,9 @@ DAEMON OPTIONS
   --ca-key <path>           Custom CA private key (must be paired with --ca-cert)
   --ca-cert <path>          Custom CA certificate (must be paired with --ca-key)
   --no-trust-ca             Skip simctl CA trust step
+  --trust-simulators        Explicitly enable automatic trust on booted Simulators (off by default)
   --no-host-trust           Do not add the CA to the user login keychain (use narrow --domains)
+  --trust-host-ca           Explicitly allow Mac CA trust setup (off by default)
   --tls-passthrough <list>  Comma-separated hostnames to tunnel raw (cert-pinned hosts)
 
 UNINSTALL OPTIONS
@@ -470,11 +478,28 @@ async function runStatus() {
   }, null, 2) + '\n');
 }
 
+async function runSetup() {
+  if (!process.stdin.isTTY) throw Object.assign(new Error('Interactive setup needs a terminal. Use the set-up-capture MCP prompt in chat instead.'), { code: 'INTERACTIVE_TERMINAL_REQUIRED' });
+  const handshake = await readHandshake();
+  if (!handshake || !await probeDaemon(handshake.controlUrl, handshake.token)) {
+    throw new Error('Install or start the shared service first with: proxy-mcp install --no-routing --no-trust-ca');
+  }
+  const terminal = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    await runCaptureSetup({ ask: (question) => terminal.question(question), write: (message) => process.stdout.write(message),
+      call: (tool, args) => callDaemon({ ...handshake, tool, args }) });
+  } finally { terminal.close(); }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   validateCliArgs(args);
   if (args.help) { printHelp(); return; }
   const cmd = args._[0];
+  if (cmd === 'setup') {
+    if (process.argv.slice(2).length !== 1) throw new Error('Setup is interactive. Choose capture options in its questions instead of passing daemon flags.');
+    await runSetup(); return;
+  }
   if (cmd === 'doctor')    { await runDoctor(); return; }
   if (cmd === 'install')   { await runInstall(args); return; }
   if (cmd === 'uninstall') { await runUninstall(args); return; }
@@ -485,6 +510,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  process.stderr.write(`[proxy-mcp] fatal: ${e?.stack || e}\n`);
+  const detail = process.argv.includes('setup') ? e?.message || String(e) : e?.stack || e;
+  process.stderr.write(`[proxy-mcp] fatal: ${detail}\n`);
   process.exit(1);
 });

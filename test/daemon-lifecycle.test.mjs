@@ -29,7 +29,7 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   }
   const ports = reservations.map((server) => server.address().port);
   await Promise.all(reservations.map((server) => new Promise((resolve) => server.close(resolve))));
-  const args = ['src/server.mjs', '--daemon', '--no-routing', '--no-host-trust', '--no-trust-ca',
+  const args = ['src/server.mjs', '--daemon', '--no-routing',
     '--proxy-port', String(ports[0]), '--pac-port', String(ports[1]), '--control-port', String(ports[2])];
   const start = () => {
     const child = spawn(process.execPath, args, { cwd: root, env: { ...process.env, PROXY_MCP_HOME: directory }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -56,6 +56,14 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   };
   const first = start();
   const initial = await ready(first);
+  const defaultStatus = await callDaemon({ ...initial, tool: 'get_proxy_status' });
+  assert.equal(defaultStatus.simulator_watcher, 'stopped');
+  assert.equal(defaultStatus.routing_active, false);
+  await callDaemon({ ...initial, tool: 'stop_proxy' });
+  await assert.rejects(callDaemon({ ...initial, tool: 'start_app_capture', args: {
+    udid: 'not-needed-before-port-check', bundle_id: 'com.example.demo', port: ports[0],
+  } }), { code: 'APP_PROXY_PORT_CONFLICT' });
+  await callDaemon({ ...initial, tool: 'start_proxy', args: { port: ports[0], auto_setup: false } });
   const clients = [];
   t.after(async () => { await Promise.all(clients.map((client) => client.close())); });
   for (let index = 0; index < 2; index++) {

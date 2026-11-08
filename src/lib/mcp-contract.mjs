@@ -125,6 +125,14 @@ function toolResultSchema(dataSchema = z.unknown()) {
 export const toolOutputSchema = toolResultSchema();
 
 const typedToolOutputSchemas = Object.freeze({
+  list_simulator_apps: toolResultSchema(z.looseObject({
+    devices: z.array(z.looseObject({ udid: z.string(), name: z.string() })).optional(),
+    applications: z.array(z.object({ bundle_id: z.string(), name: z.string(), kind: z.string() })).optional(),
+  })),
+  start_app_capture: toolResultSchema(z.looseObject({
+    status: z.literal('capturing_app'), port: z.number().int().positive(),
+    scope: z.looseObject({ mode: z.literal('app'), bundle_id: z.string(), device_id: z.string(), mac_keychain_changed: z.literal(false) }),
+  })),
   get_proxy_status: toolResultSchema(proxyStatusSchema),
   get_flows: toolResultSchema(flowListSchema),
   filter_flows: toolResultSchema(flowListSchema),
@@ -354,6 +362,9 @@ function tool(name, description, inputSchema = {}, annotations = READ, options =
 export const MCP_TOOLS = Object.freeze([
   tool('get_started', 'Start here: return live capture readiness, supported setup paths and exact next tool arguments. Available even when the shared daemon is offline.', {
     url: z.string().url().max(4096).optional(), task_id: z.string().regex(/^[A-Za-z0-9._-]{1,96}$/).optional(),
+    capture_scope: z.enum(['app', 'domains', 'mac']).optional(),
+    udid: z.string().min(1).max(128).optional(),
+    bundle_id: z.string().min(1).max(255).optional(),
   }),
   tool('search_docs', 'Search built-in setup and recovery guidance for Claude/MCP disconnects, iOS TLS, localhost, Mac routing/VPN, mocks and breakpoints.', {
     query: z.string().min(1).max(500), limit: z.number().int().min(1).max(8).optional(),
@@ -380,6 +391,19 @@ export const MCP_TOOLS = Object.freeze([
   tool('get_extended_capabilities', 'Describe capture adapters, upstream proxies, transform sandboxing, protocol support, and exact WebSocket engine boundaries.'),
   tool('start_proxy', 'Start the HTTP(S) intercepting proxy and optionally configure routing and Simulator trust.', startProxySchema,
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, { longRunning: true }),
+  tool('list_simulator_apps', 'List booted Simulators, or list apps on a chosen Simulator when udid is supplied. This does not read the Mac Keychain or change trust.', {
+    udid: z.string().min(1).max(128).optional(),
+  }, READ, { longRunning: true }),
+  tool('start_app_capture', 'Capture only connections attributed to one Simulator app, without app code changes or Mac Keychain trust. Other and unknown connections pass through uninspected. Confirm the selected app and shared proxy routing before starting.', {
+    udid: z.string().min(1).max(128),
+    bundle_id: z.string().min(1).max(255).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    port: z.number().int().min(0).max(65535).optional(),
+    pac_port: z.number().int().min(1).max(65535).optional(),
+    network_service: z.string().optional(),
+    duration_seconds: z.number().int().min(1).max(86400).optional(),
+    restart_app: z.boolean().optional(),
+    tls_passthrough: z.array(z.string().min(1).max(255)).max(256).optional(),
+  }, OPEN_MUTATE, { longRunning: true }),
   tool('stop_proxy', 'Stop the proxy, restore recorded PAC routing, and stop background watchers. Durable captured flows remain available.', {}, OPEN_MUTATE, { longRunning: true }),
   tool('set_proxy_routing', 'Apply PAC routing for the given host globs. Other hosts remain direct.', setRoutingSchema, OPEN_MUTATE, { longRunning: true }),
   tool('clear_proxy_routing', 'Restore the previously recorded PAC configuration and stop the PAC server.', { network_service: z.string().optional() }, MUTATE, { longRunning: true }),
@@ -1048,6 +1072,13 @@ export function registerMcpTools(mcp, dispatch, { heartbeatMs = 5000 } = {}) {
 }
 
 const MCP_WORKFLOW_PROMPTS = Object.freeze([
+  Object.freeze({
+    name: 'set-up-capture',
+    title: 'Set up capture with friendly questions',
+    description: 'Choose a simulator and app with app-only capture by default; broader scopes require an explicit choice.',
+    argsSchema: {},
+    message: () => 'Help me set up Proxy MCP. Ask short, friendly questions using the chat client question controls if available. Reuse choices already provided. Start with list_simulator_apps to find booted simulators, then list_simulator_apps with the selected udid to show installed apps. Ask which simulator and app to track, and how long routing should stay enabled (60 minutes by default, maximum 1440). Default to app-only capture without changing app code. Do not ask for API domains in app-only mode. Explain that only app-attributed HTTP(S) connections can be inspected; unknown/background-helper connections pass through without capture, and localhost APIs need a scoped reverse proxy. Explain that Mac proxy routing uses a local gateway but Mac Keychain trust is not requested; simulator certificate trust applies only to the selected device. Show a brief summary and obtain confirmation before changing routing or replacing an existing capture. Then stop_proxy only if replacing a running capture and call start_app_capture with the selected udid, bundle_id and duration_seconds. Verify actual app traffic and isolation from an unselected client. If the user explicitly chooses selected API domains or all Mac traffic, explain the broader scope, ask which APIs for domain mode, and use setup_host_certificate only when that broader mode requires it. Never ask for a Mac password in chat or terminal; native certificate explanation and macOS authentication handle approval. Never claim that an app filter is isolation or that TLS pinning/background helpers are universally supported.',
+  }),
   Object.freeze({
     name: 'debug-ios-api',
     title: 'Debug an iOS API with mocks and breakpoints',

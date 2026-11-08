@@ -13,6 +13,10 @@ node src/server.mjs install --no-routing --no-trust-ca
 
 `install` creates a shared capture LaunchAgent and an independent recovery guardian, prepares a machine-local CA, and waits for authenticated readiness without `sudo`. This example keeps system routing and automatic Simulator imports off. Add a specific Simulator through the MCP setup tools. Omitting `--domains` leaves routing off; all-host routing requires both `--domains '*'` and `--allow-broad-routing`.
 
+Mac Keychain trust and automatic Simulator certificate imports are off by default. To set up capture, boot a Simulator and run `node src/server.mjs setup`, or select the `set-up-capture` MCP prompt in chat. Both guide you through scope, simulator, app and routing duration, with app-only capture selected by default. App mode needs no app code changes or API-host list: it attributes local proxy connections to the selected app and Simulator before allowing inspection. Other and unidentified connections bypass interception and storage. It imports/verifies the CA only on the selected Simulator, without changing Mac Keychain trust. System proxy routing still uses a local gateway; this is not a per-app VPN.
+
+Background networking helpers that cannot be attributed are left uninspected, and certificate pinning can prevent HTTPS inspection. Localhost APIs use the separate reverse-proxy workflow. Selected-domain and Mac-wide capture are advanced choices; Mac trust, when needed, requires explicit approval and a native explanation before the system password dialog. Use `--trust-host-ca` only when deliberately enabling Mac certificate trust.
+
 Use a stable checkout path (not a temporary directory), an actively supported Node.js LTS release, and a full Xcode installation. Installation snapshots the runtime and dependencies under `~/.proxy-mcp/runtime`, so launchd does not need to read a protected Documents/Desktop checkout. Re-run `install` after code/dependency upgrades; the daemon does not run directly from your edited source. See the [iOS Simulator setup and recovery guide](docs/IOS_SIMULATOR_SETUP.md) for the complete, Proxyman-style workflow.
 
 Add the server to your MCP client:
@@ -103,9 +107,13 @@ Useful daemon options include `--domains`, `--tls-passthrough`, `--capture-body-
 
 `--no-trust-ca` disables automatic Simulator imports **and** the watcher; `--no-host-trust` skips macOS trust. Use all three `--no-routing --no-host-trust --no-trust-ca` flags for an isolated explicit-proxy daemon. Only one runtime may own a `PROXY_MCP_HOME`; use the installed daemon when several agents share this tool. Stdio clients reconnect on their next call after a daemon restart. Failed mutations are never automatically replayed.
 
+App-only capture uses a separate loopback gateway (8083 by default) so cached app routing cannot become broad interception when the daemon recovers. The gateway reads local socket/process metadata using the current user's permissions; it does not install a privileged helper. An attribution failure means passthrough without capture, never broader inspection. App capture must be explicitly started again after a daemon restart.
+
+The advanced `--trust-simulators` flag opts into automatic CA import on all booted Simulators and the watcher. Prefer selecting one device through setup instead.
+
 ## Deliberate limits
 
-`proxy-mcp` focuses on safe agent-driven HTTP debugging. It does not ship a desktop GUI, Android/Windows/Linux automation, packet-level shaping, DNS/TUN/WireGuard capture, HTTP/3, arbitrary user scripting, process attribution, or live WebSocket frame injection. Those require a different engine or product surface and are documented instead of being emulated inaccurately.
+`proxy-mcp` focuses on safe agent-driven HTTP debugging. It does not ship a desktop GUI, Android/Windows/Linux automation, packet-level shaping, DNS/TUN/WireGuard capture, HTTP/3, arbitrary user scripting, general Mac app attribution, or live WebSocket frame injection. Those require a different engine or product surface and are documented instead of being emulated inaccurately.
 
 See the [Proxyman and competitor comparison](docs/PARITY.md).
 

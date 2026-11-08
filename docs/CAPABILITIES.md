@@ -15,6 +15,7 @@ The MCP tool registry is the source of truth. Every tool has an input schema, ou
 | Protocols | GraphQL operation parsing and batch matching, gRPC/grpc-web frame metadata, authorized Protobuf decode, and OpenAPI 3.x single-flow/session validation. |
 | WebSockets | Durable bounded connection/message capture, paging, hashes, close state, transcript/snapshot import-export, and offline replay plans. |
 | Apple setup | Host CA trust, Simulator and feature-detected Xcode Preview setup, app restart, watcher, diagnostics, and expiring physical-device onboarding. |
+| App capture | CLI/chat setup defaults to one unmodified Simulator app. Socket owner, bundle path and Simulator process identity gate inspection; other and unknown connections pass through without capture. Mac trust and automatic Simulator imports are opt-in. |
 | Operations | Authenticated local daemon, exact PAC restoration, reverse proxies, structured diagnostics, persistence health/fail-closed mode, CI, and a headless assertion CLI. |
 | Transform plugins | QuickJS-sandboxed request/response/websocket_offline transforms with a bounded JSON-only manifest, disabled by default, no imports or host APIs. |
 | Capture adapters | Preflight and setup plans for Apple Simulator, physical Apple devices, Android (ADB), Docker, and terminal/environment clients; read-only detection plus inert, human-executed setup plans — no adapter executes a mutation itself. |

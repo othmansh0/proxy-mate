@@ -2,6 +2,8 @@
 
 `proxy-mcp` runs locally. It does not include analytics, telemetry, advertising, crash upload, or a hosted control service.
 
+First-time interactive setup defaults to one Simulator app. This mode attributes local connections before inspection and does not store unselected or unknown clients' traffic. HTTP proxy forwarding necessarily handles routing metadata; unselected HTTPS remains an opaque tunnel. App mode imports the CA only into the selected Simulator and does not change Mac Keychain trust. Capture across domains/apps and Mac trust require an explicit broader choice. Existing certificate trust is not automatically removed when switching modes.
+
 Mac certificate setup displays a native explanation before requesting system authentication. The operation installs the debugging CA and reads certificate metadata to identify its trust status; it does not request saved Keychain passwords. Trust persists until removed and is broader than the selected capture scope. Captured traffic may be returned to connected MCP clients, whose handling of that data is separate from this local service.
 
 Captured traffic can contain personal data and credentials. Flow metadata, bounded body content, rules, sessions, certificates, and daemon state are stored under `~/.proxy-mcp` by default. Sessions use a private SQLite/WAL database with per-flow row updates. Set `PROXY_MCP_HOME` to use a separate location. Secret-bearing runtime files use owner-only permissions.

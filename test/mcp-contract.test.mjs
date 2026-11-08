@@ -206,7 +206,8 @@ test('workflow prompts register concise, argument-aware MCP messages', () => {
   registerMcpPrompts({
     registerPrompt(name, config, callback) { prompts.set(name, { config, callback }); },
   });
-  assert.deepEqual([...prompts.keys()], ['debug-ios-api', 'diagnose-capture', 'mock-flow', 'compare-regression', 'security-review', 'set-up-capture-client']);
+  assert.deepEqual([...prompts.keys()], ['set-up-capture', 'debug-ios-api', 'diagnose-capture', 'mock-flow', 'compare-regression', 'security-review', 'set-up-capture-client']);
+  assert.match(prompts.get('set-up-capture').callback({}).messages[0].content.text, /start_app_capture/);
   const workflow = prompts.get('debug-ios-api').callback({ url: 'https://api.example.test/users', task_id: 'login-test' }).messages[0].content.text;
   assert.match(workflow, /mock_json_response/);
   assert.match(workflow, /patch_mock_json/);
