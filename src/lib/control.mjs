@@ -20,6 +20,7 @@ const DEFAULT_RATE_WINDOW_MS = 60_000;
 const READ_ONLY_TOOL_NAMES = new Set(MCP_TOOLS.filter((tool) => tool.annotations.readOnlyHint).map((tool) => tool.name));
 export const SERIAL_TOOL_NAMES = new Set([
   'start_proxy', 'stop_proxy', 'set_proxy_routing', 'clear_proxy_routing',
+  'start_app_capture',
   'setup_host_certificate', 'remove_host_certificate', 'setup_simulator_certificate',
   'rotate_certificate_authority',
   'setup_xcode_preview_certificate', 'trust_ca_on_simulators',

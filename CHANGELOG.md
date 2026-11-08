@@ -2,6 +2,9 @@
 
 ## 0.8.0 — 2026-11-08 (local release)
 
+- Add app-first CLI/chat setup and native Simulator app attribution before inspection. Other and unknown connections bypass capture; app mode changes only the selected Simulator's trust and uses a separate gateway port for recovery isolation.
+- Make Mac Keychain trust and automatic Simulator imports opt-in with `--trust-host-ca` and `--trust-simulators`; retain explicit domain and Mac-wide capture as advanced choices.
+- Explain new Mac certificate trust in a native dialog before system authentication; cancel and unavailable GUI sessions leave certificate trust unchanged, and existing trust skips both prompts.
 - Verify native TLS trust on booted Simulators before automatic PAC routing in both daemon and MCP startup; leave new routing disabled when certificate setup or verification fails.
 - Accept repeated captured header values in MCP flow output without widening request inputs or exposing sensitive headers.
 - Added a thin default MCP bridge with offline onboarding/help, server instructions, and periodic progress for long tools. In-process capture now requires `--in-process`.

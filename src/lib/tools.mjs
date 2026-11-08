@@ -29,6 +29,9 @@ import {
 import { STATE_DIR, SERVER_VERSION, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { getHostCertificateStatus, setupHostCertificate, removeHostCertificate } from './host-cert.mjs';
 import { setupSimulatorRouting } from './simulator-routing.mjs';
+import { AppProxyGateway } from './app-gateway.mjs';
+import { createAppClassifier } from './app-identity.mjs';
+import { listSimulatorApplications, resolveSimulatorApplication, simulatorProcessVerifier } from './simulator-apps.mjs';
 import { authorizeReadPath, authorizeWritePath, requireSensitiveAccess } from './paths.mjs';
 import { DeviceOnboardingPortal } from './device-onboarding.mjs';
 import {
@@ -61,6 +64,8 @@ const HAR_EXPORT_DIR = path.join(STATE_DIR, 'exports');
 // owns lifecycle helpers (sim watcher stop fn, etc.).
 export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   let simWatchStop = null;
+  let appGateway = null;
+  let appScope = null;
   const simWatcherEvents = [];
   const onboardingPortal = new DeviceOnboardingPortal();
   const operatorUi = new OperatorUiServer({
@@ -213,6 +218,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   // ---- proxy lifecycle ----
   async function start_proxy(args = {}) {
+    if (appGateway) throw Object.assign(new Error('App-only capture is active. Stop it before switching capture modes.'), { code: 'APP_CAPTURE_ACTIVE' });
     const {
       port, auto_setup = false, network_service, pac_port, tls_passthrough, max_body_size,
       trust_host_ca = false, allow_remote = false, allowed_remote_ips = [],
@@ -311,16 +317,75 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { ...started, auto_setup: true, host_certificate: hostCertificate, routing, trust, restart: restartReport, watcher };
   }
 
+  async function list_simulator_apps(args = {}) {
+    if (!args.udid) {
+      const listed = await listSimulators({ scope: 'booted' });
+      return { devices: listed.simulators, preflight: listed.preflight };
+    }
+    return listSimulatorApplications(args);
+  }
+
+  async function start_app_capture(args = {}) {
+    if (engine.isRunning()) throw Object.assign(new Error('Stop the current capture before starting app-only capture.'), {
+      code: 'CAPTURE_ALREADY_RUNNING', recovery: ['Confirm the capture change with the user, then call stop_proxy before retrying.'],
+    });
+    const publicPort = args.port ?? 8083;
+    const daemonPort = (await readState())?.daemon_proxy_port ?? PROXY_PORT_DEFAULT;
+    if (publicPort === daemonPort) throw Object.assign(new Error('App capture needs a separate gateway port so daemon recovery cannot turn cached app routing into broad capture.'), {
+      code: 'APP_PROXY_PORT_CONFLICT', recovery: ['Use the default app gateway port or choose a port different from the daemon proxy port.'],
+    });
+    const app = await resolveSimulatorApplication(args);
+    const session = await create_capture_session({
+      name: `${args.bundle_id} on ${app.device.name}`, activate: true,
+      metadata: { capture_scope: 'app', bundle_id: args.bundle_id, device_id: args.udid },
+    });
+    let routing;
+    let trust;
+    try {
+      await start_proxy({ port: 0, auto_setup: false, tls_passthrough: args.tls_passthrough });
+      ({ trust, routing } = await setupSimulatorRouting({
+        certPath: await activeCaCertificate(), keyPath: engine.caKeyPath,
+        trust: (certPath) => trustCaOnSimulators(certPath, { device_ids: [args.udid] }),
+        applyRouting: async () => {
+          appGateway = new AppProxyGateway({ proxyPort: engine.port, classify: createAppClassifier({
+            appPath: app.appPath, verifyProcess: simulatorProcessVerifier(app),
+          }) });
+          await appGateway.start(publicPort);
+          return applyPacRouting({ domains: ['*'], allowBroad: true,
+            networkService: args.network_service, pacPort: args.pac_port ?? PAC_PORT_DEFAULT,
+            proxyPort: appGateway.port, pacServer, durationSeconds: args.duration_seconds ?? 3600,
+          });
+        },
+      }));
+      appScope = { mode: 'app', bundle_id: args.bundle_id, device_id: args.udid,
+        simulator: app.device.name, mac_keychain_changed: false,
+        coverage: 'Only connections attributed to the selected app process are inspected. Background helpers and unknown owners pass through without capture.' };
+      await patchState({ proxy_port: appGateway.port, capture_scope: appScope });
+      const restart = args.restart_app === false ? null
+        : await restartSimApps({ udid: args.udid, bundle_id: args.bundle_id, developer_dir: app.developerDir });
+      if (restart?.failed?.length) throw Object.assign(new Error('The selected app could not be launched.'), { code: 'APP_LAUNCH_FAILED' });
+      return { status: 'capturing_app', scope: appScope, port: appGateway.port, trust, routing, restart, session: session.session,
+        network_scope: 'Mac proxy routing uses a local gateway; other apps are forwarded without inspection or storage.' };
+    } catch (error) {
+      await stop_proxy();
+      throw error;
+    }
+  }
+
   async function stop_proxy() {
     let routingCleanupError = null;
     try { await clearPacRouting({ pacServer }); }
     catch (error) { routingCleanupError = error?.message ?? String(error); }
+    await appGateway?.stop();
+    appGateway = null;
+    appScope = null;
     const out = await engine.stop();
     await stop_sim_watcher();
     await onboardingPortal.stop();
     await reverseProxies.stopAll();
     await patchState({
       proxy_port: null,
+      capture_scope: null,
       stopped_at: new Date().toISOString(),
       ...(routingCleanupError ? { cleanup_error: routingCleanupError } : {}),
     });
@@ -331,6 +396,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function set_proxy_routing(args = {}) {
     await ensureProxyRunning();
+    if (appGateway) throw Object.assign(new Error('Stop app-only capture before selecting domain or Mac-wide capture.'), { code: 'APP_CAPTURE_ACTIVE' });
     const hostTrust = await getHostCertificateStatus(await activeCaCertificate());
     if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA with setup_host_certificate before changing Mac routing. No routing settings were changed.'), {
       code: 'HOST_CA_UNTRUSTED', retryable: false, recovery: ['Call setup_host_certificate, then retry the scoped routing request.'],
@@ -541,7 +607,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     ]);
     return {
       running: engine.isRunning(),
-      port: engine.port,
+      port: appGateway?.port ?? engine.port,
+      capture_scope: appScope ?? { mode: 'domains' },
+      app_gateway: appGateway?.status() ?? null,
       allow_remote: engine.allowRemote,
       socks_enabled: engine.socksEnabled ?? false,
       remote_access: engine.remoteAccessStatus(),
@@ -2045,7 +2113,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   return {
     // lifecycle
-    start_proxy, stop_proxy, set_proxy_routing, clear_proxy_routing,
+    start_proxy, start_app_capture, list_simulator_apps, stop_proxy, set_proxy_routing, clear_proxy_routing,
     start_operator_ui, stop_operator_ui, get_operator_ui_status,
     trust_ca_on_simulators: trust_ca_on_simulators_tool,
     setup_simulator_certificate, setup_xcode_preview_certificate,
