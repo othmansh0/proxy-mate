@@ -10,7 +10,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { gunzip, inflate, brotliDecompress } from 'node:zlib';
-import { BlockList, isIP } from 'node:net';
+import { BlockList, isIP, createServer as createTcpServer } from 'node:net';
 import { storeFlowBody, writeMockBody, deleteFlowBodies } from './bodies.mjs';
 import { STATE_DIR, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { atomicWriteFile } from './state.mjs';
@@ -275,6 +275,7 @@ export class ProxyEngine {
     this.maxBodySize = opts.maxBodySize = maxBodySize ?? DEFAULT_MAX_BODY_SIZE;
     if (enableSocks === true) opts.socks = { authMethods: ['no-auth'] };
     else if (enableSocks !== false) throw codedEngineError('INVALID_SOCKS_CONFIGURATION', 'enableSocks must be a boolean.');
+    await assertProxyPortAvailable(port);
     const server = mockttp.getLocal(opts);
 
     try {
@@ -1912,6 +1913,24 @@ function isLoopbackAddress(address) {
 
 function normalizeRemoteAddress(address) {
   return String(address ?? '').split('%', 1)[0].toLowerCase();
+}
+
+// A wildcard IPv6 listener can coexist with an occupied IPv4 address on some
+// hosts. Refuse that split ownership before reporting a usable loopback proxy.
+async function assertProxyPortAvailable(port) {
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw codedEngineError('INVALID_PROXY_PORT', 'Proxy port must be an integer from 0 to 65535.');
+  if (port === 0) return;
+  for (const host of ['127.0.0.1', '::1']) {
+    const reservation = createTcpServer();
+    try {
+      await new Promise((resolve, reject) => { reservation.once('error', reject); reservation.listen(port, host, resolve); });
+    } catch (error) {
+      if (error.code === 'EADDRINUSE') throw codedEngineError('PROXY_PORT_BUSY', `Proxy port ${port} is occupied on ${host}; choose another port. No existing listener was stopped.`);
+      if (host !== '::1' || !['EADDRNOTAVAIL', 'EAFNOSUPPORT'].includes(error.code)) throw error;
+    } finally {
+      if (reservation.listening) await new Promise((resolve) => reservation.close(resolve));
+    }
+  }
 }
 
 export function buildRemoteAccessPolicy({ allowRemote = false, allowedRemoteIps = [], remoteAccessTtlSeconds = 3600 } = {}) {
