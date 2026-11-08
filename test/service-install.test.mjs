@@ -45,3 +45,16 @@ test('publication happens after daemon readiness and guardian activation', async
     publish: async () => { assert.equal(ready, true); assert.equal(deps.jobs.has('guardian'), true); return 'published'; } });
   assert.equal(result, 'published');
 });
+
+test('rollback never reports success if a failed build cannot be unloaded', async (t) => {
+  const deps = await fixture(t);
+  await assert.rejects(activateServiceFiles({ ...deps,
+    run: async (args) => {
+      if (args[0] === 'bootout') throw Object.assign(new Error('denied'), { code: 'EPERM' });
+      return deps.run(args);
+    }, ready: async () => { throw new Error('not ready'); }, publish: async () => {} }), (error) => {
+    assert.equal(error.details.rollback_restored, false);
+    assert.equal(error.details.rollback_failures[0].operation, 'unload_failed_build');
+    return true;
+  });
+});

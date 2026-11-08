@@ -25,7 +25,12 @@ export async function activateServiceFiles({ services, retired = [], domain, run
   } catch (error) {
     const failures = [];
     for (const service of attempted.reverse()) {
-      try { await run(['bootout', domain, service.plistPath]); } catch { /* may not have loaded */ }
+      try { await run(['bootout', domain, service.plistPath]); }
+      catch (rollback) {
+        let stillLoaded = false;
+        try { await run(['print', `${domain}/${service.label}`]); stillLoaded = true; } catch { /* not loaded */ }
+        if (stillLoaded) failures.push({ label: service.label, operation: 'unload_failed_build', code: rollback.code });
+      }
     }
     for (const old of previous) {
       try {

@@ -109,7 +109,8 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
   environment.PROXY_MCP_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXY_MCP_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);
   const previousHandshake = await readHandshake();
   const guardianArgs = [programArgs[0], path.join(runtime.directory, 'src/guardian.mjs')];
-  const mcpServerPath = await activateServiceFiles({
+  let mcpServerPath;
+  try { mcpServerPath = await activateServiceFiles({
     services: [
       { label: LABEL, plistPath: PLIST_PATH, xml: plistXml({ programArgs, environment }) },
       { label: GUARDIAN_LABEL, plistPath: GUARDIAN_PLIST_PATH,
@@ -120,7 +121,12 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
     run: (args) => execFileP('launchctl', args, LAUNCHCTL_OPTIONS),
     ready: () => waitForDaemonReady({ previousToken: previousHandshake?.token, timeoutMs: readinessTimeoutMs }),
     publish: () => publishDaemonRuntime(runtime.directory),
-  });
+  }); } catch (error) {
+    // A failed build must not displace the previous healthy snapshot in
+    // retention. Preserve it only when recovery itself needs investigation.
+    if (error.details?.rollback_restored) await fs.rm(runtime.directory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
   await pruneDaemonRuntimes(runtime.directory).catch((error) => process.stderr.write(`[proxy-mcp] old runtime cleanup failed: ${error.message}\n`));
   return { plistPath: PLIST_PATH, label: LABEL, programArgs, runtime_directory: runtime.directory,
     mcp_server_path: mcpServerPath, mcp_client_path: path.join(path.dirname(mcpServerPath), 'client.mjs'),
