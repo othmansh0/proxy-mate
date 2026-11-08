@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-11-08 (local release)
+
+- Added a thin default MCP bridge with offline onboarding/help, server instructions, and periodic progress for long tools. In-process capture now requires `--in-process`.
+- Added independent supervised recovery, bounded event journals, runtime/dependency fingerprints and transactional install rollback.
+- Made system routing opt-in, scoped, leased and fail-open in PAC-aware clients; use the actual primary service, protect other proxies and roll back partial setup failures. Fixed empty/null PAC URL parsing and preserve external changes.
+- Routed local reverse proxies through capture/mocks, tracked loopback sockets for bounded cleanup, and preserved healthy daemons in doctor.
+- Support maintained Node 22/24/26 lines; local deployment uses Node 24 LTS.
+
+## Earlier unreleased hardening
+
+- Added `--require-daemon` for shared production MCP clients, a cancellable 15-second authenticated readiness wait across daemon restarts, and actionable outage results without taking capture ownership.
+- Mark interrupted mutation RPCs as having an unknown outcome and unsafe to retry; covered two persistent MCP clients, owner disconnect, daemon SIGKILL recovery and a response lost after mutation acceptance.
+- Refreshed the MCP SDK, Mockttp, Zod and vulnerable transitive overrides; the 7 November production dependency audit reports zero advisories. Added the current replacement-readiness assessment to the reliability audit.
+
+- Added agent-friendly `mock_json_response`, `patch_mock_json`, captured-response JSON merge patches, and the `debug-ios-api` workflow prompt/playbook.
+- Replaced reset/rebuild with atomic HTTP-rule swaps that preserve pending breakpoints and WebSocket/capture subscriptions; tested concurrent traffic during edits.
+- Fixed spilled-body replay/mocking, bounded outbound previews and session hydration, added cache/queue byte budgets and sustained-memory-pressure cleanup/restart handling.
+- Added durable CA transaction recovery, bounded LaunchAgent log retention, live PAC-drift diagnostics, and scheduled audit/soak CI checks.
+- Fixed launchd `EPERM` startup loops for checkouts under macOS-protected folders: install an independent private runtime/dependency snapshot, serialize installs, and retain one previous snapshot. Re-run `install` after source/dependency upgrades.
+- Fixed unfinished-flow MCP schema validation; added real MCP workflow, CA recovery, memory-guard, replay and retention regressions plus an isolated configurable mixed-traffic soak runner.
+
+- Hardened daemon/stdio ownership, reconnect, shutdown, control-plane validation and LaunchAgent readiness; preserved routing ownership and failed-recovery state.
+- Disabled Mockttp's unbounded raw request history, coalesced WebSocket persistence with a global message budget, and bounded asynchronous capture work.
+- Validated and serialized CA lifecycle operations, preserved custom certificate files, and added native `verify_simulator_certificate` / `npm run verify:simulator` trust checks.
+- Made gzip/deflate/Brotli API bodies inspectable with bounded decoding and refused omitted-body mock creation.
+- Updated vulnerable production dependency pins; added regression coverage and detailed Simulator setup/reliability documentation.
 
 - Fixed the daemon crashing on the first captured body: `proxy.mjs` called `crypto.createHash` and `crypto.X509Certificate` without importing `node:crypto`, so it resolved the Web Crypto global, which has neither. `storeCapturedBody` threw `TypeError: crypto.createHash is not a function` on the first response body and took the whole daemon down; launchd then respawned it into the same crash on the next request. `rotateCA` had the same latent failure.
 - Fixed the control plane turning a serialization failure into a daemon crash. On a tool result that `JSON.stringify` refuses, the success path had already committed headers, so the `catch` called `writeHead` a second time and threw `ERR_HTTP_HEADERS_SENT` inside an async `'end'` handler where nothing could catch it. The result is now serialized before headers are committed, and the error path no longer writes to a committed response.

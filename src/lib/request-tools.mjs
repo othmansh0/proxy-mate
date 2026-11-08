@@ -33,8 +33,23 @@ export async function composeHttpRequest({
       redirect: 'manual',
       signal: controller.signal,
     });
-    const bytes = Buffer.from(await response.arrayBuffer());
-    const returned = bytes.subarray(0, MAX_RETURN_BODY);
+    // Read a bounded preview, not an unbounded body followed by truncation.
+    const reader = response.body?.getReader();
+    const chunks = [];
+    let observed = 0, retained = 0, truncated = false;
+    if (reader) {
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          observed += value.byteLength;
+          const keep = Math.min(value.byteLength, MAX_RETURN_BODY - retained);
+          if (keep) { chunks.push(Buffer.from(value.subarray(0, keep))); retained += keep; }
+          if (observed > MAX_RETURN_BODY) { truncated = true; await reader.cancel(); break; }
+        }
+      } finally { reader.releaseLock(); }
+    }
+    const returned = Buffer.concat(chunks, retained);
     const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
     const textual = isTextual(contentType);
     return {
@@ -47,9 +62,10 @@ export async function composeHttpRequest({
         body: textual ? returned.toString('utf8') : undefined,
         body_base64: textual ? undefined : returned.toString('base64'),
         body_encoding: textual ? 'utf8' : 'base64',
-        body_size: bytes.length,
+        body_size: observed,
+        body_size_exact: !truncated,
         body_returned_bytes: returned.length,
-        body_truncated: returned.length < bytes.length,
+        body_truncated: truncated,
       },
       timing: { total_ms: Math.round((performance.now() - started) * 1000) / 1000 },
     };

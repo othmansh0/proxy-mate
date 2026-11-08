@@ -103,11 +103,12 @@ test('response breakpoints can edit an upstream response', async (t) => {
   assert.equal(response.body, 'changed');
 });
 
-test('rule rebuild and proxy stop release pending breakpoints before resetting Mockttp', async () => {
+test('rule replacement preserves pending breakpoints; proxy stop releases them', async (t) => {
   const upstream = http.createServer((_req, res) => res.end('continued'));
   const upstreamPort = await listen(upstream);
   const engine = new ProxyEngine();
   await engine.start({ port: 0 });
+  t.after(async () => { await engine.stop(); upstream.closeAllConnections(); await new Promise((resolve) => upstream.close(resolve)); });
   await engine.registerRule({
     rule_id: 'lifecycle-break', type: 'breakpoint', direction: 'request',
     url_pattern: `^http://127\\.0\\.0\\.1:${upstreamPort}/`, timeout_ms: 2_000,
@@ -118,8 +119,8 @@ test('rule rebuild and proxy stop release pending breakpoints before resetting M
   await engine.registerRule({
     rule_id: 'unrelated', type: 'blacklist', url_pattern: '^http://unrelated\\.test/', status: 403,
   });
-  assert.equal(engine.breakpoints.listPending().length, 0);
-  assert.equal(engine.breakpoints.getHistory().at(-1).outcome, 'closed');
+  assert.equal(engine.breakpoints.listPending().length, 1);
+  engine.breakpoints.resolve(engine.breakpoints.listPending()[0].id, { action: 'continue' });
   await firstRequest;
 
   const secondRequest = requestViaProxy(engine.port, `http://127.0.0.1:${upstreamPort}/second`).catch((error) => error);

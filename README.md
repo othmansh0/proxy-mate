@@ -2,16 +2,18 @@
 
 `proxy-mcp` is a local MCP server for capturing, inspecting, replaying, and mocking HTTP(S) traffic from macOS, Xcode Simulators, and trusted Apple devices. It is built for agent workflows: durable sessions, small structured results, headless breakpoints, safe defaults, and no required GUI.
 
-Requires macOS and Node.js 20 or newer.
+Requires macOS and Node.js 22 or newer. Use a maintained LTS release; Node 24 is the recommended local runtime.
 
 ## Install
 
 ```bash
-npm install
-node src/server.mjs install
+npm ci
+node src/server.mjs install --no-routing --no-trust-ca
 ```
 
-`install` creates a per-user LaunchAgent, prepares a machine-local CA, configures selective PAC routing, and watches for newly booted Simulators. It does not use `sudo`.
+`install` creates a shared capture LaunchAgent and an independent recovery guardian, prepares a machine-local CA, and waits for authenticated readiness without `sudo`. This example keeps system routing and automatic Simulator imports off. Add a specific Simulator through the MCP setup tools. Omitting `--domains` leaves routing off; all-host routing requires both `--domains '*'` and `--allow-broad-routing`.
+
+Use a stable checkout path (not a temporary directory), an actively supported Node.js LTS release, and a full Xcode installation. Installation snapshots the runtime and dependencies under `~/.proxy-mcp/runtime`, so launchd does not need to read a protected Documents/Desktop checkout. Re-run `install` after code/dependency upgrades; the daemon does not run directly from your edited source. See the [iOS Simulator setup and recovery guide](docs/IOS_SIMULATOR_SETUP.md) for the complete, Proxyman-style workflow.
 
 Add the server to your MCP client:
 
@@ -19,23 +21,28 @@ Add the server to your MCP client:
 {
   "mcpServers": {
     "proxy-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/proxy-mcp/src/server.mjs"]
+      "command": "/opt/homebrew/opt/node@24/bin/node",
+      "args": ["/Users/YOUR_USER/.proxy-mcp/runtime/current/src/client.mjs"]
     }
   }
 }
 ```
 
-After an npm release, `"command": "proxy-mcp"` is enough.
+Use the absolute Node executable and the `mcp_client_path` reported by install. The thin bridge never owns capture or changes network settings. Both `proxy-mcp` and the legacy `--require-daemon` invocation now use this mode by default. `--in-process` explicitly opts into the single-client development engine.
+
+The daemon survives client exits. A restart gets a bounded 15-second authenticated readiness wait; a longer outage returns a tool error while the MCP connection stays open. `get_started`, `search_docs`, and `list_setup_workflows` work even during an outage. Submitted mutations are never replayed automatically.
 
 ## First capture
 
 Ask your MCP client to:
 
-1. Call `get_proxy_status`.
+1. Call `get_started` with the API URL and a unique `task_id`; follow its exact next-call arguments.
 2. Call `setup_simulator_certificate` for a booted Simulator.
-3. Open or refresh the app.
-4. Call `wait_for_flow`, then `get_flow_detail` for the selected request.
+3. Call `verify_simulator_certificate` with that Simulator's `udid` to test native iOS TLS trust.
+4. For localhost use `create_reverse_proxy` and its returned `local_url`. For external hosts use scoped `set_proxy_routing` after host CA trust. Trigger an app request; relaunch only that app if it cached old routing.
+5. Call `wait_for_flow`, then `get_flow_detail` for the selected request.
+
+Certificate verification uses a native URLSession request through an explicit test proxy. It does **not** claim to verify your app's automatic PAC routing or certificate-pinning policy.
 
 If nothing appears, use the `diagnose-capture` prompt or call `diagnose_ios_capture`. Certificate-pinned apps still need a debug build that disables pinning or a TLS passthrough rule.
 
@@ -44,6 +51,7 @@ If nothing appears, use the `diagnose-capture` prompt or call `diagnose_ios_capt
 - Inspect traffic: `get_flows` → `get_flow_detail` → `compare_flows`.
 - Reproduce a request: `export_flow_curl`, `export_flow_code`, or `repeat_flow`.
 - Mock an API: `capture_to_mock` (anchored on the captured URL and its query, so a flow captured from `/v1/orders?page=2` mocks `page=2` only), `create_map_local`, or `create_map_remote`.
+- Mock/edit JSON without files: `mock_json_response` → `patch_mock_json`, or pass `json_merge_patch` to `capture_to_mock`.
 - Pause traffic: `create_breakpoint` → `list_pending_breakpoints` → `resolve_breakpoint`.
 - Check an API contract: `validate_flow_openapi` or `validate_capture_openapi`.
 - Gate CI captures: `npm run analyze:capture -- --input capture.har --assertions assertions.json`.
@@ -56,8 +64,11 @@ The MCP server also provides guided prompts, typed result envelopes, status/flow
 
 See [capabilities and limits](docs/CAPABILITIES.md) for the complete surface.
 
+For coding agents, use the `debug-ios-api` MCP prompt or follow the [agent playbook](docs/AGENT_NETWORK_WORKFLOW.md). It includes copyable tool arguments, breakpoint JSON editing, rule precedence, and multi-agent cleanup rules.
+
 ## Security defaults
 
+- System routing is opt-in, scoped, leased (one hour by default), and uses PAC `PROXY; DIRECT` fallback. Existing proxies/VPN changes are preserved unless replacement is explicit.
 - Proxy and control access are loopback-only unless a remote IP/CIDR allowlist and short TTL are explicitly supplied.
 - Text credentials are redacted before persistence and again before MCP output.
 - Raw reads need both `PROXY_MCP_ALLOW_SENSITIVE=1` and `include_sensitive: true` on that call.
@@ -79,7 +90,8 @@ See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).
 ## CLI
 
 ```text
-proxy-mcp                         run the stdio MCP server
+proxy-mcp                         run the thin shared-daemon stdio bridge
+proxy-mcp --in-process            run the explicit single-client development engine
 proxy-mcp --daemon [options]     run the persistent daemon in foreground
 proxy-mcp install [options]      install or reload the user LaunchAgent
 proxy-mcp uninstall [--keep-ca]  unload and remove this CA trust
@@ -88,6 +100,8 @@ proxy-mcp doctor                 diagnose and recover verified stale state
 ```
 
 Useful daemon options include `--domains`, `--tls-passthrough`, `--capture-body-mode`, `--enable-socks`, paired `--ca-key`/`--ca-cert`, `--network-service`, and `--no-routing`. Physical-device use additionally requires `--allow-remote-proxy`, `--remote-allowlist`, and a bounded `--remote-access-ttl`. `start_proxy` also accepts an `upstream_proxy` to chain through an HTTP(S) or SOCKS proxy; credentials are never returned by status tools.
+
+`--no-trust-ca` disables automatic Simulator imports **and** the watcher; `--no-host-trust` skips macOS trust. Use all three `--no-routing --no-host-trust --no-trust-ca` flags for an isolated explicit-proxy daemon. Only one runtime may own a `PROXY_MCP_HOME`; use the installed daemon when several agents share this tool. Stdio clients reconnect on their next call after a daemon restart. Failed mutations are never automatically replayed.
 
 ## Deliberate limits
 
@@ -100,10 +114,13 @@ See the [Proxyman and competitor comparison](docs/PARITY.md).
 ```bash
 npm run check
 npm run benchmark:storage
+npm run test:soak -- 300
 npm pack --dry-run
 ```
 
-CI tests Node.js 20, 22, and 24 on macOS, audits production dependencies, runs the storage benchmark, and checks package contents. Dependabot covers npm and GitHub Actions updates.
+CI tests Node.js 22, 24, and 26 on macOS, audits production dependencies, runs the storage benchmark, and checks package contents. Dependabot covers npm and GitHub Actions updates.
+
+CI also runs a short mixed-traffic soak, with a longer soak and dependency audit on a weekly schedule. Daemon logs rotate at 5 MiB with three archives per stream; sustained RSS above 1 GiB triggers graceful recovery/restart. Set `PROXY_MCP_MAX_RSS_MB` (minimum 128) before reinstalling to adjust that guard; it is not an OS-enforced hard memory limit.
 
 Before public publishing, add the canonical repository, homepage, issue tracker, npm owner, and MCP Registry identity; these values are intentionally not guessed.
 
@@ -111,6 +128,8 @@ Before public publishing, add the canonical repository, homepage, issue tracker,
 
 - [Capabilities and limits](docs/CAPABILITIES.md)
 - [Competitor parity](docs/PARITY.md)
+- [iOS Simulator setup and recovery](docs/IOS_SIMULATOR_SETUP.md)
+- [Reliability audit and verification](docs/RELIABILITY_AUDIT.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)

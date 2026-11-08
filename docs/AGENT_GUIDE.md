@@ -1,5 +1,7 @@
 # Agent guide
 
+For everyday iOS app debugging, start with [Agent network workflow](AGENT_NETWORK_WORKFLOW.md) or the `debug-ios-api` MCP prompt. This document describes implementation boundaries for agents modifying the MCP itself.
+
 ## Mental model
 
 `proxy-mcp` is a local MCP server for selectively intercepting HTTP(S) traffic,
@@ -10,7 +12,7 @@ The same tool implementations serve two run modes:
 
 ```text
 MCP stdio client ─┬─> running daemon's authenticated local control server
-                  └─> in-process engine (when no daemon is present)
+                  └─> in-process engine (only with explicit --in-process)
 
 tools.mjs → ProxyEngine / PAC / session store / platform helpers
 ```
@@ -19,6 +21,8 @@ Default execution is stdio MCP. `--daemon` owns long-lived proxy/PAC state and
 the loopback control server; stdio instances discover it through the local
 handshake and forward calls. CLI subcommands are `doctor`, `install`,
 `uninstall`, and `status`.
+
+Use the installed thin `src/client.mjs` for shared production clients; it is also the default for `src/server.mjs`. It removes the in-process fallback and waits up to 15 seconds for daemon readiness before dispatch. [daemon-connection.mjs](../src/lib/daemon-connection.mjs) owns this pre-dispatch wait; submitted mutations are never replayed after a transport failure. The single-client compatibility mode requires --in-process.
 
 ## Entry points and boundaries
 

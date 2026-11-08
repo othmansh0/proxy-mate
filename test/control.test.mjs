@@ -81,7 +81,7 @@ test('breakpoint resolution and reads are not blocked behind serialized mutation
 
   const start = callDaemon({ ...handshake, tool: 'start_proxy', args: {} });
   await entered;
-  assert.deepEqual(await callDaemon({ ...handshake, tool: 'resolve_breakpoint', args: {} }), { status: 'resolved' });
+  assert.deepEqual(await callDaemon({ ...handshake, tool: 'resolve_breakpoint', args: { breakpoint_id: 'test', action: 'continue' } }), { status: 'resolved' });
   assert.deepEqual(await callDaemon({ ...handshake, tool: 'get_proxy_status', args: {} }), { running: true });
 
   const stopped = callDaemon({ ...handshake, tool: 'stop_proxy', args: {} });

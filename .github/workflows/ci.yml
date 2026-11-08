@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
 
 permissions:
   contents: read
@@ -13,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -25,5 +28,7 @@ jobs:
       - run: npm run check
       - if: matrix.node == 24
         run: npm run benchmark:storage
+      - if: matrix.node == 24
+        run: npm run test:soak -- ${{ github.event_name == 'schedule' && '300' || '60' }}
       - if: matrix.node == 24
         run: npm pack --dry-run

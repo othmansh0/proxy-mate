@@ -8,6 +8,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { z } from 'zod';
 import { writeHandshake, clearHandshake } from './state.mjs';
 import { MCP_TOOLS } from './mcp-contract.mjs';
 
@@ -17,14 +18,16 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS = 32;
 const DEFAULT_RATE_LIMIT = 600;
 const DEFAULT_RATE_WINDOW_MS = 60_000;
 const READ_ONLY_TOOL_NAMES = new Set(MCP_TOOLS.filter((tool) => tool.annotations.readOnlyHint).map((tool) => tool.name));
-const SERIAL_TOOL_NAMES = new Set([
+export const SERIAL_TOOL_NAMES = new Set([
   'start_proxy', 'stop_proxy', 'set_proxy_routing', 'clear_proxy_routing',
   'setup_host_certificate', 'remove_host_certificate', 'setup_simulator_certificate',
   'rotate_certificate_authority',
   'setup_xcode_preview_certificate', 'trust_ca_on_simulators',
+  'verify_simulator_certificate',
   'create_capture_session', 'select_capture_session', 'import_capture_session',
   'purge_capture_session', 'clear_session',
   'create_map_local', 'create_map_remote', 'create_blacklist', 'create_breakpoint',
+  'mock_json_response', 'patch_mock_json',
   'create_network_condition', 'create_no_cache_rule', 'capture_to_mock',
   'update_rule', 'set_rule_enabled', 'set_rule_priority', 'reorder_rules',
   'remove_rule', 'clear_rules', 'import_rules',
@@ -33,7 +36,14 @@ const SERIAL_TOOL_NAMES = new Set([
   'start_operator_ui', 'stop_operator_ui',
   'upsert_transform_plugin', 'remove_transform_plugin',
   'set_transform_plugin_enabled', 'create_transform_plugin_rule',
+  'enable_ssl_proxying', 'reconcile_state', 'kill_orphan_proxy', 'update_capture_session',
 ]);
+
+export function rpcTimeoutFor(tool, args = {}) {
+  const requested = Number.isFinite(args.timeout_ms) ? args.timeout_ms : 30_000;
+  if (tool === 'wait_for_flow' || /request|repeat|curl/.test(tool)) return Math.min(310_000, Math.max(30_000, requested + 5_000));
+  return MCP_TOOLS.find((item) => item.name === tool)?.longRunning ? 300_000 : 30_000;
+}
 
 export class ControlServer {
   constructor({
@@ -55,6 +65,8 @@ export class ControlServer {
     this.rateWindowMs = boundedInteger(rateWindowMs, 1_000, 60 * 60_000, 'rateWindowMs');
     this.activeRequests = 0;
     this.rateBuckets = new Map();
+    this.controllers = new Set();
+    this.sockets = new Set();
   }
 
   async start() {
@@ -65,10 +77,16 @@ export class ControlServer {
       srv.requestTimeout = 35_000;
       srv.headersTimeout = 10_000;
       srv.keepAliveTimeout = 5_000;
-      srv.timeout = 40_000;
+      // Tool deadlines are enforced below; certificate setup and flow waits
+      // legitimately outlive the HTTP idle timeout used in earlier versions.
+      srv.timeout = 0;
       srv.maxHeadersCount = 100;
       srv.maxRequestsPerSocket = 100;
       srv.maxConnections = 128;
+      srv.on('connection', (socket) => {
+        this.sockets.add(socket);
+        socket.once('close', () => this.sockets.delete(socket));
+      });
       srv.once('error', reject);
       srv.listen(this.port, '127.0.0.1', () => {
         this.server = srv;
@@ -76,18 +94,25 @@ export class ControlServer {
         resolve();
       });
     });
-    await writeHandshake(this.token, `http://127.0.0.1:${this.port}`, [...this.scopes]);
+    try { await writeHandshake(this.token, `http://127.0.0.1:${this.port}`, [...this.scopes]); }
+    catch (error) { await this.stop(); throw error; }
     return this.port;
   }
 
   async stop() {
     if (!this.server) return;
-    await new Promise((resolve) => this.server.close(() => resolve()));
+    const closed = new Promise((resolve) => this.server.close(() => resolve()));
+    for (const controller of this.controllers) controller.abort(codedCancellation('Daemon is shutting down.'));
+    for (const socket of this.sockets) socket.destroy();
+    await closed;
+    await this.queue;
     this.server = null;
-    await clearHandshake();
+    await clearHandshake(this.token);
   }
 
   #handle(req, res) {
+    res.setHeader('cache-control', 'no-store');
+    req.on('error', () => res.destroy());
     if (!this.#validAuthority(req.headers.host)) {
       writeControlError(res, 421, 'INVALID_HOST', 'Host header does not identify this local control server.');
       return;
@@ -134,6 +159,7 @@ export class ControlServer {
     let bytes = 0;
     let tooLarge = false;
     req.on('data', (chunk) => {
+      if (tooLarge) return;
       bytes += chunk.length;
       if (bytes > MAX_RPC_BYTES) {
         tooLarge = true;
@@ -149,12 +175,28 @@ export class ControlServer {
       let payload;
       try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
       catch { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'bad json' })); return; }
-      const { tool, args } = payload;
-      const fn = this.tools[tool];
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || typeof payload.tool !== 'string'
+        || (payload.args != null && (typeof payload.args !== 'object' || Array.isArray(payload.args)))) {
+        writeControlError(res, 400, 'INVALID_RPC', 'Expected an object containing a tool name and object args.');
+        return;
+      }
+      const { tool } = payload;
+      let args = payload.args ?? {};
+      const fn = Object.hasOwn(this.tools, tool) ? this.tools[tool] : null;
       if (typeof fn !== 'function') {
         res.writeHead(404, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: { code: 'UNKNOWN_TOOL', message: `unknown tool: ${tool}` } }));
         return;
+      }
+      const definition = MCP_TOOLS.find((item) => item.name === tool);
+      if (definition) {
+        const parsed = z.object(definition.inputSchema).safeParse(args);
+        if (!parsed.success) {
+          writeControlError(res, 400, 'INVALID_ARGUMENTS', 'Arguments do not satisfy the MCP tool schema.');
+          return;
+        }
+        args = parsed.data;
       }
       const requiredScope = READ_ONLY_TOOL_NAMES.has(tool) || !MCP_TOOLS.some((definition) => definition.name === tool)
         ? 'observe'
@@ -171,11 +213,13 @@ export class ControlServer {
         }));
         return;
       }
+      const controller = new AbortController();
+      this.controllers.add(controller);
+      const deadline = setTimeout(() => controller.abort(Object.assign(new Error('Tool deadline exceeded.'), { code: 'DAEMON_TIMEOUT' })), rpcTimeoutFor(tool, args ?? {}));
       try {
         // Serialize only shared-state mutations. Reads, waits, request replay,
         // and breakpoint resolution must remain concurrent: a composed request
         // may itself be paused and need a second MCP call to resolve it.
-        const controller = new AbortController();
         res.once('close', () => {
           if (!res.writableEnded) controller.abort(codedCancellation('RPC client disconnected.'));
         });
@@ -187,18 +231,28 @@ export class ControlServer {
           ? this.queue.then(invoke)
           : Promise.resolve().then(invoke);
         if (SERIAL_TOOL_NAMES.has(tool)) this.queue = operation.catch(() => {});
-        const result = await operation;
+        const result = await Promise.race([
+          operation,
+          new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true })),
+        ]);
         // Serialize before committing headers. A stringify failure after
         // writeHead lands in the catch below, which would writeHead a second
         // time; that throws ERR_HTTP_HEADERS_SENT inside this async 'end'
         // handler, where nothing can catch it, and takes the daemon down.
         const body = JSON.stringify({ ok: true, result });
+        if (res.destroyed) return;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(body);
       } catch (e) {
-        if (res.headersSent || res.writableEnded) { res.destroy(); return; }
+        if (res.headersSent || res.writableEnded || res.destroyed) { res.destroy(); return; }
+        let body;
+        try { body = JSON.stringify({ ok: false, error: serializeToolError(e) }); }
+        catch { body = JSON.stringify({ ok: false, error: { code: 'TOOL_FAILED', message: 'Tool failed with non-serializable error details.' } }); }
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: serializeToolError(e) }));
+        res.end(body);
+      } finally {
+        clearTimeout(deadline);
+        this.controllers.delete(controller);
       }
     });
   }
@@ -260,15 +314,17 @@ function constantTimeEqual(a, b) {
 }
 
 // Client side: connect to a running daemon, forward an RPC call.
-export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = 30000, signal } = {}) {
+export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rpcTimeoutFor(tool, args), signal } = {}) {
   const url = new URL('/rpc', controlUrl);
   const body = JSON.stringify({ tool, args: args ?? {} });
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(codedCancellation('Daemon RPC was cancelled before it started.'));
     let settled = false;
+    let deadline;
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       signal?.removeEventListener('abort', onAbort);
       callback(value);
     };
@@ -290,11 +346,21 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = 30
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let bytes = 0;
+      res.on('data', (c) => {
+        bytes += c.length;
+        if (bytes > 32 * 1024 * 1024) req.destroy(Object.assign(new Error('Daemon response exceeds 32 MiB; request a smaller page.'), { code: 'RESPONSE_TOO_LARGE' }));
+        else chunks.push(c);
+      });
+      res.on('error', (error) => finish(reject, transportFailure(error, tool)));
+      res.on('aborted', () => finish(reject, transportFailure(Object.assign(new Error('Daemon response was interrupted.'), { code: 'ECONNRESET' }), tool)));
       res.on('end', () => {
         let parsed;
         try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
         catch { return finish(reject, new Error(`daemon returned non-JSON (status ${res.statusCode})`)); }
+        if (!parsed || typeof parsed !== 'object' || typeof parsed.ok !== 'boolean') {
+          return finish(reject, Object.assign(new Error('Daemon returned an invalid RPC envelope.'), { code: 'INVALID_DAEMON_RESPONSE' }));
+        }
         if (!parsed.ok) {
           const detail = typeof parsed.error === 'object' ? parsed.error : { message: parsed.error };
           const error = new Error(detail?.message ?? 'daemon error');
@@ -308,7 +374,8 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = 30
       });
     });
     signal?.addEventListener('abort', onAbort, { once: true });
-    req.on('error', (error) => finish(reject, error));
+    deadline = setTimeout(() => req.destroy(Object.assign(new Error('daemon rpc deadline exceeded'), { code: 'DAEMON_TIMEOUT' })), timeoutMs + 1000);
+    req.on('error', (error) => finish(reject, transportFailure(error, tool)));
     req.on('timeout', () => {
       const error = new Error('daemon rpc timeout');
       error.code = 'DAEMON_TIMEOUT';
@@ -316,6 +383,20 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = 30
     });
     req.write(body);
     req.end();
+  });
+}
+
+function transportFailure(error, tool) {
+  if (!['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'DAEMON_TIMEOUT'].includes(error?.code)) return error;
+  const readOnly = READ_ONLY_TOOL_NAMES.has(tool);
+  return Object.assign(new Error(readOnly
+    ? 'The daemon connection failed. Retry this read after recovery.'
+    : 'The daemon connection failed; the operation may have completed. Inspect shared state before resubmitting.'), {
+    code: error.code === 'DAEMON_TIMEOUT' ? 'DAEMON_TIMEOUT' : 'DAEMON_DISCONNECTED',
+    retryable: readOnly,
+    details: { transport_code: error.code, completion_unknown: !readOnly },
+    recovery: readOnly ? ['Retry after the daemon is healthy.']
+      : ['Reconnect and inspect status, rules or captured flows to determine whether the operation completed.'],
   });
 }
 
@@ -339,8 +420,14 @@ function codedCancellation(message = 'Request cancelled.') {
 // Probe the daemon: GET /health. Returns true if alive.
 export async function probeDaemon(controlUrl, token, timeoutMs = 1500) {
   if (!token) return false;
+  let url;
+  try {
+    url = new URL('/health', controlUrl);
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return false;
+  } catch { return false; }
   return new Promise((resolve) => {
-    const url = new URL('/health', controlUrl);
+    let timer;
+    const finish = (value) => { clearTimeout(timer); resolve(value); };
     const req = http.get({
       host: url.hostname,
       port: url.port || 80,
@@ -349,15 +436,19 @@ export async function probeDaemon(controlUrl, token, timeoutMs = 1500) {
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let bytes = 0;
+      res.on('data', (c) => { bytes += c.length; if (bytes > 4096) { req.destroy(); finish(false); } else chunks.push(c); });
+      res.on('error', () => finish(false));
+      res.on('aborted', () => finish(false));
       res.on('end', () => {
         try {
           const p = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          resolve(res.statusCode === 200 && p.ok === true && p.service === 'proxy-mcp');
-        } catch { resolve(false); }
+          finish(res.statusCode === 200 && p?.ok === true && p.service === 'proxy-mcp');
+        } catch { finish(false); }
       });
     });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
+    timer = setTimeout(() => { req.destroy(); finish(false); }, timeoutMs);
+    req.on('error', () => finish(false));
+    req.on('timeout', () => { req.destroy(); finish(false); });
   });
 }
