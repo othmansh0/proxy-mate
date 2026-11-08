@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { ProxyEngine } from '../src/lib/proxy.mjs';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-port-ownership-'));
+const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 for (const host of ['127.0.0.1', '::1']) {
   test(`proxy startup refuses an occupied ${host} listener without claiming the other address family`, async (t) => {
     const occupied = net.createServer();

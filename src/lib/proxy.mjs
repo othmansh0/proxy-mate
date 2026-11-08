@@ -229,7 +229,6 @@ export class ProxyEngine {
       return { status: 'already_running', port: this.port };
     }
     const remotePolicy = buildRemoteAccessPolicy({ allowRemote, allowedRemoteIps, remoteAccessTtlSeconds });
-    await assertProxyPortAvailable(port);
     if (!['metadata_only', 'text', 'all'].includes(captureBodyMode)) {
       throw codedEngineError('INVALID_CAPTURE_BODY_MODE', 'capture_body_mode must be metadata_only, text, or all.');
     }
@@ -276,6 +275,7 @@ export class ProxyEngine {
     this.maxBodySize = opts.maxBodySize = maxBodySize ?? DEFAULT_MAX_BODY_SIZE;
     if (enableSocks === true) opts.socks = { authMethods: ['no-auth'] };
     else if (enableSocks !== false) throw codedEngineError('INVALID_SOCKS_CONFIGURATION', 'enableSocks must be a boolean.');
+    await assertProxyPortAvailable(port);
     const server = mockttp.getLocal(opts);
 
     try {
