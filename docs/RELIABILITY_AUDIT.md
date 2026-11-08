@@ -1,6 +1,36 @@
 # Reliability and replacement readiness
 
-## Current assessment — 7 November 2026
+## Current assessment — 8 November 2026
+
+Version 0.8.0 addresses the concrete MCP lifetime, network cleanup and onboarding defects below. The release is local; full Android/Network Extension parity and multi-day real-app qualification remain open. Source belongs to `othmansh0/proxy-mcp`, with its permanent checkout at `/Users/othmanshahrouri/Documents/Tools/proxy-mcp`. Temporary worktrees and test data now use the dedicated `Tools/proxy-mcp-workspace/scratch` area.
+
+### Research and implementation decisions
+
+[Proxyman MCP](https://proxyman.com/docs/mcp) documents a local authenticated app service and a separate stdio forwarding process, plus setup/discovery guidance. Our default entry now follows that separation: `src/client.mjs` has no engine, routing mutation, runtime lock or capture-memory restart guard. The old in-process engine requires `--in-process`. Client termination cannot invoke proxy cleanup. Offline help and tool discovery stay available when the daemon is unavailable.
+
+[Claude Code's MCP documentation](https://code.claude.com/docs/en/mcp) distinguishes a stdio process exit from a remote-service outage: exited stdio servers are marked failed, while server instructions help tool search discover the right operation. Therefore recovery stays behind the live bridge. `get_started`, `search_docs`, and `list_setup_workflows` provide short built-in guidance, exact next-call arguments and explicit platform limits. Long tools emit monotonic progress heartbeats; their existing operation deadlines remain bounded.
+
+Proxyman's [proxy helper](https://proxyman.com/docs/basic-features/proxy-setting-tool) handles system proxy changes/restoration; its [localhost guidance](https://proxyman.com/docs/troubleshooting/couldnt-see-any-request-from-localhost-server) also describes the normal system-proxy bypass. Our protection is an independent unprivileged guardian, scoped PAC leases and a captured reverse proxy. This is our recovery design, not a claim about undocumented Proxyman internals. A native privileged helper or [transparent Network Extension](https://proxyman.com/docs/advanced-features/network-extension) is a separate signed platform product, not something MCP transport supplies.
+
+### Defects fixed in 0.8.0
+
+- **Process lifetime:** default clients cannot silently become capture owners; offline onboarding works without creating state/locks. The daemon and guardian are separate supervised LaunchAgents. The existing authenticated reconnect and unknown-outcome mutation protections remain in place.
+- **Routing defaults and failure:** no domain scope means no system routing. Broad routing needs an additional explicit grant. Selected hosts use `PROXY; DIRECT`, and routing has a one-hour default lease (1–86400 seconds). This permits fallback in PAC-aware clients when the listener is unavailable; it is not a universal guarantee for clients that ignore PAC or reject the active CA.
+- **Wrong service / conflicting proxies:** resolve macOS's primary IPv4/IPv6 service instead of preferring enabled Wi-Fi. Refuse to guess on an unresolved service, protect existing automatic/manual proxies, and snapshot the currently owned setting again when another tool has changed it. Only owned settings are restored. Host CA trust is required before system routing.
+- **Partial setup and malformed recovery:** verify that networksetup actually applied the PAC and roll back partial changes. The old `URL:\\s*(.*)` parser could consume a following `Enabled: No` line when the URL was empty. Horizontal-space parsing and null normalization fix the failed-restoration path. Lease expiry and explicit external changes have regression coverage.
+- **Hard crashes/hangs:** the guardian acquires exclusive runtime ownership before restoring a dead owner's routing. A sustained health failure can restart only the recorded installed daemon, with PID, role and exact runtime-entry verification. PID reuse and unrelated servers are preserved. The bridge remains connected during recovery; an outage longer than its wait is a tool error. A guardian cannot guarantee recovery if macOS disables its job or denies network-setting changes.
+- **Install/update reliability:** failed activation/readiness restores previous plist files and previously loaded jobs; stable publication occurs last. Runtime status includes executable identity, source/dependency hashes and bounded separate daemon/guardian event journals. CLI domain-file contents are resolved during installation instead of leaving launchd dependent on a protected Documents path.
+- **Local backend capture:** the old reverse proxy bypassed the engine. It now traverses capture/rules, returns a scoped `local_url`, propagates cancellation, and tracks loopback sockets so cleanup does not wait indefinitely. Regression proves upstream response capture, a mock response and listener removal without system routing.
+- **Operator safety:** doctor preserves a healthy daemon and cannot use `force` to kill an unverified listener. Capture readiness is reported in separate stages; a running service or previously observed flow is not attributed automatically to the intended app. The public body-size limit now matches the engine's 50 MiB limit.
+- **Runtime support:** Node 25 in the old Claude registration was end-of-life. Local setup uses Homebrew Node 24 LTS without changing the shell's default Node. CI now targets maintained 22/24/26 lines. Node's [release policy](https://nodejs.org/en/about/previous-releases) recommends maintained LTS releases for production.
+
+### Qualification and remaining limits
+
+The expanded suite has 213 cases, including real stdio discovery/offline guidance, two clients and SIGKILL recovery, routing transactions/leases, reverse-proxy capture/mocks, guardian identity protection, and install rollback. Current local LTS verification passes all 213 cases. Installed-service, native-routing and longer-soak evidence is added here when observed. Dependency advisory checks remain point-in-time checks.
+
+Open production acceptance: native automatic routing on the supported Xcode/iOS/VPN combinations, sleep/wake/network switching, longer real-app use, multi-agent rule ownership/expiry, and the full supported platform/release matrix. Android still supplies preflight/plans rather than an owned ADB/proxy/trust lifecycle. HTTP/3, arbitrary proxy-bypassing apps, transparent capture, general scripts and live WebSocket mutation are not provided. Do not describe these as implemented because Proxyman offers them.
+
+## Assessment — 7 November 2026 (historical where superseded above)
 
 **Not yet qualified as an everyday Proxyman replacement across iOS and Android.** The HTTP capture/rule engine is substantial and worth keeping. The immediate reliability problem is how MCP clients acquire and retain capture ownership. Android currently has detection and setup plans, not an implemented device lifecycle. More feature names will not close those gaps.
 

@@ -8,7 +8,9 @@ import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 
 import { CA_CERT, CA_DIR, ensureCA, rotateCA } from './proxy.mjs';
-import { applyPacRouting, clearPacRouting, getAutoProxyState } from './pac.mjs';
+import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains } from './pac.mjs';
+import { gettingStarted, searchHelp, setupWorkflows } from './guidance.mjs';
+import { runtimeIdentity, readRuntimeEvents } from './runtime-identity.mjs';
 import { encodeAgentJson, mergeJsonPatch } from './agent-json.mjs';
 import {
   trustCaOnSimulators, restartSimApps, watchSimulators,
@@ -79,6 +81,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     },
   });
   const reverseProxies = new ReverseProxyManager({
+    getProxyPort: () => engine.isRunning() ? engine.port : null,
     onExchange: (exchange) => {
       engine.diagnostics.push({ kind: 'reverse-proxy-exchange', timestamp: Date.now(), ...exchange });
       if (engine.diagnostics.length > engine.maxDiagnostics) engine.diagnostics.shift();
@@ -230,6 +233,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const domains = args.domains?.length
       ? args.domains
       : (stateBefore?.domains?.length ? stateBefore.domains : ['*']);
+    if (auto_setup) validateRoutingDomains(domains, { allowBroad: args.allow_broad_routing === true });
     const started = await engine.start({
       port: port ?? PROXY_PORT_DEFAULT,
       tlsPassthrough: tls_passthrough,
@@ -268,11 +272,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       ? await setupHostCertificate(activeCaCert)
       : await getHostCertificateStatus(activeCaCert);
     const broadRouting = domains.includes('*');
-    if ((trust_host_ca && (!hostCertificate.ok || !hostCertificate.trusted))
-      || (!hostCertificate.trusted && broadRouting)) {
+    if (!hostCertificate.ok || !hostCertificate.trusted) {
       if (newlyStarted) await engine.stop();
       const error = new Error(hostCertificate.recovery ?? hostCertificate.error
-        ?? 'Broad routing requires the proxy CA to be trusted in the user login keychain. Enable trust_host_ca or supply narrow domains.');
+        ?? 'System routing requires the proxy CA to be trusted in the user login keychain. Enable trust_host_ca or run setup_host_certificate first.');
       error.code = hostCertificate.code ?? 'HOST_CA_NOT_TRUSTED';
       throw error;
     }
@@ -285,6 +288,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         pacPort: pac_port ?? PAC_PORT_DEFAULT,
         proxyPort: engine.port,
         pacServer,
+        allowBroad: args.allow_broad_routing === true,
+        replaceExisting: args.replace_existing_proxy === true,
+        durationSeconds: args.duration_seconds ?? 3600,
       });
     } catch (error) {
       try { await clearPacRouting({ pacServer }); } catch { /* retain routing breadcrumbs */ }
@@ -320,6 +326,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function set_proxy_routing(args = {}) {
     await ensureProxyRunning();
+    const hostTrust = await getHostCertificateStatus(await activeCaCertificate());
+    if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA with setup_host_certificate before changing Mac routing. No routing settings were changed.'), {
+      code: 'HOST_CA_UNTRUSTED', retryable: false, recovery: ['Call setup_host_certificate, then retry the scoped routing request.'],
+    });
     const { domains, network_service, pac_port } = args;
     if (!Array.isArray(domains) || domains.length === 0) {
       throw new Error('domains must be a non-empty array.');
@@ -328,6 +338,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       domains, networkService: network_service,
       pacPort: pac_port ?? PAC_PORT_DEFAULT,
       proxyPort: engine.port, pacServer,
+      allowBroad: args.allow_broad_routing === true,
+      replaceExisting: args.replace_existing_proxy === true,
+      durationSeconds: args.duration_seconds ?? 3600,
     });
     return { status: 'routing_on', ...routing };
   }
@@ -455,7 +468,15 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       findings.push(finding('HOSTNAME_PASSTHROUGH', `${args.hostname} is configured for TLS passthrough.`, 'warning'));
     }
     return {
-      ok: !findings.some((item) => item.severity === 'error'),
+      ok: !findings.some((item) => item.severity === 'error') && checks.proxy_running && checks.recording
+        && (args.routing_mode === 'explicit' || checks.routing_matches_system),
+      readiness: {
+        service: checks.proxy_running ? 'ready' : 'stopped', recording: checks.recording ? 'ready' : 'paused',
+        routing: args.routing_mode === 'explicit' ? 'explicit_client_configuration_required'
+          : checks.routing_matches_system ? 'configured' : 'not_ready',
+        native_tls: 'use_verify_simulator_certificate',
+        app_traffic: checks.captured_flows > 0 ? 'observed_not_attributed_to_target_app' : 'not_observed',
+      },
       checks,
       hostname: args.hostname ?? null,
       findings,
@@ -510,8 +531,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function get_proxy_status() {
-    const [state, pid, storage] = await Promise.all([
-      readState(), readPidFile(), engine.sessionStore.storageStatus(),
+    const [state, pid, storage, runtime, events, guardianEvents] = await Promise.all([
+      readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'),
     ]);
     return {
       running: engine.isRunning(),
@@ -520,6 +541,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       socks_enabled: engine.socksEnabled ?? false,
       remote_access: engine.remoteAccessStatus(),
       mode,
+      runtime,
+      recent_runtime_events: events.slice(-10),
+      recent_guardian_events: guardianEvents.slice(-10),
       ca_cert: engine.caCertPath ?? CA_CERT,
       mock_rules_count: engine.mockRules.size,
       flows_count: engine.flows.size,
@@ -531,6 +555,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       daemon_pid: pid,
       state_pid: state?.pid ?? null,
       domains: state?.domains ?? [],
+      routing_expires_at: state?.routing_expires_at ?? null,
+      routing_fail_open: true,
       tls_passthrough: engine.tlsPassthrough,
       simulator_watcher: simWatchStop ? 'running' : 'stopped',
       recent_simulator_events: simWatcherEvents.slice(-10),
@@ -586,6 +612,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { name: 'proxy-mcp', version: SERVER_VERSION, node: process.version, mode };
   }
 
+  async function get_started(args = {}) { return gettingStarted(args, await get_proxy_status()); }
+  async function search_docs(args = {}) { return searchHelp(args.query, args.limit); }
+  async function list_setup_workflows() { return setupWorkflows(); }
+
   async function start_operator_ui(args = {}) {
     const alreadyRunning = operatorUi.status.running;
     const started = await operatorUi.start({ port: args.port });
@@ -626,13 +656,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     if (!args.domain) throw new Error('domain is required');
     const state = await readState();
     const domains = [...new Set([...(state?.domains ?? []), args.domain])];
-    const routing = await applyPacRouting({
-      domains,
-      networkService: state?.network_service,
-      pacPort: state?.pac_port ?? PAC_PORT_DEFAULT,
-      proxyPort: engine.port,
-      pacServer,
-    });
+    const routing = await set_proxy_routing({ domains, network_service: state?.network_service, pac_port: state?.pac_port ?? PAC_PORT_DEFAULT });
     return { status: 'enabled', domain: args.domain, de_duplicated: domains.length === (state?.domains?.length ?? 0), routing };
   }
 
@@ -2025,7 +2049,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     start_device_onboarding, stop_device_onboarding, diagnose_ios_capture,
     create_reverse_proxy, list_reverse_proxies, remove_reverse_proxy,
     restart_sim_apps: restart_sim_apps_tool,
-    get_version, get_proxy_status, toggle_recording,
+    get_version, get_proxy_status, toggle_recording, get_started, search_docs, list_setup_workflows,
     get_ssl_proxying_list, enable_ssl_proxying,
     clear_session, get_diagnostics, wait_for_flow,
     list_websocket_connections, get_websocket_connection, get_websocket_messages,

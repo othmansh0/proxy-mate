@@ -2,30 +2,32 @@
 
 ## Install once, share one daemon
 
-Requirements: macOS, full Xcode with an installed iOS Simulator runtime, and Node.js 20 or newer. Prefer a currently supported LTS version. Verify `xcode-select -p` points to Xcode, not CommandLineTools, and `xcrun simctl list devices booted` works. `DEVELOPER_DIR` can select a different Xcode installation and is preserved when installing the LaunchAgent.
+Requirements: macOS, full Xcode with an installed iOS Simulator runtime, and Node.js 22 or newer. Prefer a currently supported LTS version. Verify `xcode-select -p` points to Xcode, not CommandLineTools, and `xcrun simctl list devices booted` works. `DEVELOPER_DIR` can select a different Xcode installation and is preserved when installing the LaunchAgent.
 
 From a permanent checkout:
 
 ```bash
 npm ci
-node src/server.mjs install --domains 'api.your-company.test,*.your-company.test'
+node src/server.mjs install --no-routing --no-trust-ca
 node src/server.mjs status
 ```
 
-Replace those hosts with your real API hosts. Include authentication, upload and CDN hosts as needed. `--network-service 'Wi-Fi'` selects a particular enabled macOS network service; a misspelled service now fails instead of silently modifying another one. On an Ethernet/VPN configuration, select the service actually carrying your traffic. Proxy and PAC ports default to 8080 and 8081; the authenticated local control port defaults to 8082. Override all three if another proxy is using them.
+This starts the shared service and guardian without system routing or automatic Simulator imports. Omitting `--domains` never routes the entire Mac. Use `get_started` with the target API URL; add only the selected Simulator certificate, then choose a scoped capture path. For an automatic startup domain scope, explicitly supply `--domains 'api.your-company.test'`; all-host routing additionally requires `--allow-broad-routing`.
+
+Service selection follows the primary IPv4/IPv6 service in macOS SystemConfiguration. If that cannot be identified, setup requires an explicit `--network-service` instead of guessing Wi-Fi. Proxy, PAC and authenticated control ports default to 8080, 8081 and 8082; choose different ports when another tool owns them.
 
 The installer copies executable sources, Simulator probe scripts, and installed dependencies into a private `~/.proxy-mcp/runtime/build-*` snapshot, then waits for the new daemon's authenticated health response after setup and rule replay. The background service runs from that snapshot, not your checkout. It keeps the current and one previous completed snapshot; older managed snapshots are removed only after successful startup. This avoids launchd trying to read a checkout in macOS-protected Documents/Desktop/Downloads folders, which can fail with `EPERM` even when Terminal can read it. No Full Disk Access grant is required for the default runtime location.
 
 It preserves `PROXY_MCP_*` environment settings and uses a stable Homebrew Node path when available. Run install again after **any code/dependency upgrade**, changing options, or switching Node installations to refresh the snapshot. Keep custom `PROXY_MCP_HOME`, Node installations, custom CA/domain files, and daemon-readable fixtures outside protected folders unless you have explicitly granted the relevant macOS access. The original checkout remains an authorized fixture root, but authorization does not override macOS privacy permissions. Do not run a second foreground daemon with the same state directory.
 
-After installation, point every MCP client at the stable runtime entry point reported as `mcp_server_path` (expand the home directory to an absolute path):
+After installation, point every MCP client at the stable runtime entry point reported as `mcp_client_path` (expand the home directory to an absolute path):
 
 ```json
 {
   "mcpServers": {
     "proxy-mcp": {
       "command": "/absolute/path/to/node",
-      "args": ["/Users/YOUR_USER/.proxy-mcp/runtime/current/src/server.mjs", "--require-daemon"]
+      "args": ["/Users/YOUR_USER/.proxy-mcp/runtime/current/src/client.mjs"]
     }
   }
 }
@@ -35,7 +37,11 @@ Use `command -v node` to locate the binary. GUI clients may not inherit your she
 
 ## Trust, then verify, then capture
 
-Production MCP registrations should include `--require-daemon`. Without it, a missing daemon permits the legacy in-process fallback: the first client owns the runtime, other clients can receive `RUNTIME_BUSY`, and capture ends when the owner disconnects. The required-daemon mode keeps stdio clients independent of capture ownership, waits up to 15 seconds for authenticated recovery, and reports a structured outage without closing the MCP connection. A connection lost after submitting a mutation has an unknown outcome; inspect shared state before repeating it.
+Use the installed thin `client.mjs` entry. It initializes without capture ownership and serves built-in onboarding/recovery guidance even while the daemon is down. Legacy `server.mjs` now uses the same bridge by default; only `--in-process` enables the old single-client behavior. Restart/reconnect existing MCP registrations once when migrating from the old source process.
+
+The daemon and independent guardian are supervised LaunchAgents. The guardian restores recorded routing from a dead owner after acquiring exclusive ownership, and restarts an unresponsive, identity-verified installed daemon after a sustained health failure. It preserves unrelated or reused PIDs. Startup replacement is transactional: failed readiness restores previous plist files and previously loaded jobs; stable runtime publication happens last. Status includes code/dependency fingerprints and bounded daemon/guardian event journals.
+
+For localhost APIs, `create_reverse_proxy` now traverses the capture engine, including mocks/breakpoints, and returns a loopback `local_url` for the debug app. It does not change Mac networking. System PAC routing has a one-hour default lease (1–86400 seconds), explicit host scopes, `PROXY; DIRECT` fallback, host trust checks, conflict detection and owned-setting restoration. Fallback behavior depends on the client honoring PAC; it is not a certificate-pinning bypass or a guarantee about every network stack.
 
 1. Boot your target Simulator normally in Xcode or Simulator.
 2. Call `get_proxy_status`, then `setup_simulator_certificate` targeting that device (or the booted scope).

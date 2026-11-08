@@ -1,6 +1,6 @@
 {
   "name": "proxy-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Production-oriented local MCP server for HTTP(S) capture, mocking, routing, and automated Xcode Simulator CA trust.",
   "type": "module",
   "bin": {
@@ -39,7 +39,7 @@
     "analyze:capture": "node scripts/analyze-capture.mjs",
     "benchmark:storage": "node scripts/benchmark-session-store.mjs",
     "test": "node --test --test-reporter=spec",
-    "check": "node --check src/server.mjs && node --test --test-reporter=spec"
+    "check": "node --check src/server.mjs && node --check src/client.mjs && node --check src/guardian.mjs && node --test --test-reporter=spec"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -62,7 +62,7 @@
     "basic-ftp": "6.2.6"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public",

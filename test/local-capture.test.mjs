@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-local-capture-'));
+const { ProxyEngine } = await import('../src/lib/proxy.mjs');
+const { PacServer } = await import('../src/lib/pac.mjs');
+const { makeTools } = await import('../src/lib/tools.mjs');
+
+test('scoped local reverse proxy captures bodies and applies mocks without system routing', async (t) => {
+  let upstreamCalls = 0;
+  const server = http.createServer((_req, res) => { upstreamCalls++; res.setHeader('content-type', 'application/json'); res.end('{"source":"upstream"}'); });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise((resolve) => server.close(resolve)); });
+  const engine = new ProxyEngine(); const tools = makeTools({ engine, pacServer: new PacServer() });
+  t.after(() => tools.stop_proxy());
+  await tools.start_proxy({ port: 0 });
+  const target = `http://127.0.0.1:${server.address().port}`;
+  const proxy = await tools.create_reverse_proxy({ id: 'test-local', target_url: target });
+  assert.equal(proxy.capture_enabled, true);
+  assert.deepEqual(await (await fetch(`${proxy.local_url}/recipes`)).json(), { source: 'upstream' });
+  for (let i = 0; i < 100 && ![...engine.flows.values()].some((flow) => flow.response); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  const flow = [...engine.flows.values()].find((flow) => flow.request.url === `${target}/recipes`);
+  assert.match(flow.response.body_inline, /upstream/);
+  await tools.mock_json_response({ rule_id: 'test-local-mock', url: `${target}/recipes`, json: { source: 'mock' } });
+  assert.deepEqual(await (await fetch(`${proxy.local_url}/recipes`)).json(), { source: 'mock' });
+  assert.equal(upstreamCalls, 1);
+  assert.equal((await tools.get_proxy_status()).routing_active, false);
+  await tools.remove_reverse_proxy({ id: proxy.id });
+  await assert.rejects(fetch(`${proxy.local_url}/recipes`));
+});

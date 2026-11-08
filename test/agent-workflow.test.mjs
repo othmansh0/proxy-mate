@@ -31,7 +31,7 @@ test('agent uses real MCP to mock JSON, patch it under load, capture, and resolv
   const upstream = http.createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ source: 'upstream', pad: 'x'.repeat(70000) })); });
   const upstreamPort = await listen(upstream);
   const client = new Client({ name: 'agent-workflow-regression', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [path.join(root, 'src/server.mjs')], cwd: root,
+  const transport = new StdioClientTransport({ command: process.execPath, args: [path.join(root, 'src/server.mjs'), '--in-process'], cwd: root,
     env: { ...process.env, PROXY_MCP_HOME: state }, stderr: 'pipe' });
   let stderr = '';
   t.after(async () => { await client.close(); upstream.closeAllConnections(); await new Promise((resolve) => upstream.close(resolve)); await fs.rm(state, { recursive: true, force: true }); });

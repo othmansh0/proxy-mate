@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-11-08 (local release)
+
+- Added a thin default MCP bridge with offline onboarding/help, server instructions, and periodic progress for long tools. In-process capture now requires `--in-process`.
+- Added independent supervised recovery, bounded event journals, runtime/dependency fingerprints and transactional install rollback.
+- Made system routing opt-in, scoped, leased and fail-open in PAC-aware clients; use the actual primary service, protect other proxies and roll back partial setup failures. Fixed empty/null PAC URL parsing and preserve external changes.
+- Routed local reverse proxies through capture/mocks, tracked loopback sockets for bounded cleanup, and preserved healthy daemons in doctor.
+- Support maintained Node 22/24/26 lines; local deployment uses Node 24 LTS.
+
+## Earlier unreleased hardening
 
 - Added `--require-daemon` for shared production MCP clients, a cancellable 15-second authenticated readiness wait across daemon restarts, and actionable outage results without taking capture ownership.
 - Mark interrupted mutation RPCs as having an unknown outcome and unsafe to retry; covered two persistent MCP clients, owner disconnect, daemon SIGKILL recovery and a response lost after mutation acceptance.

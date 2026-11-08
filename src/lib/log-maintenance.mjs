@@ -8,7 +8,7 @@ import { STATE_DIR } from './config.mjs';
 export function rotateDaemonLogs({ directory = path.join(STATE_DIR, 'logs'), maxBytes = 5 * 1024 * 1024, archives = 3 } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || !Number.isSafeInteger(archives) || archives < 1 || archives > 10) throw new Error('Invalid log retention limits');
   const rotated = [];
-  for (const name of ['daemon.err.log', 'daemon.out.log']) {
+  for (const name of ['daemon.err.log', 'daemon.out.log', 'guardian.err.log', 'guardian.out.log']) {
     const file = path.join(directory, name);
     let stat;
     try { stat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }

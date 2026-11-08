@@ -34,6 +34,7 @@ function requestViaProxy(proxyPort, targetUrl, {
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
     });
     req.on('error', reject);
+    req.setTimeout(10000, () => req.destroy(Object.assign(new Error('Proxy test request exceeded its deadline.'), { code: 'TEST_REQUEST_TIMEOUT' })));
     req.end(body);
   });
 }
@@ -84,6 +85,20 @@ test('proxy defaults to loopback clients and requires explicit LAN consent', asy
     upstream.once('error', reject);
     upstream.listen(0, '0.0.0.0', () => resolve(upstream.address().port));
   });
+  // macOS grants Local Network access per executable. A newly installed Node
+  // may have loopback access while LAN traffic waits for that OS grant.
+  const reachable = await new Promise((resolve) => {
+    const check = http.get({ host: lan.address, port: upstreamPort, path: '/' }, (res) => {
+      res.resume(); res.on('end', () => resolve(true));
+    });
+    const deadline = setTimeout(() => check.destroy(), 2500);
+    check.on('close', () => clearTimeout(deadline));
+    check.on('error', () => resolve(false));
+  });
+  if (!reachable) {
+    upstream.closeAllConnections(); await new Promise((resolve) => upstream.close(resolve));
+    return t.skip('LAN inaccessible to this Node executable; macOS Local Network permission is a separate physical-device gate.');
+  }
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
   const engine = new ProxyEngine({ sessionId: 'remote-guard' });
 

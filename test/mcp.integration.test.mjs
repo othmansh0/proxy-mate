@@ -16,7 +16,7 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
   const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-stdio-'));
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [path.join(root, 'src/server.mjs')],
+    args: [path.join(root, 'src/server.mjs'), '--in-process'],
     cwd: root,
     env: { ...process.env, PROXY_MCP_HOME: state },
     stderr: 'pipe',

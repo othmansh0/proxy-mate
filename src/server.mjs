@@ -21,6 +21,9 @@ import path from 'node:path';
 import { acquireRuntime, reconcileRuntime, installShutdownHandlers } from './lib/runtime.mjs';
 import { startLogMaintenance } from './lib/log-maintenance.mjs';
 import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
+import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
+import { SERVER_INSTRUCTIONS } from './lib/guidance.mjs';
+import { recordRuntimeEvent } from './lib/runtime-identity.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
@@ -32,7 +35,7 @@ import {
 import { ControlServer, callDaemon, probeDaemon, DEFAULT_CONTROL_PORT, SERIAL_TOOL_NAMES } from './lib/control.mjs';
 import { doctorSweep, PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT } from './lib/doctor.mjs';
 import { installLaunchAgent, uninstallLaunchAgent, launchAgentStatus } from './lib/launchagent.mjs';
-import { applyPacRouting, clearPacRouting } from './lib/pac.mjs';
+import { applyPacRouting, clearPacRouting, validateRoutingDomains } from './lib/pac.mjs';
 import { trustCaOnSimulators } from './lib/sim.mjs';
 import { ensureCA } from './lib/proxy.mjs';
 import { STATE_DIR, SERVER_NAME, SERVER_VERSION } from './lib/config.mjs';
@@ -118,7 +121,7 @@ async function runStdio({ requireDaemon = false } = {}) {
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { capabilities: { tools: {}, logging: {} } },
+    { capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS },
   );
   const resourceSubscriptions = registerMcpResourceSubscriptions(mcp);
   const observableDispatch = async (tool, args, context) => {
@@ -136,48 +139,6 @@ async function runStdio({ requireDaemon = false } = {}) {
   stopResourceMonitor = startResourceSubscriptionMonitor(dispatch, resourceSubscriptions);
 }
 
-function startResourceSubscriptionMonitor(dispatch, subscriptions, intervalMs = 750) {
-  const fingerprints = new Map();
-  let busy = false;
-  const timer = setInterval(async () => {
-    if (busy) return;
-    const uris = subscriptions.subscriptions();
-    if (uris.length === 0) return;
-    busy = true;
-    try {
-      if (uris.includes(MCP_RESOURCE_URIS.status)) {
-        const status = await dispatch('get_proxy_status', {});
-        const next = JSON.stringify(status);
-        if (fingerprints.has(MCP_RESOURCE_URIS.status) && fingerprints.get(MCP_RESOURCE_URIS.status) !== next) {
-          await subscriptions.notifyStatus();
-        }
-        fingerprints.set(MCP_RESOURCE_URIS.status, next);
-      }
-      const flowIds = new Set(uris.flatMap(resourceFlowId));
-      for (const flowId of flowIds) {
-        try {
-          const detail = await dispatch('get_flow_detail', { flow_id: flowId, body_mode: 'none', include_sensitive: false });
-          const key = `${MCP_RESOURCE_URIS.liveFlowPrefix}${encodeURIComponent(flowId)}`;
-          const next = JSON.stringify(detail);
-          if (fingerprints.has(key) && fingerprints.get(key) !== next) await subscriptions.notifyLiveFlow(flowId);
-          fingerprints.set(key, next);
-        } catch { /* A removed or expired flow simply stops producing updates. */ }
-      }
-    } catch { /* Resource update notifications are advisory. */ }
-    finally { busy = false; }
-  }, intervalMs);
-  timer.unref?.();
-  return () => clearInterval(timer);
-}
-
-function resourceFlowId(uri) {
-  if (!uri.startsWith(MCP_RESOURCE_URIS.liveFlowPrefix)) return [];
-  const remainder = uri.slice(MCP_RESOURCE_URIS.liveFlowPrefix.length);
-  const encoded = remainder.split('/bodies/')[0];
-  try { return encoded ? [decodeURIComponent(encoded)] : []; }
-  catch { return []; }
-}
-
 async function runDaemon(args) {
   const releaseRuntime = await acquireRuntime();
   try { await reconcileRuntime(); }
@@ -189,6 +150,7 @@ async function runDaemon(args) {
   const tools = makeTools({ engine, pacServer, mode: 'daemon' });
 
   const { domains, tls_passthrough } = await loadDomainsConfig(args);
+  if (!args.skipRouting && domains.length) validateRoutingDomains(domains, { allowBroad: args.allowBroadRouting === true });
 
   const proxyPort = args.proxyPort ?? PROXY_PORT_DEFAULT;
   const pacPort   = args.pacPort   ?? PAC_PORT_DEFAULT;
@@ -248,6 +210,7 @@ async function runDaemon(args) {
       pacPort,
       proxyPort: engine.port,
       pacServer,
+      allowBroad: args.allowBroadRouting === true,
     });
     process.stderr.write(`[proxy-mcp] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
   }
@@ -284,10 +247,11 @@ async function runDaemon(args) {
   if (!args.skipTrust) await tools.start_sim_watcher({ interval: 5000 });
   // Publish readiness only after routing, trust and persisted rules are ready.
   ctrl = new ControlServer({ port: controlPort, tools });
+  await writePidFile(process.pid);
+  await patchState({ control_port: controlPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
   await ctrl.start();
   process.stderr.write(`[proxy-mcp] control plane listening on :${ctrl.port}\n`);
-  await writePidFile(process.pid);
-  await patchState({ control_port: ctrl.port, pid: process.pid });
+  await recordRuntimeEvent('ready');
   } catch (error) {
     process.stderr.write(`[proxy-mcp] daemon startup failed; rolling back: ${error?.message ?? error}\n`);
     finishStartup();
@@ -312,6 +276,8 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--daemon') args.daemon = true;
     else if (a === '--require-daemon') args.requireDaemon = true;
+    else if (a === '--in-process') args.inProcess = true;
+    else if (a === '--allow-broad-routing') args.allowBroadRouting = true;
     else if (a === '--proxy-port')   args.proxyPort = Number(value(++i, a));
     else if (a === '--pac-port')     args.pacPort = Number(value(++i, a));
     else if (a === '--control-port') args.controlPort = Number(value(++i, a));
@@ -354,12 +320,13 @@ async function loadDomainsConfig(args) {
     }
     throw new Error(`domains file ${args.domainsFile} must be a JSON array or { "domains": [...] }`);
   }
-  return { domains: args.skipRouting ? [] : ['*'], tls_passthrough: args.tlsPassthrough ?? [] };
+  return { domains: [], tls_passthrough: args.tlsPassthrough ?? [] };
 }
 
 function validateCliArgs(args) {
   if (args.daemon && args._.length) throw new Error('--daemon cannot be combined with a subcommand.');
   if (args.requireDaemon && (args.daemon || args._.length)) throw new Error('--require-daemon is only supported by the stdio MCP client.');
+  if (args.inProcess && (args.requireDaemon || args.daemon || args._.length)) throw new Error('--in-process is a standalone single-client development mode.');
   for (const [name, value] of [
     ['proxy-port', args.proxyPort], ['pac-port', args.pacPort], ['control-port', args.controlPort],
   ]) {
@@ -386,7 +353,8 @@ function printHelp() {
   process.stderr.write(`proxy-mcp v${SERVER_VERSION} — selective HTTP(S) interception for iOS Simulator testing
 
 USAGE
-  proxy-mcp                         Run as stdio MCP server (auto-connects to a running daemon if present)
+  proxy-mcp                         Run the thin stdio MCP bridge to the shared daemon
+  proxy-mcp --in-process            Explicit single-client development engine
   proxy-mcp --require-daemon        Shared-daemon MCP client; never owns capture or routing
   proxy-mcp --daemon [opts]         Long-lived daemon (manages proxy, PAC, sim trust, control plane)
   proxy-mcp doctor                  Inspect ports, stop only a verified stale daemon, restore recorded PAC state
@@ -400,7 +368,8 @@ DAEMON OPTIONS
   --control-port <n>        Daemon control plane port (default ${DEFAULT_CONTROL_PORT})
   --domains-file <path>     JSON file: { "domains": ["*.example.com", ...], "tls_passthrough": [...] }
   --domains <list>          Comma-separated host globs (overrides --domains-file)
-  --network-service <name>  macOS network service (default: auto-detect Wi-Fi)
+  --network-service <name>  macOS service (default: primary IPv4/IPv6 service)
+  --allow-broad-routing     Explicitly permit all-host domain globs
   --no-routing              Start proxy only; skip PAC + networksetup
   --allow-remote-proxy      Accept allowlisted LAN proxy clients for a bounded time
   --remote-allowlist <list> Comma-separated exact client IPs/CIDRs (required with remote access)
@@ -434,6 +403,7 @@ async function runDoctor() {
 async function runInstall(args) {
   const serverPath = url.fileURLToPath(import.meta.url);
   const installRouting = await loadDomainsConfig(args);
+  if (!args.skipRouting && installRouting.domains.length) validateRoutingDomains(installRouting.domains, { allowBroad: args.allowBroadRouting === true });
   if (!args.skipRouting && args.skipHostTrust && installRouting.domains.includes('*')) {
     throw new Error('--no-host-trust requires narrow --domains/--domains-file or --no-routing');
   }
@@ -450,6 +420,7 @@ async function runInstall(args) {
   if (args.skipTrust) extraArgs.push('--no-trust-ca');
   if (args.skipHostTrust) extraArgs.push('--no-host-trust');
   if (args.skipRouting) extraArgs.push('--no-routing');
+  if (args.allowBroadRouting) extraArgs.push('--allow-broad-routing');
   if (args.allowRemoteProxy) extraArgs.push('--allow-remote-proxy');
   if (args.remoteAllowlist?.length) extraArgs.push('--remote-allowlist', args.remoteAllowlist.join(','));
   if (args.remoteAccessTtlSeconds) extraArgs.push('--remote-access-ttl', String(args.remoteAccessTtlSeconds));
@@ -458,12 +429,11 @@ async function runInstall(args) {
   if (args.caKeyPath) extraArgs.push('--ca-key', args.caKeyPath);
   if (args.caCertPath) extraArgs.push('--ca-cert', args.caCertPath);
   if (args.networkService) extraArgs.push('--network-service', args.networkService);
-  if (args.domainsInline) extraArgs.push('--domains', args.domainsInline);
-  if (args.tlsPassthrough?.length) extraArgs.push('--tls-passthrough', args.tlsPassthrough.join(','));
+  if (installRouting.domains.length) extraArgs.push('--domains', installRouting.domains.join(','));
+  if (installRouting.tls_passthrough.length) extraArgs.push('--tls-passthrough', installRouting.tls_passthrough.join(','));
   const out = await installLaunchAgent({
     nodeBin: process.execPath,
     serverPath,
-    domainsFile: args.domainsFile,
     proxyPort: args.proxyPort,
     pacPort: args.pacPort,
     controlPort: args.controlPort,
@@ -504,7 +474,8 @@ async function main() {
   if (cmd === 'uninstall') { await runUninstall(args); return; }
   if (cmd === 'status')    { await runStatus(); return; }
   if (args.daemon)         { await runDaemon(args); return; }
-  await runStdio(args);
+  if (args.inProcess) await runStdio();
+  else await import('./client.mjs');
 }
 
 main().catch((e) => {

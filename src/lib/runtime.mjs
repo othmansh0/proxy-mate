@@ -3,15 +3,16 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { STATE_DIR } from './config.mjs';
 import { readState, isStateStale, defensiveNetworkResetAllServices, clearState } from './state.mjs';
+import { recordRuntimeEvent } from './runtime-identity.mjs';
 
 // One process owns a state directory, even when clients choose different ports.
 // Heartbeats make recovery after SIGKILL possible without trusting a PID file.
-export async function acquireRuntime({ directory = STATE_DIR } = {}) {
+export async function acquireRuntime({ directory = STATE_DIR, wait = true } = {}) {
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   try {
     return await lockfile.lock(path.join(directory, 'runtime'), {
       realpath: false, stale: 10_000, update: 2_000,
-      retries: { retries: 12, minTimeout: 1_000, maxTimeout: 1_000, factor: 1 },
+      retries: wait ? { retries: 12, minTimeout: 1_000, maxTimeout: 1_000, factor: 1 } : 0,
     });
   } catch (cause) {
     if (cause.code !== 'ELOCKED') throw cause;
@@ -51,18 +52,18 @@ export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 18
     pressureSamples = process.memoryUsage().rss > maxRss ? pressureSamples + 1 : 0;
     if (pressureSamples >= 3) {
       process.stderr.write('[proxy-mcp] sustained memory pressure: draining and restoring routing before exit; launchd will restart the daemon\n');
-      void shutdown(1);
+      void shutdown(1, 'memory_pressure');
     }
   }, 2000);
   memoryTimer.unref();
-  const shutdown = (code = 0) => {
+  const shutdown = (code = 0, reason = 'requested_shutdown') => {
     if (stopping) return stopping;
     clearInterval(memoryTimer);
     const timer = setTimeout(() => {
       process.stderr.write('[proxy-mcp] shutdown deadline exceeded; recovery state retained\n');
       process.exit(1);
     }, timeoutMs);
-    stopping = Promise.resolve().then(cleanup).then(
+    stopping = recordRuntimeEvent('stopping', { reason, code }).catch(() => {}).then(cleanup).then(
       () => { clearTimeout(timer); process.exit(code); },
       (error) => {
         process.stderr.write(`[proxy-mcp] cleanup failed: ${error?.message ?? error}\n`);
@@ -75,7 +76,7 @@ export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 18
   process.once('SIGINT', () => void shutdown());
   const fatal = (error) => {
     process.stderr.write(`[proxy-mcp] fatal: ${error?.message ?? error}\n`);
-    void shutdown(1);
+    void shutdown(1, 'fatal_error');
   };
   process.once('uncaughtException', fatal);
   process.once('unhandledRejection', fatal);

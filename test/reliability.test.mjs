@@ -196,7 +196,7 @@ test('invalid CLI flags fail promptly instead of entering stdio or truncating nu
 
 test('stdio EOF exits even after an in-process listener has been started', async (t) => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-stdio-eof-'));
-  const child = spawn(process.execPath, ['src/server.mjs'], { cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXY_MCP_HOME: state }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['src/server.mjs', '--in-process'], { cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXY_MCP_HOME: state }, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
   let output = ''; let errors = '';
   child.stdout.on('data', (data) => { output += data; }); child.stderr.on('data', (data) => { errors += data; });

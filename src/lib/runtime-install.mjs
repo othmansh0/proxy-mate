@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { STATE_DIR } from './config.mjs';
 
 const markerName = '.proxy-runtime.json';
@@ -17,13 +17,27 @@ export async function stageDaemonRuntime({ serverPath, runtimeRoot = path.join(S
     for (const name of ['src', 'scripts', 'node_modules', 'package.json']) {
       await fs.cp(path.join(sourceRoot, name), path.join(directory, name), { recursive: true, dereference: true });
     }
+    const lockPath = path.join(sourceRoot, 'package-lock.json');
+    const lock = await fs.readFile(lockPath).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (lock) await fs.writeFile(path.join(directory, 'package-lock.json'), lock, { mode: 0o600 });
+    const hash = createHash('sha256');
+    for (const name of ['src', 'scripts', 'package.json']) await hashTree(directory, name, hash);
     await fs.access(path.join(directory, 'src/server.mjs'));
-    await fs.writeFile(path.join(directory, markerName), JSON.stringify({ managed_by: 'proxy-mcp', version: 1, source: sourceRoot }), { mode: 0o600, flag: 'wx' });
+    await fs.writeFile(path.join(directory, markerName), JSON.stringify({ managed_by: 'proxy-mcp', version: 1, source: sourceRoot,
+      content_sha256: hash.digest('hex'), dependency_lock_sha256: lock ? createHash('sha256').update(lock).digest('hex') : null,
+      staged_at: new Date().toISOString() }), { mode: 0o600, flag: 'wx' });
     return { directory, serverPath: path.join(directory, 'src/server.mjs'), sourceRoot };
   } catch (error) {
     await fs.rm(directory, { recursive: true, force: true });
     throw error;
   }
+}
+
+async function hashTree(root, name, hash) {
+  const file = path.join(root, name);
+  if ((await fs.stat(file)).isDirectory()) {
+    for (const child of (await fs.readdir(file)).sort()) await hashTree(root, path.join(name, child), hash);
+  } else { hash.update(name).update('\0').update(await fs.readFile(file)).update('\0'); }
 }
 
 // Call only after the new service is healthy. Keep one prior snapshot for
