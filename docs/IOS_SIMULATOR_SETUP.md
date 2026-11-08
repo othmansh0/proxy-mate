@@ -37,6 +37,8 @@ Use `command -v node` to locate the binary. GUI clients may not inherit your she
 
 ## Trust, then verify, then capture
 
+Before requesting new macOS certificate trust, Proxy MCP displays a native explanation with Cancel and Continue. It describes the purpose, persistent trust scope, local storage, and access by connected MCP clients. Passwords are entered only in the subsequent macOS authentication dialog. Cancel, inactivity, or an unavailable GUI prevents certificate installation. An already-trusted certificate skips both dialogs. Simulator certificate import is a separate operation and does not grant access to saved Mac Keychain passwords.
+
 Use the installed thin `client.mjs` entry. It initializes without capture ownership and serves built-in onboarding/recovery guidance even while the daemon is down. Legacy `server.mjs` now uses the same bridge by default; only `--in-process` enables the old single-client behavior. Restart/reconnect existing MCP registrations once when migrating from the old source process.
 
 The daemon and independent guardian are supervised LaunchAgents. The guardian restores recorded routing from a dead owner after acquiring exclusive ownership, and restarts an unresponsive, identity-verified installed daemon after a sustained health failure. It preserves unrelated or reused PIDs. Startup replacement is transactional: failed readiness restores previous plist files and previously loaded jobs; stable runtime publication happens last. Status includes code/dependency fingerprints and bounded daemon/guardian event journals.

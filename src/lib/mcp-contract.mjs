@@ -406,7 +406,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('verify_simulator_certificate', 'Verify native URLSession HTTPS through an isolated loopback proxy on a booted simulator using the active CA. Does not install trust or verify automatic PAC routing.', {
     udid: z.string().uuid(), developer_dir: z.string().optional(),
   }, ADD, { longRunning: true }),
-  tool('setup_host_certificate', 'Install and trust the proxy CA in the current user login keychain without sudo.', {}, ADD, { longRunning: true }),
+  tool('setup_host_certificate', 'Show a native permission explanation, then request macOS approval to trust the proxy CA in the login keychain. Cancel leaves trust unchanged; already-trusted certificates skip both prompts.', {}, ADD, { longRunning: true }),
   tool('remove_host_certificate', 'Remove only this proxy-mcp CA fingerprint from the current user login keychain.', {}, MUTATE, { longRunning: true }),
   tool('rotate_certificate_authority', 'Archive and replace the proxy CA while stopped; optionally remove the old host trust first.', {
     remove_host_trust: z.boolean().optional().describe('Remove the old CA from the login keychain before rotation; defaults true.'),
