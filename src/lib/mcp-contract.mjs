@@ -24,6 +24,7 @@ const resultMetaSchema = z.object({
 
 const resourceUriSchema = z.string().min(1).describe('A proxy-mcp resource URI.');
 const headerSchema = z.record(z.string(), z.string());
+const capturedHeaderSchema = z.record(z.string(), z.union([z.string(), z.array(z.string())]));
 // The flow serializers emit `null` as the explicit "absent" marker (a captured
 // body reports body_omitted:false with body_omission_reason:null), so these
 // fields are nullish rather than merely optional. Declaring them optional-only
@@ -31,7 +32,7 @@ const headerSchema = z.record(z.string(), z.string());
 const flowPartSchema = z.looseObject({
   method: z.string().nullish(),
   url: z.string().nullish(),
-  headers: headerSchema.nullish(),
+  headers: capturedHeaderSchema.nullish(),
   statusCode: z.number().int().nullish(),
   status: z.number().int().nullish(),
   body_size: z.number().int().nonnegative().nullish(),

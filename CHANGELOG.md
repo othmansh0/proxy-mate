@@ -2,6 +2,8 @@
 
 ## 0.8.0 — 2026-11-08 (local release)
 
+- Verify native TLS trust on booted Simulators before automatic PAC routing in both daemon and MCP startup; leave new routing disabled when certificate setup or verification fails.
+- Accept repeated captured header values in MCP flow output without widening request inputs or exposing sensitive headers.
 - Added a thin default MCP bridge with offline onboarding/help, server instructions, and periodic progress for long tools. In-process capture now requires `--in-process`.
 - Added independent supervised recovery, bounded event journals, runtime/dependency fingerprints and transactional install rollback.
 - Made system routing opt-in, scoped, leased and fail-open in PAC-aware clients; use the actual primary service, protect other proxies and roll back partial setup failures. Fixed empty/null PAC URL parsing and preserve external changes.

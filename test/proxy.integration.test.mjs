@@ -11,6 +11,7 @@ process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { PacServer } = await import('../src/lib/pac.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
+const { MCP_TOOLS, successToolResult } = await import('../src/lib/mcp-contract.mjs');
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -118,7 +119,11 @@ test('proxy defaults to loopback clients and requires explicit LAN consent', asy
 
 test('captures traffic, redacts secrets, exports curl, and clears session', async (t) => {
   const upstream = http.createServer((req, res) => {
-    res.writeHead(201, { 'content-type': 'application/json', 'set-cookie': 'server=secret' });
+    res.writeHead(201, {
+      'content-type': 'application/json',
+      'set-cookie': ['server=secret', 'session=private'],
+      'x-env-type': ['staging', 'staging'],
+    });
     res.end('{"captured":true}');
   });
   const upstreamPort = await listen(upstream);
@@ -142,6 +147,11 @@ test('captures traffic, redacts secrets, exports curl, and clears session', asyn
   assert.equal(detail.request.cookies[0].value, '[REDACTED]');
   assert.equal(JSON.parse(detail.request.body_inline).password, '[REDACTED]');
   assert.equal(detail.response.statusCode, 201);
+  assert.deepEqual(detail.response.headers['x-env-type'], ['staging', 'staging']);
+  assert.equal(detail.response.headers['set-cookie'], '[REDACTED]');
+  const result = successToolResult('get_flow_detail', {}, detail);
+  assert.equal(MCP_TOOLS.find((tool) => tool.name === 'get_flow_detail')
+    .outputSchema.safeParse(result.structuredContent).success, true);
   const durable = await engine.sessionStore.getFlow({ sessionId: engine.sessionId, flowId: id });
   assert.equal(durable.request.headers.authorization, '[REDACTED]');
   assert.match(durable.request.url, /%5BREDACTED%5D/);

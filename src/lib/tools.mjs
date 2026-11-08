@@ -28,6 +28,7 @@ import {
 } from './state.mjs';
 import { STATE_DIR, SERVER_VERSION, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { getHostCertificateStatus, setupHostCertificate, removeHostCertificate } from './host-cert.mjs';
+import { setupSimulatorRouting } from './simulator-routing.mjs';
 import { authorizeReadPath, authorizeWritePath, requireSensitiveAccess } from './paths.mjs';
 import { DeviceOnboardingPortal } from './device-onboarding.mjs';
 import {
@@ -281,24 +282,28 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     }
 
     let routing;
+    let trust;
     try {
-      routing = await applyPacRouting({
-        domains,
-        networkService: network_service,
-        pacPort: pac_port ?? PAC_PORT_DEFAULT,
-        proxyPort: engine.port,
-        pacServer,
-        allowBroad: args.allow_broad_routing === true,
-        replaceExisting: args.replace_existing_proxy === true,
-        durationSeconds: args.duration_seconds ?? 3600,
-      });
+      ({ trust, routing } = await setupSimulatorRouting({
+        certPath: activeCaCert,
+        keyPath: engine.caKeyPath,
+        applyRouting: () => applyPacRouting({
+          domains,
+          networkService: network_service,
+          pacPort: pac_port ?? PAC_PORT_DEFAULT,
+          proxyPort: engine.port,
+          pacServer,
+          allowBroad: args.allow_broad_routing === true,
+          replaceExisting: args.replace_existing_proxy === true,
+          durationSeconds: args.duration_seconds ?? 3600,
+        }),
+      }));
     } catch (error) {
       try { await clearPacRouting({ pacServer }); } catch { /* retain routing breadcrumbs */ }
       if (newlyStarted) await engine.stop();
       await patchState({ proxy_port: engine.port, setup_error: error.message });
       throw error;
     }
-    const trust = await trustCaOnSimulators(activeCaCert);
     const restartReport = trust.trusted?.length
       ? await restartSimApps({})
       : { restarted: [], skipped: 'certificate was not imported on a booted simulator' };
