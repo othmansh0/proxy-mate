@@ -45,6 +45,12 @@ Open production acceptance: native automatic routing across the remaining suppor
 
 A live MCP bridge does not make a crashed capture engine lossless. In-flight requests can fail; ephemeral reverse-proxy listeners and routing selected after an idle install may need to be recreated after recovery. Persisted mock rules and durable captured sessions survive. `get_started` reports service readiness separately from app verification and gives recovery/setup actions. Keep rule ownership/expiry, restart restoration of task-specific capture profiles, broader sleep/wake/VPN testing and multi-day real-app acceptance in the backlog.
 
+### Remote integration and CI gate
+
+The existing private repository now uses `develop` as its default/integration branch. Functional integration head `ca6694cde928612dde93578bab578c3f14f078c6` is pushed; remote `main` remains `e837b361e7374d6387c697b609b6492abc1d5fc1`, awaiting owner testing/promotion. Local archive and feature refs preserve the earlier main tip and implementation history.
+
+[GitHub Actions run 42454225276](https://github.com/othmansh0/proxy-mcp/actions/runs/42454225276) failed before any job steps started. The authenticated GitHub page reports an account billing/spending restriction. No CI tests ran; this is not a green CI result or a test failure attribution. The API token can read Actions job status but cannot read check annotations, so the blocker was verified through the repository's logged-in GitHub UI. Billing changes remain an owner action. Local Node 24.22.2 and Node 26.8.1 suites both pass all 217 tests.
+
 No new repository was created: the existing private remote is `othmansh0/proxy-mcp`. Integration uses `develop`; remote `main` is reserved for promotion after owner testing. Temporary implementation work belongs to this MCP's dedicated Tools workspace, not Recipe Jar's iOS/backend repositories.
 
 ## Assessment — 7 November 2026 (historical where superseded above)
