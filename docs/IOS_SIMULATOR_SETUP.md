@@ -49,7 +49,9 @@ For localhost APIs, `create_reverse_proxy` now traverses the capture engine, inc
 4. Relaunch only your app if it was running before the PAC/proxy changed, then trigger a known API request.
 5. Call `wait_for_flow` with a narrow URL/method filter. Inspect `get_flow_detail` before setting mocks or breakpoints.
 
-The daemon also watches newly booted Simulators and imports the same CA automatically. Watcher failures are reported and retried without crashing the process. It does not terminate arbitrary Simulator apps. An erase/reset of your Simulator is not part of normal setup.
+Automatic setup (`start_proxy` with `auto_setup: true`, or daemon startup with routing and automatic Simulator trust enabled) requires a booted Simulator. It imports the CA and verifies native URLSession TLS trust on every booted Simulator before applying PAC routing. Import or verification failure leaves new routing disabled and returns an actionable error. Boot the target Simulator before retrying. For capture without a Simulator, use explicit routing or the daemon's `--no-trust-ca` option.
+
+The daemon also watches newly booted Simulators and imports the same CA automatically. Watcher failures are reported and retried without crashing the process. A watcher import is not native TLS verification: when changing Simulators, complete the trust and verification steps before launching your app. It does not terminate arbitrary Simulator apps. An erase/reset of your Simulator is not part of normal setup.
 
 The standalone trust check is useful without an MCP client:
 

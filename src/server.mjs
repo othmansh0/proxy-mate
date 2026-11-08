@@ -37,6 +37,7 @@ import { doctorSweep, PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT } from './lib/doctor.
 import { installLaunchAgent, uninstallLaunchAgent, launchAgentStatus } from './lib/launchagent.mjs';
 import { applyPacRouting, clearPacRouting, validateRoutingDomains } from './lib/pac.mjs';
 import { trustCaOnSimulators } from './lib/sim.mjs';
+import { setupSimulatorRouting } from './lib/simulator-routing.mjs';
 import { ensureCA } from './lib/proxy.mjs';
 import { STATE_DIR, SERVER_NAME, SERVER_VERSION } from './lib/config.mjs';
 import { setupHostCertificate, removeHostCertificate } from './lib/host-cert.mjs';
@@ -203,8 +204,9 @@ async function runDaemon(args) {
   process.stderr.write(`[proxy-mcp] proxy listening on :${engine.port}\n`);
 
   let routing = null;
+  let trust = null;
   if (!args.skipRouting && domains.length > 0) {
-    routing = await applyPacRouting({
+    const applyRouting = () => applyPacRouting({
       domains,
       networkService: args.networkService,
       pacPort,
@@ -212,11 +214,15 @@ async function runDaemon(args) {
       pacServer,
       allowBroad: args.allowBroadRouting === true,
     });
+    if (args.skipTrust) routing = await applyRouting();
+    else ({ trust, routing } = await setupSimulatorRouting({
+      certPath: activeCaCert, keyPath: engine.caKeyPath, applyRouting,
+    }));
     process.stderr.write(`[proxy-mcp] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
   }
 
   if (!args.skipTrust) {
-    const trust = await trustCaOnSimulators(activeCaCert);
+    trust ??= await trustCaOnSimulators(activeCaCert);
     if (trust.trusted?.length) {
       process.stderr.write(`[proxy-mcp] CA imported on ${trust.trusted.length} simulator(s): ${trust.trusted.map((s) => s.name).join(', ')}\n`);
     }
