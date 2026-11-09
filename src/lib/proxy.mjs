@@ -20,6 +20,8 @@ import { JsonlWebSocketStoreBackend, WebSocketStore, mockttpWebSocketHandlers } 
 import { BreakpointManager, createMockttpBreakpointCallbacks } from './breakpoints.mjs';
 import { redactBody, redactHeaders, redactUrl } from './redaction.mjs';
 import { PluginStore } from './plugin-store.mjs';
+import { activeConnectionAttemptTimeout } from './network-policy.mjs';
+import { upstreamErrorDiagnostic, upstreamErrorFromTags, upstreamErrorTags } from './upstream-errors.mjs';
 import {
   normalizeMatchUrl, matchUrlPath, matcherError, parseRequestQuery, queryMatches, ruleUrlMatchers,
   validateMatcherObject, validateMatchQuery,
@@ -443,6 +445,8 @@ export class ProxyEngine {
       existing.response = {
         statusCode: res.statusCode,
         statusMessage: res.statusMessage,
+        tags: upstreamErrorTags(res.tags),
+        upstream_error: upstreamErrorFromTags(res.tags),
         http_version: res.httpVersion ?? res.http_version ?? null,
         headers: rawCaptureEnabled ? res.headers : redactHeaders(res.headers),
         trailers: rawCaptureEnabled ? jsonSafe(res.trailers ?? null) : redactHeaders(jsonSafe(res.trailers ?? null)),
@@ -496,6 +500,12 @@ export class ProxyEngine {
         this.diagnostics.splice(0, this.diagnostics.length - this.maxDiagnostics);
       }
     };
+    await this.server.on('rule-event', (event) => {
+      const diagnostic = upstreamErrorDiagnostic(event);
+      if (diagnostic) push('upstream-error', {
+        ...diagnostic, connection_attempt_timeout_ms: activeConnectionAttemptTimeout(),
+      });
+    });
     try {
       await this.server.on('tls-client-error', (e) => push('tls-client-error', {
         failureCause: e?.failureCause,

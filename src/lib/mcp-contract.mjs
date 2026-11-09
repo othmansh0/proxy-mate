@@ -25,6 +25,7 @@ const resultMetaSchema = z.object({
 const resourceUriSchema = z.string().min(1).describe('A proxy-mcp resource URI.');
 const headerSchema = z.record(z.string(), z.string());
 const capturedHeaderSchema = z.record(z.string(), z.union([z.string(), z.array(z.string())]));
+const upstreamErrorSchema = z.object({ source: z.literal('proxy'), code: z.string(), message: z.string() });
 // The flow serializers emit `null` as the explicit "absent" marker (a captured
 // body reports body_omitted:false with body_omission_reason:null), so these
 // fields are nullish rather than merely optional. Declaring them optional-only
@@ -35,6 +36,8 @@ const flowPartSchema = z.looseObject({
   headers: capturedHeaderSchema.nullish(),
   statusCode: z.number().int().nullish(),
   status: z.number().int().nullish(),
+  tags: z.array(z.string()).optional(),
+  upstream_error: upstreamErrorSchema.nullable().optional(),
   body_size: z.number().int().nonnegative().nullish(),
   body_inline: z.string().nullish(),
   body_base64: z.string().nullish(),
@@ -45,6 +48,7 @@ const flowPartSchema = z.looseObject({
 });
 const flowSummarySchema = z.looseObject({
   id: z.string().optional(),
+  upstream_error: upstreamErrorSchema.nullable().optional(),
   request: flowPartSchema.nullable().optional(),
   response: flowPartSchema.nullable().optional(),
   resource_uri: resourceUriSchema.optional(),
@@ -71,6 +75,7 @@ const flowDetailSchema = z.looseObject({
 });
 const proxyStatusSchema = z.looseObject({
   running: z.boolean().optional(),
+  connection_attempt_timeout_ms: z.number().int().min(10).max(10000).optional(),
   port: z.number().int().nullable().optional(),
   socks_enabled: z.boolean().optional(),
   recording: z.boolean().optional(),

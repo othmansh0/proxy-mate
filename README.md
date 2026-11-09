@@ -111,6 +111,10 @@ App-only capture uses a separate loopback gateway (8083 by default) so cached ap
 
 The advanced `--trust-simulators` flag opts into automatic CA import on all booted Simulators and the watcher. Prefer selecting one device through setup instead.
 
+The daemon and explicit in-process capture give each address-family connection attempt 2000 ms, avoiding Node's 250 ms default cutting off a viable slow connection during startup. IPv4/IPv6 selection and TLS certificate validation remain enabled. Set `PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS` to a whole number from 10 to 10000 before installation or daemon startup to override this; installation retains the setting. `get_proxy_status.connection_attempt_timeout_ms` reports the active value. This is a per-address window, not an overall request deadline: larger values can slow fallback on broken routes, and network/DNS/VPN/backend outages can still fail. HTTP requests, including authentication POSTs, are not automatically replayed.
+
+Proxy forwarding failures expose `upstream_error` in flow summaries and response details, plus bounded machine-readable `response.tags`. The marker's `source: "proxy"` distinguishes a locally generated 502 from an actual backend 502. `get_diagnostics` returns flow-correlated `upstream-error` records with safe codes and the active attempt window; raw error messages, stacks, headers and bodies are excluded. Error metadata is retained with durable flows, including after daemon recovery.
+
 ## Deliberate limits
 
 `proxy-mcp` focuses on safe agent-driven HTTP debugging. It does not ship a desktop GUI, Android/Windows/Linux automation, packet-level shaping, DNS/TUN/WireGuard capture, HTTP/3, arbitrary user scripting, general Mac app attribution, or live WebSocket frame injection. Those require a different engine or product surface and are documented instead of being emulated inaccurately.

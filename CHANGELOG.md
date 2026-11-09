@@ -2,6 +2,8 @@
 
 ## 0.8.0 — 2026-11-08 (local release)
 
+- Give capture-owner processes a configurable 2000 ms connection-attempt window while preserving address-family selection, TLS validation and single-shot HTTP forwarding. Expose the active setting in proxy status.
+- Preserve safe upstream error tags and flow-correlated diagnostics for proxy-generated 502 responses, distinguishing them from real backend responses without storing raw error content.
 - Add app-first CLI/chat setup and native Simulator app attribution before inspection. Other and unknown connections bypass capture; app mode changes only the selected Simulator's trust and uses a separate gateway port for recovery isolation.
 - Make Mac Keychain trust and automatic Simulator imports opt-in with `--trust-host-ca` and `--trust-simulators`; retain explicit domain and Mac-wide capture as advanced choices.
 - Explain new Mac certificate trust in a native dialog before system authentication; cancel and unavailable GUI sessions leave certificate trust unchanged, and existing trust skips both prompts.
