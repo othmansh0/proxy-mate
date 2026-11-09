@@ -26,6 +26,7 @@ import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
 import { SERVER_INSTRUCTIONS } from './lib/guidance.mjs';
 import { recordRuntimeEvent } from './lib/runtime-identity.mjs';
+import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/network-policy.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
@@ -102,6 +103,7 @@ async function runStdio({ requireDaemon = false } = {}) {
       // Claim state lazily: initializing/listing MCP tools must never change
       // network settings or create a competing proxy.
       if (!localReady) localReady = (async () => {
+        configureConnectionAttempts();
         releaseRuntime = await acquireRuntime();
         await reconcileRuntime();
         localTools = makeTools({ engine: new ProxyEngine(), pacServer: new PacServer(), mode: 'in-process' });
@@ -144,6 +146,7 @@ async function runStdio({ requireDaemon = false } = {}) {
 }
 
 async function runDaemon(args) {
+  configureConnectionAttempts();
   const releaseRuntime = await acquireRuntime();
   try { await reconcileRuntime(); }
   catch (error) { await releaseRuntime(); throw error; }
@@ -415,6 +418,7 @@ async function runDoctor() {
 }
 
 async function runInstall(args) {
+  connectionAttemptTimeout();
   const serverPath = url.fileURLToPath(import.meta.url);
   const installRouting = await loadDomainsConfig(args);
   if (!args.skipRouting && installRouting.domains.length) validateRoutingDomains(installRouting.domains, { allowBroad: args.allowBroadRouting === true });

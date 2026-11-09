@@ -30,6 +30,7 @@ import { STATE_DIR, SERVER_VERSION, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGra
 import { getHostCertificateStatus, setupHostCertificate, removeHostCertificate } from './host-cert.mjs';
 import { setupSimulatorRouting } from './simulator-routing.mjs';
 import { AppProxyGateway } from './app-gateway.mjs';
+import { activeConnectionAttemptTimeout } from './network-policy.mjs';
 import { createAppClassifier } from './app-identity.mjs';
 import { listSimulatorApplications, resolveSimulatorApplication, simulatorProcessVerifier } from './simulator-apps.mjs';
 import { authorizeReadPath, authorizeWritePath, requireSensitiveAccess } from './paths.mjs';
@@ -148,6 +149,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       url: includeSensitive ? f.request?.url : redactUrl(f.request?.url),
       hostname: f.request?.hostname ?? safeHostname(f.request?.url),
       status: f.response?.statusCode,
+      upstream_error: f.response?.upstream_error ?? null,
       size: f.response?.body_size ?? 0,
       timestamp: f.timestamp,
       protocol: f.request?.protocol ?? null,
@@ -197,6 +199,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       response: f.response && {
         statusCode: f.response.statusCode,
         statusMessage: f.response.statusMessage,
+        tags: f.response.tags ?? [],
+        upstream_error: f.response.upstream_error ?? null,
         http_version: f.response.http_version ?? f.request?.http_version ?? null,
         headers: includeSensitive ? f.response.headers : redactHeaders(f.response.headers),
         cookies: parseSetCookies(f.response.headers?.['set-cookie'], includeSensitive),
@@ -607,6 +611,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     ]);
     return {
       running: engine.isRunning(),
+      connection_attempt_timeout_ms: activeConnectionAttemptTimeout(),
       port: appGateway?.port ?? engine.port,
       capture_scope: appScope ?? { mode: 'domains' },
       app_gateway: appGateway?.status() ?? null,

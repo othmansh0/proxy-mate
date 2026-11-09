@@ -31,8 +31,8 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   await Promise.all(reservations.map((server) => new Promise((resolve) => server.close(resolve))));
   const args = ['src/server.mjs', '--daemon', '--no-routing',
     '--proxy-port', String(ports[0]), '--pac-port', String(ports[1]), '--control-port', String(ports[2])];
-  const start = () => {
-    const child = spawn(process.execPath, args, { cwd: root, env: { ...process.env, PROXY_MCP_HOME: directory }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const start = (environment = {}) => {
+    const child = spawn(process.execPath, args, { cwd: root, env: { ...process.env, PROXY_MCP_HOME: directory, ...environment }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.errors = '';
     child.stdout.resume();
     child.stderr.on('data', (data) => { child.errors += data; });
@@ -58,6 +58,7 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   const initial = await ready(first);
   const defaultStatus = await callDaemon({ ...initial, tool: 'get_proxy_status' });
   assert.equal(defaultStatus.simulator_watcher, 'stopped');
+  assert.equal(defaultStatus.connection_attempt_timeout_ms, 2000);
   assert.equal(defaultStatus.routing_active, false);
   await callDaemon({ ...initial, tool: 'stop_proxy' });
   await assert.rejects(callDaemon({ ...initial, tool: 'start_app_capture', args: {
@@ -85,8 +86,9 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   first.kill('SIGTERM');
   assert.deepEqual(await first.finished, { code: 0, signal: null });
   await assert.rejects(fs.access(path.join(directory, 'handshake.json')), { code: 'ENOENT' });
-  const second = start();
+  const second = start({ PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS: '1250' });
   const restarted = await ready(second, initial.token);
+  assert.equal((await callDaemon({ ...restarted, tool: 'get_proxy_status' })).connection_attempt_timeout_ms, 1250);
   second.kill('SIGKILL');
   await second.finished;
   const pendingRead = clients[1].callTool({ name: 'get_proxy_status', arguments: {} });
