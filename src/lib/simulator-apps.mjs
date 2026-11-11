@@ -40,12 +40,17 @@ export async function listSimulatorApplications({ udid }) {
 
 export async function resolveSimulatorApplication({ udid, bundle_id }) {
   const { device, developerDir } = await appContext(udid);
-  const { stdout } = await execute('/usr/bin/xcrun', ['simctl', 'get_app_container', udid, bundle_id, 'app'], {
+  const appPath = await refreshSimulatorApplicationPath({ device, developerDir, bundle_id });
+  return { device, developerDir, appPath, bundle_id };
+}
+
+export async function refreshSimulatorApplicationPath({ device, developerDir, bundle_id }) {
+  const { stdout } = await execute('/usr/bin/xcrun', ['simctl', 'get_app_container', device.udid, bundle_id, 'app'], {
     env: { ...process.env, DEVELOPER_DIR: developerDir }, timeout: 15_000, maxBuffer: 64 * 1024,
   });
   const appPath = await fs.realpath(stdout.trim());
   if (!appPath.endsWith('.app')) throw Object.assign(new Error('The selected application bundle could not be identified.'), { code: 'APP_NOT_FOUND' });
-  return { device, developerDir, appPath, bundle_id };
+  return appPath;
 }
 
 export function simulatorProcessVerifier({ device, bundle_id, developerDir }) {

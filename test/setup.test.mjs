@@ -76,7 +76,7 @@ test('chat onboarding does not infer broad interception permission from an API U
   const state = { running: true, recording: true, routing_active: false };
   const result = gettingStarted({ url: 'https://api.example.com' }, state);
   assert.equal(result.default_capture_scope, 'app');
-  assert.deepEqual(result.next_calls, [{ tool: 'list_simulator_apps', arguments: {} }]);
+  assert.deepEqual(result.next_calls, [{ tool: 'get_flows', arguments: { host: 'api.example.com', limit: 20 } }]);
   assert.ok(result.setup_questions.length);
   const domains = gettingStarted({ url: 'https://api.example.com', capture_scope: 'domains' }, state);
   assert.equal(domains.next_calls.at(-1).arguments.domains[0], 'api.example.com');
