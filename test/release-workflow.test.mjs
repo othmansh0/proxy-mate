@@ -42,4 +42,7 @@ test('npm version creates a matching commit/tag/changelog without editing a runt
   await assert.rejects(run(process.execPath, ['scripts/release.mjs', 'validate'], { env: { ...env, RELEASE_TAG: 'v0.9.0' } }), /does not match/);
   const version = await run(process.execPath, ['--input-type=module', '-e', "import {SERVER_VERSION} from './src/lib/config.mjs'; console.log(SERVER_VERSION)"]);
   assert.equal(version.stdout.trim(), '0.9.1');
+  await fs.mkdir(path.join(temporary, 'external-modules'));
+  await fs.symlink(path.join(temporary, 'external-modules'), path.join(temporary, 'node_modules'));
+  await assert.rejects(run(process.execPath, ['scripts/check-package.mjs']), /symlinked node_modules cannot be bundled reliably/);
 });

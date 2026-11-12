@@ -49,6 +49,9 @@ async function validate() {
 }
 
 async function pack() {
+  if (process.versions.node !== '24.22.2' || (await npm(['--version'])).stdout.trim() !== '11.19.1') {
+    throw new Error('Reproducible release builds require Node 24.22.2 and npm 11.19.1. Consumer installs still support Node 22+.');
+  }
   await validate();
   await fs.mkdir(output, { recursive: true });
   const packed = JSON.parse((await npm(['pack', '--json', '--pack-destination', output])).stdout)[0];
