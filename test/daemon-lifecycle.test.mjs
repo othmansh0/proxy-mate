@@ -61,6 +61,7 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   assert.equal(defaultStatus.connection_attempt_timeout_ms, 2000);
   assert.equal(defaultStatus.routing_active, false);
   await callDaemon({ ...initial, tool: 'stop_proxy' });
+  await callDaemon({ ...initial, tool: 'create_capture_session', args: { session_id: 'persistent-active', activate: true } });
   await assert.rejects(callDaemon({ ...initial, tool: 'start_app_capture', args: {
     udid: 'not-needed-before-port-check', bundle_id: 'com.example.demo', port: ports[0],
   } }), { code: 'APP_PROXY_PORT_CONFLICT' });
@@ -83,12 +84,18 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   assert.notEqual(denied.code, 0);
   assert.match(concurrent.errors, /owns this state directory/);
   assert.equal((await callDaemon({ ...initial, tool: 'get_proxy_status' })).running, true);
+  const lease = await callDaemon({ ...initial, tool: 'acquire_capture_lease', args: { task_id: 'survive-restart' } });
   first.kill('SIGTERM');
   assert.deepEqual(await first.finished, { code: 0, signal: null });
   await assert.rejects(fs.access(path.join(directory, 'handshake.json')), { code: 'ENOENT' });
   const second = start({ PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS: '1250' });
   const restarted = await ready(second, initial.token);
   assert.equal((await callDaemon({ ...restarted, tool: 'get_proxy_status' })).connection_attempt_timeout_ms, 1250);
+  const restoredStatus = await callDaemon({ ...restarted, tool: 'get_proxy_status' });
+  assert.equal(restoredStatus.active_session_id, 'persistent-active');
+  assert.equal(restoredStatus.capture_lease.task_id, 'survive-restart');
+  await assert.rejects(callDaemon({ ...restarted, tool: 'stop_proxy' }), { code: 'CAPTURE_OWNED' });
+  assert.equal((await callDaemon({ ...restarted, tool: 'acquire_capture_lease', args: { task_id: 'survive-restart', capture_lease_id: lease.capture_lease_id } })).status, 'renewed');
   second.kill('SIGKILL');
   await second.finished;
   const pendingRead = clients[1].callTool({ name: 'get_proxy_status', arguments: {} });

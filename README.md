@@ -40,11 +40,16 @@ The daemon survives client exits. A restart gets a bounded 15-second authenticat
 
 Ask your MCP client to:
 
-1. Call `get_started` with the API URL and a unique `task_id`; follow its exact next-call arguments.
-2. Call `setup_simulator_certificate` for a booted Simulator.
-3. Call `verify_simulator_certificate` with that Simulator's `udid` to test native iOS TLS trust.
-4. For localhost use `create_reverse_proxy` and its returned `local_url`. For external hosts use scoped `set_proxy_routing` after host CA trust. Trigger an app request; relaunch only that app if it cached old routing.
-5. Call `wait_for_flow`, then `get_flow_detail` for the selected request.
+1. Call `get_started` with a unique `task_id` and follow its exact next-call arguments. Reuse an existing capture and its active session.
+2. Acquire `acquire_capture_lease` before changing shared capture, routing or mock rules. The thin bridge remembers the returned ID; direct RPC callers pass `capture_lease_id`. Other agents can still read, export and replay. Leases default to 15 minutes, can be renewed, and persist across reconnects/restarts until expiry.
+3. For a new Simulator capture, select one device/app with `list_simulator_apps`, then `start_app_capture`. It imports/verifies that Simulator's CA before routing. Repeating the same target reuses capture; supply `duration_seconds` to renew routing. Broader domain/Mac capture remains an explicit choice.
+4. For localhost use `create_reverse_proxy` and its returned `local_url`. Trigger the actual app request, then use `wait_for_flow` and `get_flow_detail` to inspect it.
+5. For large JSON use `save_body_to_file` without `path`; read the returned private file. It exports complete redacted text without a sensitive grant. HAR/session exports also retain spilled text, with explicit omission reasons/counts for binary, missing or over-budget bodies. Body export is bounded to 50 MiB per file/archive.
+6. Remove only your task's rules/listeners and release its capture lease. Release/expiry does not stop capture or expire mocks. Legacy calls remain compatible when no task holds a lease.
+
+App attribution batches fresh socket lookups and re-resolves the selected bundle after reinstall. `app_gateway.attribution` and `coverage_degraded` expose unknown ownership and overload. Unknown connections remain uninspected; zero persistence drops does not prove full capture coverage. App/background helpers that bypass attribution or proxy settings and certificate pinning remain coverage limits.
+
+`update_capture_session` can rename the active session without interrupting capture. Selecting another active session still requires stopping capture, and rejected activation no longer leaves an empty session behind. The daemon restores the selected durable session after recovery; app routing still requires explicit restart.
 
 Certificate verification uses a native URLSession request through an explicit test proxy. It does **not** claim to verify your app's automatic PAC routing or certificate-pinning policy.
 

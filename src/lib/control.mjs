@@ -19,6 +19,7 @@ const DEFAULT_RATE_LIMIT = 600;
 const DEFAULT_RATE_WINDOW_MS = 60_000;
 const READ_ONLY_TOOL_NAMES = new Set(MCP_TOOLS.filter((tool) => tool.annotations.readOnlyHint).map((tool) => tool.name));
 export const SERIAL_TOOL_NAMES = new Set([
+  'acquire_capture_lease', 'release_capture_lease', 'toggle_recording', 'import_har', 'restart_sim_apps',
   'start_proxy', 'stop_proxy', 'set_proxy_routing', 'clear_proxy_routing',
   'start_app_capture',
   'setup_host_certificate', 'remove_host_certificate', 'setup_simulator_certificate',
