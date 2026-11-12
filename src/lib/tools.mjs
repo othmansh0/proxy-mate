@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 
-import { CA_CERT, CA_DIR, ensureCA, rotateCA } from './proxy.mjs';
+import { CA_CERT, CA_DIR, ensureCA, rotateCA, removeOwnedMockBody } from './proxy.mjs';
 import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains } from './pac.mjs';
 import { gettingStarted, searchHelp, setupWorkflows } from './guidance.mjs';
 import { runtimeIdentity, readRuntimeEvents } from './runtime-identity.mjs';
@@ -34,6 +34,7 @@ import { activeConnectionAttemptTimeout } from './network-policy.mjs';
 import { createAppClassifier } from './app-identity.mjs';
 import { listSimulatorApplications, resolveSimulatorApplication, refreshSimulatorApplicationPath, simulatorProcessVerifier } from './simulator-apps.mjs';
 import { bodyForExport, MAX_EXPORTED_BODY_BYTES } from './body-export.mjs';
+import { inspectJson } from './json-inspection.mjs';
 import { CaptureLease, LEASE_PROTECTED_TOOLS, INTERNAL_CAPTURE_CONTROL } from './capture-lease.mjs';
 import { authorizeReadPath, authorizeWritePath, requireSensitiveAccess } from './paths.mjs';
 import { DeviceOnboardingPortal } from './device-onboarding.mjs';
@@ -62,6 +63,13 @@ import {
 } from './upstream-proxy.mjs';
 
 const HAR_EXPORT_DIR = path.join(STATE_DIR, 'exports');
+const RULE_CREATORS = new Set(['create_map_local', 'create_map_remote', 'create_blacklist', 'create_breakpoint',
+  'mock_json_response', 'create_network_condition', 'create_no_cache_rule', 'capture_to_mock', 'create_transform_plugin_rule']);
+
+function resourceRevision(config) {
+  const { hit_count: _hits, last_hit: _lastHit, ...stable } = config;
+  return crypto.createHash('sha256').update(JSON.stringify(stable)).digest('hex');
+}
 
 // Factory: builds a tool object given an engine + pac server pair. Optionally
 // owns lifecycle helpers (sim watcher stop fn, etc.).
@@ -145,8 +153,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return Object.fromEntries(Object.entries(filtered).filter(([name]) => !/^(host|content-length|transfer-encoding|content-encoding)$/i.test(name)));
   }
 
-  function flowSummary(f, { includeSensitive = false } = {}) {
-    return {
+  function flowSummary(f, { includeSensitive = false, view = 'full' } = {}) {
+    const summary = {
       id: f.id,
       method: f.request?.method,
       url: includeSensitive ? f.request?.url : redactUrl(f.request?.url),
@@ -160,17 +168,23 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       duration_ms: flowDurationMs(f),
       matched_rule_id: f.request?.matched_rule_id ?? null,
     };
+    if (view === 'compact') for (const key of ['hostname', 'protocol', 'http_version', 'duration_ms']) delete summary[key];
+    if (view === 'compact') for (const key of ['upstream_error', 'matched_rule_id']) if (summary[key] == null) delete summary[key];
+    return summary;
   }
 
   function safeHostname(url) {
     try { return new URL(url).hostname; } catch { return null; }
   }
 
-  function flowDetailForReturn(f, { full = false, includeSensitive = false } = {}) {
-    const reqRaw = full ? f.request?.body_inline : truncateInline(f.request?.body_inline).text;
-    const resRaw = full ? f.response?.body_inline : truncateInline(f.response?.body_inline).text;
-    const reqInline = includeSensitive ? reqRaw : redactBody(reqRaw, f.request?.headers);
-    const resInline = includeSensitive ? resRaw : redactBody(resRaw, f.response?.headers);
+  function flowDetailForReturn(f, { full = false, includeSensitive = false, previewBytes = 2048 } = {}) {
+    // Redact complete JSON before truncation; truncated JSON cannot reliably
+    // be parsed by the redactor or by an agent expecting a JSON document.
+    const reqRaw = includeSensitive ? f.request?.body_inline : redactBody(f.request?.body_inline, f.request?.headers);
+    const resRaw = includeSensitive ? f.response?.body_inline : redactBody(f.response?.body_inline, f.response?.headers);
+    const reqPreview = truncateInline(reqRaw, previewBytes), resPreview = truncateInline(resRaw, previewBytes);
+    const reqInline = full ? reqRaw : reqPreview.text;
+    const resInline = full ? resRaw : resPreview.text;
     return {
       id: f.id,
       timestamp: f.timestamp,
@@ -196,7 +210,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         body_omitted: Boolean(f.request.body_omitted),
         body_omission_reason: f.request.body_omitted ?? null,
         body_truncated: f.request?.body_inline && !full
-          ? truncateInline(f.request.body_inline).truncated : false,
+          ? reqPreview.truncated : false,
         untrusted_content: true,
       },
       response: f.response && {
@@ -217,7 +231,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         body_omitted: Boolean(f.response.body_omitted),
         body_omission_reason: f.response.body_omitted ?? null,
         body_truncated: f.response?.body_inline && !full
-          ? truncateInline(f.response.body_inline).truncated : false,
+          ? resPreview.truncated : false,
         untrusted_content: true,
       },
     };
@@ -636,7 +650,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return await restartSimApps({ udid: args.udid, bundle_id: args.bundle_id });
   }
 
-  async function get_proxy_status() {
+  async function get_proxy_status(_args = {}, context = {}) {
     const [state, pid, storage, runtime, events, guardianEvents] = await Promise.all([
       readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'),
     ]);
@@ -653,6 +667,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       remote_access: engine.remoteAccessStatus(),
       mode,
       runtime,
+      ...(mode === 'daemon' && context.bridge_version !== SERVER_VERSION ? { client_compatibility: {
+        reported_bridge_version: context.bridge_version ?? null,
+        action: 'reconnect_mcp_client', capture_restart_required: false,
+        message: 'Refresh only the MCP client for compact output, JSON queries and task cleanup; shared capture continues.',
+      } } : {}),
       recent_runtime_events: events.slice(-10),
       recent_guardian_events: guardianEvents.slice(-10),
       ca_cert: engine.caCertPath ?? CA_CERT,
@@ -1487,7 +1506,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function get_flows(args = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const limit = args.limit ?? 50;
+    const limit = args.limit ?? 10;
     const offset = args.offset ?? 0;
     if (args.cursor || args.since_flow_id || args.session_id) {
       const page = await engine.listDurableFlows({
@@ -1499,9 +1518,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       });
       const filtered = page.flows
         .filter((flow) => matchHost(flow, args) && matchUrl(flow, args) && matchMethod(flow, args) && matchStatus(flow, args))
-        .map((flow) => flowSummary(flow, { includeSensitive }));
+        .map((flow) => flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
       return {
-        flows: filtered,
+        flows: filtered, view: args.view ?? 'compact',
         session: page.session,
         next_cursor: page.next_cursor,
         snapshot_id: page.snapshot_id,
@@ -1520,8 +1539,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       matching.push(f);
     }
     const items = matching.slice(offset, offset + limit)
-      .map((flow) => flowSummary(flow, { includeSensitive }));
-    return { flows: items, offset, limit, total: matching.length, has_more: matching.length > offset + items.length };
+      .map((flow) => flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
+    return { flows: items, view: args.view ?? 'compact', offset, limit, total: matching.length, has_more: matching.length > offset + items.length };
   }
 
   async function get_flow_detail(args = {}) {
@@ -1531,6 +1550,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const bodyMode = args.body_mode ?? (args.full_body ? 'full' : 'preview');
     const detail = flowDetailForReturn(f, {
       full: bodyMode === 'full', includeSensitive,
+      previewBytes: args.preview_bytes ?? 2048,
     });
     if (bodyMode === 'full') {
       for (const [returned, stored] of [[detail.request, f.request], [detail.response, f.response]]) {
@@ -1579,7 +1599,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const conditions = Array.isArray(args.conditions) ? args.conditions : [];
     const combination = (args.combination ?? 'AND').toUpperCase();
     if (conditions.length === 0) throw new Error('conditions must be a non-empty array');
-    const pageSize = args.limit ?? 50;
+    const pageSize = args.limit ?? 10;
     let sourceFlows;
     let page = null;
     if (args.session_id || args.cursor || args.since_flow_id) {
@@ -1598,10 +1618,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       if (results.length >= pageSize) break;
       const checks = conditions.map((condition) => matchFlowCondition(flow, condition));
       const matches = combination === 'OR' ? checks.some(Boolean) : checks.every(Boolean);
-      if (matches) results.push(flowSummary(flow, { includeSensitive }));
+      if (matches) results.push(flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
     }
     return {
-      flows: results,
+      flows: results, view: args.view ?? 'compact',
       combination,
       conditions_count: conditions.length,
       ...(page ? {
@@ -1939,6 +1959,50 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       captured_size: part.body_size, captured_sha: part.body_sha, redacted: !includeSensitive };
   }
 
+  async function query_flow_json(args = {}) {
+    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    if (!flow) throw flowNotFound(args.flow_id);
+    const part = args.kind === 'req' ? flow.request : flow.response;
+    const body = await bodyForExport(part);
+    if (body.omitted) throw Object.assign(new Error(`JSON query unavailable: ${body.reason}`), { code: 'BODY_UNAVAILABLE' });
+    let document;
+    try { document = JSON.parse(body.text); }
+    catch { throw Object.assign(new Error('The captured body is not a complete JSON document.'), {
+      code: 'BODY_NOT_JSON', recovery: ['Inspect Content-Type/omission metadata or use save_body_to_file.'],
+    }); }
+    return { flow_id: flow.id, kind: args.kind ?? 'res', redacted: true,
+      ...inspectJson(document, args) };
+  }
+
+  async function finish_capture_task(args = {}) {
+    const lease = await captureLease.assert(args.capture_lease_id);
+    if (!lease) throw Object.assign(new Error('Acquire the task lease before using task cleanup. Legacy fixtures must be removed by their explicit IDs.'), {
+      code: 'TASK_LEASE_REQUIRED', recovery: ['Use acquire_capture_lease for new task resources; never infer ownership from a broad ID prefix.'],
+    });
+    const removed = [], retained = [];
+    let storedRules = engine.isRunning() ? null : await loadRules();
+    let storedChanged = false;
+    for (const resource of lease.resources ?? []) {
+      const config = resource.kind === 'rule'
+        ? (storedRules ?? engine.listRuleConfigs()).find((rule) => rule.rule_id === resource.id)
+        : reverseProxies.list().find((proxy) => proxy.id === resource.id);
+      if (!config) continue;
+      if (args.keep_resources || resourceRevision(config) !== resource.revision) { retained.push({ kind: resource.kind, id: resource.id }); continue; }
+      if (resource.kind === 'rule' && storedRules) {
+        storedRules = storedRules.filter((rule) => rule.rule_id !== resource.id);
+        await saveRules(storedRules);
+        storedChanged = true;
+        if (!storedRules.some((rule) => rule.body_file === config.body_file)) await removeOwnedMockBody(config.body_file);
+      } else if (resource.kind === 'rule') await remove_rule({ rule_id: resource.id });
+      else await reverseProxies.remove(resource.id);
+      removed.push({ kind: resource.kind, id: resource.id });
+    }
+    await captureLease.release(args);
+    return { status: 'finished', task_id: lease.task_id, removed, retained, lease_released: true,
+      capture_continues: engine.isRunning(), evidence_preserved: true, stored_rules_updated: storedChanged,
+      next_actions: retained.length ? ['Retained resources were explicitly kept or changed since this task owned them. Inspect before removing them.'] : [] };
+  }
+
   // Capture-to-mock — the Proxyman killer feature.
   async function capture_to_mock(args = {}) {
     await ensureProxyRunning();
@@ -2205,20 +2269,33 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     compose_request, repeat_flow, edit_and_repeat_flow, compare_flows, export_flow_swift,
     export_flow_code, import_curl, analyze_capture, assert_capture,
     inspect_flow_protocol, validate_flow_openapi, validate_capture_openapi, get_protocol_capabilities,
-    save_body_to_file, get_ca_cert_path,
+    save_body_to_file, query_flow_json, get_ca_cert_path,
     // safety
     kill_orphan_proxy, reconcile_state, export_har, import_har,
     // sim
     start_sim_watcher, stop_sim_watcher,
     acquire_capture_lease: (args) => captureLease.acquire(args),
     release_capture_lease: (args) => captureLease.release(args),
+    finish_capture_task,
   };
   for (const name of LEASE_PROTECTED_TOOLS) {
     const fn = tools[name];
     if (!fn) continue;
     tools[name] = async (args = {}, context = {}) => {
-      await captureLease.assert(args.capture_lease_id);
-      return fn(args, context);
+      const lease = await captureLease.assert(args.capture_lease_id);
+      const priorRules = lease && RULE_CREATORS.has(name) ? new Set(engine.mockRules.keys()) : null;
+      const result = await fn(args, context);
+      if (lease && name !== 'finish_capture_task') {
+        const ruleId = result?.rule_id ?? result?.rule?.rule_id ?? args.rule_id;
+        const ownedRule = ruleId && lease.resources?.some((resource) => resource.kind === 'rule' && resource.id === ruleId);
+        if (ruleId && (priorRules && !priorRules.has(ruleId) || ownedRule)) {
+          const config = engine.listRuleConfigs().find((rule) => rule.rule_id === ruleId);
+          if (config) await captureLease.trackResource(lease.lease_id, { kind: 'rule', id: ruleId, revision: resourceRevision(config) });
+        }
+        if (name === 'create_reverse_proxy') await captureLease.trackResource(lease.lease_id,
+          { kind: 'reverse_proxy', id: result.id, revision: resourceRevision(result) });
+      }
+      return result;
     };
   }
   // The daemon must still release sockets/routing on SIGTERM while a task

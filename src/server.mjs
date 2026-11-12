@@ -138,7 +138,7 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (flowId && /flow|request|curl/.test(tool)) void resourceSubscriptions.notifyLiveFlow(flowId).catch(() => {});
     return value;
   };
-  registerMcpTools(mcp, rememberCaptureLease(observableDispatch));
+  registerMcpTools(mcp, rememberCaptureLease(observableDispatch), { legacyAliases: process.env.PROXY_MCP_LEGACY_OUTPUT === '1' });
   registerMcpResources(mcp, observableDispatch);
   registerMcpPrompts(mcp);
   const transport = new StdioServerTransport();

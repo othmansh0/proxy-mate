@@ -32,6 +32,29 @@ test('two simultaneous acquisitions cannot both succeed', async () => {
   assert.equal(results.find((result) => result.status === 'rejected').reason.code, 'CAPTURE_OWNED');
 });
 
+test('explicit reacquisition retains task resources after an expiry error without retrying the mutation', async () => {
+  let state = {}, now = 1000, mutations = 0;
+  const lease = new CaptureLease({ read: async () => structuredClone(state),
+    patch: async (value) => { state = { ...state, ...value }; }, clock: () => now });
+  const bridge = rememberCaptureLease(async (tool, args) => {
+    if (tool === 'acquire_capture_lease') return lease.acquire(args);
+    if (tool === 'release_capture_lease') return lease.release(args);
+    mutations += 1;
+    return lease.assert(args.capture_lease_id);
+  });
+  const first = await bridge('acquire_capture_lease', { task_id: 'task', ttl_seconds: 30 });
+  await lease.trackResource(first.capture_lease_id, { kind: 'rule', id: 'fixture', revision: 'one' });
+  now += 30_001;
+  await assert.rejects(bridge('remove_rule', { rule_id: 'fixture' }), { code: 'CAPTURE_LEASE_EXPIRED' });
+  assert.equal(mutations, 1);
+  const renewed = await bridge('acquire_capture_lease', { task_id: 'task' });
+  assert.notEqual(renewed.capture_lease_id, first.capture_lease_id);
+  assert.equal(state.capture_lease.resources[0].id, 'fixture');
+  await bridge('release_capture_lease');
+  await bridge('acquire_capture_lease', { task_id: 'other' });
+  assert.deepEqual(state.capture_lease.resources, []);
+});
+
 test('a bridge remembers only its own explicitly acquired lease and never retries mutations', async () => {
   const calls = [];
   const bridge = rememberCaptureLease(async (tool, args) => {

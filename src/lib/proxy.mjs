@@ -770,7 +770,8 @@ export class ProxyEngine {
       if (prepared.createdBody) await removeOwnedMockBody(prepared.config.body_file);
       throw error;
     }
-    if (old?.config?.body_file !== prepared.config.body_file) {
+    if (old?.config?.body_file !== prepared.config.body_file
+      && !this.listRuleConfigs().some((rule) => rule.body_file === old?.config?.body_file)) {
       await removeOwnedMockBody(old?.config?.body_file);
     }
     return cloneRuleConfig(prepared.config);
@@ -821,7 +822,7 @@ export class ProxyEngine {
       const previous = this.listRuleConfigs();
       const next = previous.filter((rule) => rule.rule_id !== ruleId);
       await this.#replaceRuleSet(next, previous);
-      await removeOwnedMockBody(removed.config?.body_file);
+      if (!next.some((rule) => rule.body_file === removed.config?.body_file)) await removeOwnedMockBody(removed.config?.body_file);
       return true;
     });
   }
@@ -2223,7 +2224,7 @@ function jsonSafe(value) {
   try { return JSON.parse(JSON.stringify(value)); } catch { return null; }
 }
 
-async function removeOwnedMockBody(filePath) {
+export async function removeOwnedMockBody(filePath) {
   if (!filePath) return;
   const ownedRoot = path.join(STATE_DIR, 'bodies', 'mocks') + path.sep;
   const resolved = path.resolve(filePath);
