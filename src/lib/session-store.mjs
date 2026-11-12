@@ -639,22 +639,34 @@ async function openSqlite(file) {
   try {
     const { DatabaseSync } = await import('node:sqlite');
     return { db: new DatabaseSync(file), backend: 'node:sqlite' };
-  } catch (error) { builtInError = error; }
+  } catch (error) {
+    if (isSqliteCorruption(error)) throw corruptDatabaseError(error, file);
+    builtInError = error;
+  }
+  let db;
   try {
     const imported = await import('better-sqlite3');
     const Database = imported.default ?? imported;
-    const db = new Database(file, { timeout: 5000 });
+    db = new Database(file, { timeout: 5000 });
     // Loading the module can succeed even when an optional native binding did
     // not install; force binding initialization before reporting success.
     db.prepare('SELECT 1').get();
     return { db, backend: 'better-sqlite3' };
   } catch (fallbackError) {
+    try { db?.close(); } catch { /* failed native initialization must not leak a handle */ }
+    if (isSqliteCorruption(fallbackError)) throw corruptDatabaseError(fallbackError, file);
     throw new SessionStoreError(
       'SQLITE_BACKEND_UNAVAILABLE',
-      'SQLite storage requires Node.js 22+ or the optional better-sqlite3 package on Node.js 20.',
+      'SQLite storage requires Node.js 22+ with node:sqlite enabled or a working optional better-sqlite3 binding.',
       { built_in: builtInError?.message, fallback: fallbackError?.message },
     );
   }
+}
+
+function corruptDatabaseError(error, file) {
+  return new SessionStoreError('CORRUPT_DATABASE', 'The capture database is corrupt or is not a SQLite database.', {
+    database_path: file, cause: error.message,
+  });
 }
 
 function normalizeLegacySession(input, expectedId, defaults) {

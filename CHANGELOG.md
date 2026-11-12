@@ -2,6 +2,8 @@
 
 ## 0.8.2 — 2026-11-12
 
+- Upgrade the optional SQLite driver to 13.0.3. Preserve corruption diagnostics during fallback initialization and close failed native handles.
+
 - Add compact canonical envelopes on refreshed bridges, with opt-in legacy aliases; smaller discovery defaults/metadata and 2 KiB body previews reduce context use. Preserve exact URLs, rule/error evidence, explicit limits and paging.
 - Add bounded redacted JSON Pointer/wildcard queries for scalar values/counts and structural summaries, avoiding full body/file dumps. Expose scan/output truncation explicitly.
 - Promote next actions, flag repeated unchanged reads without caching traffic, and return deterministic export-path/sensitive-scope recovery guidance. Report old/unreported bridge metadata without restarting capture.

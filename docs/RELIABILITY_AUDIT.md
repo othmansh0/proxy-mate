@@ -14,7 +14,9 @@ Validation:
 - Sixty-second isolated mixed-traffic soak: **2,308 requests**, 119 rule updates and 30 breakpoint resolutions; zero failures/dropped captures, peak RSS 222,703,672 bytes. This is bounded qualification, not a multi-day guarantee.
 - Production dependency audit: zero advisories. Package dry-run includes the JSON inspection module; whitespace/diff checks passed.
 
-Hosted CI account runner/billing restrictions remain separate from local qualification. No hosted green status or native Simulator requalification is claimed for this follow-up.
+The remaining dependency follow-up updates optional better-sqlite3 to 13.0.3. Its native binding loads on Node 22/24/26; nine forced-fallback storage tests pass on each, including corruption diagnosis. Failed native initialization closes its handle and retains CORRUPT_DATABASE instead of recommending a missing-driver repair. CI action updates retain the existing Node matrix; CI now also checks the optional SQLite fallback.
+
+Hosted CI annotations confirm jobs cannot start because recent account payments failed or the spending limit must increase. No hosted green status or native Simulator requalification is claimed for this follow-up.
 
 ## 11 November 2026 agent workflow follow-up (0.8.1)
 
