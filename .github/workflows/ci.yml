@@ -19,13 +19,15 @@ jobs:
         node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm audit --omit=dev
       - run: npm run check
+      - if: matrix.node == 24
+        run: node --no-experimental-sqlite --test test/session-store.test.mjs
       - if: matrix.node == 24
         run: npm run benchmark:storage
       - if: matrix.node == 24
