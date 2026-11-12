@@ -1,13 +1,14 @@
 {
-  "name": "proxy-mcp",
-  "version": "0.8.2",
-  "description": "Production-oriented local MCP server for HTTP(S) capture, mocking, routing, and automated Xcode Simulator CA trust.",
+  "name": "@othmansh0/proxy-mcp",
+  "version": "0.8.3",
+  "description": "Give coding agents access to Simulator HTTP traffic, API mocks, breakpoints and durable QA evidence.",
   "type": "module",
   "bin": {
     "proxy-mcp": "src/server.mjs"
   },
   "files": [
     "src/**/*.mjs",
+    "src/**/*.d.ts",
     "scripts/",
     "docs/",
     "README.md",
@@ -39,7 +40,8 @@
     "analyze:capture": "node scripts/analyze-capture.mjs",
     "benchmark:storage": "node scripts/benchmark-session-store.mjs",
     "test": "node --test --test-reporter=spec",
-    "check": "node --check src/server.mjs && node --check src/client.mjs && node --check src/guardian.mjs && node --test --test-reporter=spec"
+    "check": "node --check src/server.mjs && node --check src/client.mjs && node --check src/guardian.mjs && node --test --test-reporter=spec",
+    "prepublishOnly": "node scripts/check-private-package.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -65,7 +67,30 @@
     "node": ">=22"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
-  }
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/othmansh0/proxy-mcp.git"
+  },
+  "homepage": "https://github.com/othmansh0/proxy-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/othmansh0/proxy-mcp/issues"
+  },
+  "bundleDependencies": [
+    "@modelcontextprotocol/sdk",
+    "mockttp",
+    "proper-lockfile",
+    "quickjs-emscripten",
+    "zod",
+    "better-sqlite3"
+  ]
 }

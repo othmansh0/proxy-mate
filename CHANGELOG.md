@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.3 — 2026-11-12
+
+- Rewrite the README around a two-command private install and natural-language QA/developer workflows; move advanced operational detail into focused guides.
+- Add init for stable client registration, private configuration backups, preview mode, safe service reuse and guarded idle upgrades. Support Claude Code, Codex, Cursor, Claude Desktop and manual JSON configuration.
+- Package as @othmansh0/proxy-mcp on private GitHub Packages with restricted publishing and bundled audited dependencies. Add an ESM client API and TypeScript declarations that connect to an existing daemon without import-time capture/service side effects.
+
 ## 0.8.2 — 2026-11-12
 
 - Upgrade the optional SQLite driver to 13.0.3. Preserve corruption diagnostics during fallback initialization and close failed native handles.

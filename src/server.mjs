@@ -2,10 +2,8 @@
 // proxy-mcp — local HTTP(S) capture, routing, mocking, and Simulator setup.
 //
 // Two run shapes share the same internals:
-//   * stdio MCP server (default)  — for Claude Code. Auto-detects a running
-//                                    daemon and forwards tool calls to it
-//                                    over the control plane; falls back to
-//                                    in-process operation if no daemon.
+//   * stdio MCP server (default)  — forwards to the shared daemon. It never
+//                                    starts a competing capture engine.
 //   * `--daemon`                   — long-lived. Owns the proxy, PAC server,
 //                                    state, rules, simulator watcher, and a
 //                                    control HTTP server (default :8082) so
@@ -20,6 +18,7 @@ import url from 'node:url';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { runCaptureSetup } from './lib/setup.mjs';
+import { initializePackage } from './lib/onboarding.mjs';
 import { acquireRuntime, reconcileRuntime, installShutdownHandlers } from './lib/runtime.mjs';
 import { startLogMaintenance } from './lib/log-maintenance.mjs';
 import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
@@ -322,7 +321,10 @@ function parseArgs(argv) {
     else if (a === '--ca-cert') args.caCertPath = path.resolve(value(++i, a));
     else if (a === '--tls-passthrough') args.tlsPassthrough = value(++i, a).split(',').map(s => s.trim()).filter(Boolean);
     else if (a === '--help' || a === '-h') args.help = true;
-    else if (['install', 'uninstall', 'doctor', 'status', 'setup'].includes(a) && !args._.length) args._.push(a);
+    else if (a === '--client') args.client = value(++i, a);
+    else if (a === '--upgrade') args.upgrade = true;
+    else if (a === '--dry-run') args.dryRun = true;
+    else if (['init', 'install', 'uninstall', 'doctor', 'status', 'setup'].includes(a) && !args._.length) args._.push(a);
     else throw new Error(`Unknown argument: ${a}. Use --help for supported commands.`);
   }
   return args;
@@ -349,6 +351,9 @@ async function loadDomainsConfig(args) {
 }
 
 function validateCliArgs(args) {
+  if ((args.client || args.upgrade || args.dryRun) && args._[0] !== 'init') throw new Error('--client, --upgrade and --dry-run require init.');
+  if (args._[0] === 'init' && (Object.keys(args).some((key) => !['_', 'skipHostTrust', 'skipTrust', 'client', 'upgrade', 'dryRun', 'help'].includes(key))
+    || !args.skipHostTrust || !args.skipTrust)) throw new Error('init only accepts --client, --upgrade and --dry-run. Use install for advanced daemon options.');
   if (args.daemon && args._.length) throw new Error('--daemon cannot be combined with a subcommand.');
   if (args.requireDaemon && (args.daemon || args._.length)) throw new Error('--require-daemon is only supported by the stdio MCP client.');
   if (args.inProcess && (args.requireDaemon || args.daemon || args._.length)) throw new Error('--in-process is a standalone single-client development mode.');
@@ -378,6 +383,9 @@ function printHelp() {
   process.stderr.write(`proxy-mcp v${SERVER_VERSION} — selective HTTP(S) interception for iOS Simulator testing
 
 USAGE
+  proxy-mcp init [--client name]    Install the service and connect a client (default claude)
+  proxy-mcp init --dry-run          Preview setup without changing services or client files
+  proxy-mcp init --upgrade          Upgrade an idle service; keep existing capture evidence
   proxy-mcp                         Run the thin stdio MCP bridge to the shared daemon
   proxy-mcp --in-process            Explicit single-client development engine
   proxy-mcp --require-daemon        Shared-daemon MCP client; never owns capture or routing
@@ -387,6 +395,11 @@ USAGE
   proxy-mcp uninstall               Remove the LaunchAgent
   proxy-mcp status                  Daemon + LaunchAgent + handshake state
   proxy-mcp setup                   Friendly interactive capture setup; app-only by default
+
+INIT OPTIONS
+  --client <name>          claude (default), codex, cursor, claude-desktop or json
+  --dry-run                Print the plan without changing service/client files
+  --upgrade                Replace an idle service; plain init reuses healthy capture
 
 DAEMON OPTIONS
   --proxy-port <n>          Proxy port (default ${PROXY_PORT_DEFAULT})
@@ -428,7 +441,7 @@ async function runDoctor() {
   process.stdout.write(JSON.stringify({ ...sweep, state_was_stale: stale, network_reset: networkReset }, null, 2) + '\n');
 }
 
-async function runInstall(args) {
+async function runInstall(args, { quiet = false } = {}) {
   connectionAttemptTimeout();
   const serverPath = url.fileURLToPath(import.meta.url);
   const installRouting = await loadDomainsConfig(args);
@@ -468,7 +481,9 @@ async function runInstall(args) {
     controlPort: args.controlPort,
     extraArgs,
   });
-  process.stdout.write(JSON.stringify({ installed: true, host_certificate: hostCertificate, ...out }, null, 2) + '\n');
+  const result = { installed: true, host_certificate: hostCertificate, ...out };
+  if (!quiet) process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+  return result;
 }
 
 async function runUninstall(args) {
@@ -511,6 +526,24 @@ async function main() {
   validateCliArgs(args);
   if (args.help) { printHelp(); return; }
   const cmd = args._[0];
+  if (cmd === 'init') {
+    const result = await initializePackage({ client: args.client, upgrade: args.upgrade, dryRun: args.dryRun }, {
+      install: async (previous) => runInstall({ skipRouting: true, skipTrust: true, skipHostTrust: true,
+        ...(previous ? { proxyPort: previous.port, captureBodyMode: previous.capture_storage_policy,
+          tlsPassthrough: previous.tls_passthrough, enableSocks: previous.socks_enabled,
+          controlPort: Number(new URL((await readHandshake()).controlUrl).port) } : {}),
+      }, { quiet: true }),
+    });
+    if (args.dryRun || result.client?.status === 'manual') process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    else {
+      process.stdout.write(`Proxy MCP ${result.service.version} ready. Service ${result.service.status}.\n`);
+      process.stdout.write(`${args.client ?? 'claude'}: ${result.client.status} (${result.client.config_path})\n`);
+      if (result.client.backup_path) process.stdout.write(`Previous client configuration: ${result.client.backup_path}\n`);
+      if (result.update_available) process.stdout.write(`${result.update_available}\n`);
+      process.stdout.write(`${result.next_action}\n`);
+    }
+    return;
+  }
   if (cmd === 'setup') {
     if (process.argv.slice(2).length !== 1) throw new Error('Setup is interactive. Choose capture options in its questions instead of passing daemon flags.');
     await runSetup(); return;
@@ -525,7 +558,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  const detail = process.argv.includes('setup') ? e?.message || String(e) : e?.stack || e;
+  const detail = process.argv.includes('setup') || process.argv.includes('init') ? e?.message || String(e) : e?.stack || e;
   process.stderr.write(`[proxy-mcp] fatal: ${detail}\n`);
   process.exit(1);
 });

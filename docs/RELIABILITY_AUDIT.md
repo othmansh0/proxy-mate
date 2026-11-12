@@ -1,5 +1,13 @@
 # Reliability and replacement readiness
 
+## 12 November 2026 private package onboarding (0.8.3)
+
+The README now starts with private registry login and one init command, followed by natural-language QA/developer examples. Detailed configuration, client registration, library usage and publishing live in focused guides. The scoped package exports a side-effect-free daemon client API with TypeScript declarations; its bundled dependency tree retains the audited pins when installed in another project.
+
+Validation: 285 tests passed on each of Node 22.23.4, 24.22.2 and 26.13.0, with zero failures/skips. The actual packed tarball installed into an empty consumer offline; the API imported successfully on all three Node versions and CLI preview created no daemon state. Private publishing rejected an actual npm publish --access=public dry-run. Production dependency audit reported zero advisories. Actual Codex CLI registration in an isolated configuration preserved an unrelated MCP server. Tests cover configuration backups/permissions/symlinks, malformed JSON, service reuse, upgrade ownership and Node-client lease isolation/handshake rotation.
+
+Registry publication and another person's package access require separate verification. A local tarball test does not prove either. GitHub-hosted jobs remain unavailable due to the account billing/spending restriction.
+
 ## 12 November 2026 agent efficiency follow-up (0.8.2)
 
 Reviewed 200 distinct proxy tool calls from the available 11–12 November Claude session logs, including newer QA child sessions. Flow discovery accounted for the largest response volume. Successful body exports now work without a sensitive-data grant; one newer arbitrary export-path rejection still needed clearer recovery. Identical repeated reads occurred occasionally, without evidence of a widespread polling loop. No additional crash pattern was found in the inspected logs.
