@@ -11,6 +11,7 @@ process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { PacServer } = await import('../src/lib/pac.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
+const { MCP_TOOLS, successToolResult } = await import('../src/lib/mcp-contract.mjs');
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -34,6 +35,7 @@ function requestViaProxy(proxyPort, targetUrl, {
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
     });
     req.on('error', reject);
+    req.setTimeout(10000, () => req.destroy(Object.assign(new Error('Proxy test request exceeded its deadline.'), { code: 'TEST_REQUEST_TIMEOUT' })));
     req.end(body);
   });
 }
@@ -84,6 +86,20 @@ test('proxy defaults to loopback clients and requires explicit LAN consent', asy
     upstream.once('error', reject);
     upstream.listen(0, '0.0.0.0', () => resolve(upstream.address().port));
   });
+  // macOS grants Local Network access per executable. A newly installed Node
+  // may have loopback access while LAN traffic waits for that OS grant.
+  const reachable = await new Promise((resolve) => {
+    const check = http.get({ host: lan.address, port: upstreamPort, path: '/' }, (res) => {
+      res.resume(); res.on('end', () => resolve(true));
+    });
+    const deadline = setTimeout(() => check.destroy(), 2500);
+    check.on('close', () => clearTimeout(deadline));
+    check.on('error', () => resolve(false));
+  });
+  if (!reachable) {
+    upstream.closeAllConnections(); await new Promise((resolve) => upstream.close(resolve));
+    return t.skip('LAN inaccessible to this Node executable; macOS Local Network permission is a separate physical-device gate.');
+  }
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
   const engine = new ProxyEngine({ sessionId: 'remote-guard' });
 
@@ -103,7 +119,11 @@ test('proxy defaults to loopback clients and requires explicit LAN consent', asy
 
 test('captures traffic, redacts secrets, exports curl, and clears session', async (t) => {
   const upstream = http.createServer((req, res) => {
-    res.writeHead(201, { 'content-type': 'application/json', 'set-cookie': 'server=secret' });
+    res.writeHead(201, {
+      'content-type': 'application/json',
+      'set-cookie': ['server=secret', 'session=private'],
+      'x-env-type': ['staging', 'staging'],
+    });
     res.end('{"captured":true}');
   });
   const upstreamPort = await listen(upstream);
@@ -127,6 +147,11 @@ test('captures traffic, redacts secrets, exports curl, and clears session', asyn
   assert.equal(detail.request.cookies[0].value, '[REDACTED]');
   assert.equal(JSON.parse(detail.request.body_inline).password, '[REDACTED]');
   assert.equal(detail.response.statusCode, 201);
+  assert.deepEqual(detail.response.headers['x-env-type'], ['staging', 'staging']);
+  assert.equal(detail.response.headers['set-cookie'], '[REDACTED]');
+  const result = successToolResult('get_flow_detail', {}, detail);
+  assert.equal(MCP_TOOLS.find((tool) => tool.name === 'get_flow_detail')
+    .outputSchema.safeParse(result.structuredContent).success, true);
   const durable = await engine.sessionStore.getFlow({ sessionId: engine.sessionId, flowId: id });
   assert.equal(durable.request.headers.authorization, '[REDACTED]');
   assert.match(durable.request.url, /%5BREDACTED%5D/);

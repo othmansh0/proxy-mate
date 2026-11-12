@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.8.2 — 2026-11-12
+
+- Add compact canonical envelopes on refreshed bridges, with opt-in legacy aliases; smaller discovery defaults/metadata and 2 KiB body previews reduce context use. Preserve exact URLs, rule/error evidence, explicit limits and paging.
+- Add bounded redacted JSON Pointer/wildcard queries for scalar values/counts and structural summaries, avoiding full body/file dumps. Expose scan/output truncation explicitly.
+- Promote next actions, flag repeated unchanged reads without caching traffic, and return deterministic export-path/sensitive-scope recovery guidance. Report old/unreported bridge metadata without restarting capture.
+- Track resources created under task leases and add finish_capture_task for safe one-call cleanup/release, including stopped-proxy persistence. Retain evidence, preexisting/changed fixtures and explicitly kept QA resources; preserve mock assets still referenced by another rule.
+
+
+## 0.8.1 — 2026-11-11
+
+- Batch fresh app socket ownership checks, share process verification only within a batch, refresh verified app bundle paths after reinstall, and expose attribution omissions/overload separately from persistence health.
+- Reuse app capture for repeated setup and renew routing only when expired or explicitly requested. Reuse/rename active sessions; reject active-session creation before persisting an orphan and restore the selected durable session after daemon recovery.
+- Export complete redacted text/JSON to private files and HAR/session archives, including spilled bodies, without sensitive access. Bound body export to 50 MiB and report binary/missing/over-budget omissions. Redact HAR redirect URLs and enforce private file permissions.
+- Add bounded persistent task leases for shared capture/routing/rule mutations. Thin bridges remember an explicitly acquired lease; reads, exports and replay remain available to other agents. Keep breakpoint resolution concurrent and preserve trusted daemon shutdown/recovery.
+- Improve startup guidance, distinguish slow status from an unreachable daemon, and report app attribution degradation without recommending unnecessary Mac trust in app mode. Give long diagnostics progress/deadline metadata.
+
+
+## 0.8.0 — 2026-11-08 (local release)
+
+- Give capture-owner processes a configurable 2000 ms connection-attempt window while preserving address-family selection, TLS validation and single-shot HTTP forwarding. Expose the active setting in proxy status.
+- Preserve safe upstream error tags and flow-correlated diagnostics for proxy-generated 502 responses, distinguishing them from real backend responses without storing raw error content.
+- Add app-first CLI/chat setup and native Simulator app attribution before inspection. Other and unknown connections bypass capture; app mode changes only the selected Simulator's trust and uses a separate gateway port for recovery isolation.
+- Make Mac Keychain trust and automatic Simulator imports opt-in with `--trust-host-ca` and `--trust-simulators`; retain explicit domain and Mac-wide capture as advanced choices.
+- Explain new Mac certificate trust in a native dialog before system authentication; cancel and unavailable GUI sessions leave certificate trust unchanged, and existing trust skips both prompts.
+- Verify native TLS trust on booted Simulators before automatic PAC routing in both daemon and MCP startup; leave new routing disabled when certificate setup or verification fails.
+- Accept repeated captured header values in MCP flow output without widening request inputs or exposing sensitive headers.
+- Added a thin default MCP bridge with offline onboarding/help, server instructions, and periodic progress for long tools. In-process capture now requires `--in-process`.
+- Added independent supervised recovery, bounded event journals, runtime/dependency fingerprints and transactional install rollback.
+- Made system routing opt-in, scoped, leased and fail-open in PAC-aware clients; use the actual primary service, protect other proxies and roll back partial setup failures. Fixed empty/null PAC URL parsing and preserve external changes.
+- Routed local reverse proxies through capture/mocks, tracked loopback sockets for bounded cleanup, and preserved healthy daemons in doctor.
+- Support maintained Node 22/24/26 lines; local deployment uses Node 24 LTS.
+
+## Earlier unreleased hardening
+
+- Added `--require-daemon` for shared production MCP clients, a cancellable 15-second authenticated readiness wait across daemon restarts, and actionable outage results without taking capture ownership.
+- Mark interrupted mutation RPCs as having an unknown outcome and unsafe to retry; covered two persistent MCP clients, owner disconnect, daemon SIGKILL recovery and a response lost after mutation acceptance.
+- Refreshed the MCP SDK, Mockttp, Zod and vulnerable transitive overrides; the 7 November production dependency audit reports zero advisories. Added the current replacement-readiness assessment to the reliability audit.
+
+- Added agent-friendly `mock_json_response`, `patch_mock_json`, captured-response JSON merge patches, and the `debug-ios-api` workflow prompt/playbook.
+- Replaced reset/rebuild with atomic HTTP-rule swaps that preserve pending breakpoints and WebSocket/capture subscriptions; tested concurrent traffic during edits.
+- Fixed spilled-body replay/mocking, bounded outbound previews and session hydration, added cache/queue byte budgets and sustained-memory-pressure cleanup/restart handling.
+- Added durable CA transaction recovery, bounded LaunchAgent log retention, live PAC-drift diagnostics, and scheduled audit/soak CI checks.
+- Fixed launchd `EPERM` startup loops for checkouts under macOS-protected folders: install an independent private runtime/dependency snapshot, serialize installs, and retain one previous snapshot. Re-run `install` after source/dependency upgrades.
+- Fixed unfinished-flow MCP schema validation; added real MCP workflow, CA recovery, memory-guard, replay and retention regressions plus an isolated configurable mixed-traffic soak runner.
+
+- Hardened daemon/stdio ownership, reconnect, shutdown, control-plane validation and LaunchAgent readiness; preserved routing ownership and failed-recovery state.
+- Disabled Mockttp's unbounded raw request history, coalesced WebSocket persistence with a global message budget, and bounded asynchronous capture work.
+- Validated and serialized CA lifecycle operations, preserved custom certificate files, and added native `verify_simulator_certificate` / `npm run verify:simulator` trust checks.
+- Made gzip/deflate/Brotli API bodies inspectable with bounded decoding and refused omitted-body mock creation.
+- Updated vulnerable production dependency pins; added regression coverage and detailed Simulator setup/reliability documentation.
+
+- Fixed the daemon crashing on the first captured body: `proxy.mjs` called `crypto.createHash` and `crypto.X509Certificate` without importing `node:crypto`, so it resolved the Web Crypto global, which has neither. `storeCapturedBody` threw `TypeError: crypto.createHash is not a function` on the first response body and took the whole daemon down; launchd then respawned it into the same crash on the next request. `rotateCA` had the same latent failure.
+- Fixed the control plane turning a serialization failure into a daemon crash. On a tool result that `JSON.stringify` refuses, the success path had already committed headers, so the `catch` called `writeHead` a second time and threw `ERR_HTTP_HEADERS_SENT` inside an async `'end'` handler where nothing could catch it. The result is now serialized before headers are committed, and the error path no longer writes to a committed response.
+- Fixed every certificate tool failing on an ordinary RSA CA. `inspectCertificate` spread `publicKey.asymmetricKeyDetails` into its result, and Node reports `publicExponent` as a BigInt, which `JSON.stringify` refuses — so `setup_simulator_certificate` and its siblings failed with `Do not know how to serialize a BigInt` for the CA the server generates by default.
+- Fixed host CA install and uninstall being unable to find their own certificate. The keychain lookup filtered on the common name `proxy-mcp CA`, which never matched: `ensureCA` passed `commonName`/`organizationName` at the top level of `generateCACertificate`, but mockttp 4.x reads them from a nested `subject`, so the CA was issued with mockttp's default subject — `Mockttp Testing CA - DO NOT TRUST - TESTING ONLY`. `install` therefore aborted with "trust could not be verified" *after* trusting the certificate, and `uninstall` reported it "not installed" and left a trusted root behind. The CA is now generated with the intended subject, and the certificate is identified by SHA-256 fingerprint rather than by name.
+- Fixed `get_flow_detail` failing MCP output validation whenever a body was captured. The flow serializers emit `null` as the explicit "absent" marker (`body_omitted: false` with `body_omission_reason: null`), but the contract declared those fields optional-only, so the SDK rejected the tool's own well-formed output with `Invalid structured content`.
+
 ## 0.7.0 - 2026-08-17
 
 - Added bounded QuickJS-sandboxed transform plugins with source/input/output size caps, a timeout, and memory/stack limits; new plugins default disabled, and registering a live `request`/`response` rule for one — by tool call, rule import, or startup replay — requires `PROXY_MCP_ENABLE_TRANSFORM_PLUGINS=1`, enforced once at the engine's rule-registration choke point so no path can bypass it. `websocket_offline` plugins fail with `PLUGIN_STAGE_MISMATCH` before the grant is even consulted, since they are never a valid live rule stage regardless of the grant; an ungranted `request`/`response` plugin still fails with `TRANSFORM_PLUGINS_NOT_ENABLED`.

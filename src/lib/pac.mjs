@@ -11,11 +11,13 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { patchState, readState } from './state.mjs';
+import { patchState, readState, isStateStale } from './state.mjs';
 import { STATE_DIR } from './config.mjs';
+import { selectNetworkService } from './network-service.mjs';
 
 const execFileP = promisify(execFile);
 const NETWORKSETUP = '/usr/sbin/networksetup';
+const COMMAND_OPTIONS = { timeout: 5_000, maxBuffer: 1024 * 1024 };
 
 const PAC_FILE = path.join(STATE_DIR, 'proxy.pac');
 
@@ -33,7 +35,7 @@ function FindProxyForURL(url, host) {
     return "DIRECT";
   }
   if (${fallback}) {
-    return "PROXY ${targetHost}:${targetPort}";
+    return "PROXY ${targetHost}:${targetPort}; DIRECT";
   }
   return "DIRECT";
 }
@@ -45,6 +47,7 @@ export class PacServer {
     this.server = null;
     this.port = null;
     this.body = '';
+    this.leaseTimer = null;
   }
 
   async start(port) {
@@ -53,7 +56,7 @@ export class PacServer {
       await new Promise((resolve, reject) => {
         const srv = http.createServer((req, res) => {
           if (req.url === '/proxy.pac' || req.url === '/') {
-            res.writeHead(200, { 'content-type': 'application/x-ns-proxy-autoconfig' });
+            res.writeHead(200, { 'content-type': 'application/x-ns-proxy-autoconfig', 'cache-control': 'no-store' });
             res.end(this.body);
           } else {
             res.writeHead(404); res.end();
@@ -62,7 +65,7 @@ export class PacServer {
         srv.once('error', reject);
         srv.listen(port, '127.0.0.1', () => {
           this.server = srv;
-          this.port = port;
+          this.port = srv.address().port;
           resolve();
         });
       });
@@ -86,24 +89,48 @@ export class PacServer {
   }
 
   async stop() {
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = null;
     if (!this.server) return;
-    await new Promise((resolve) => this.server.close(() => resolve()));
+    const closed = new Promise((resolve) => this.server.close(() => resolve()));
+    this.server.closeAllConnections();
+    await closed;
     this.server = null;
     this.port = null;
   }
 
   setBody(body) { this.body = body; }
+
+  setLease(ms, restore = () => clearPacRouting({ pacServer: this })) {
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = setTimeout(() => {
+      restore().catch((error) => {
+        this.body = 'function FindProxyForURL() { return "DIRECT"; }';
+        process.stderr.write(`[proxy-mcp] routing lease cleanup failed: ${error.message}\n`);
+      });
+    }, ms);
+    this.leaseTimer.unref?.();
+  }
 }
 
 // Detect what (if anything) is already serving at http://127.0.0.1:<port>/proxy.pac.
 async function fetchExistingPac(port) {
   return new Promise((resolve) => {
+    let settled = false, deadline;
+    const finish = (value) => { if (!settled) { settled = true; clearTimeout(deadline); resolve(value); } };
     const req = http.get({ host: '127.0.0.1', port, path: '/proxy.pac', timeout: 750 }, (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let bytes = 0;
+      res.on('data', (c) => {
+        bytes += c.length;
+        if (bytes > 8192) { req.destroy(); finish(null); }
+        else chunks.push(c);
+      });
+      res.on('error', () => finish(null));
+      res.on('aborted', () => finish(null));
       res.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
-        resolve({
+        finish({
           status: res.statusCode,
           content_type: res.headers['content-type'] ?? null,
           body_preview: body.slice(0, 200),
@@ -111,13 +138,14 @@ async function fetchExistingPac(port) {
         });
       });
     });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
+    deadline = setTimeout(() => { req.destroy(); finish(null); }, 750);
+    req.on('error', () => finish(null));
+    req.on('timeout', () => { req.destroy(); finish(null); });
   });
 }
 
 export async function listEnabledNetworkServices() {
-  const { stdout } = await execFileP(NETWORKSETUP, ['-listallnetworkservices']);
+  const { stdout } = await execFileP(NETWORKSETUP, ['-listallnetworkservices'], COMMAND_OPTIONS);
   return stdout
     .split('\n')
     .slice(1)
@@ -126,49 +154,69 @@ export async function listEnabledNetworkServices() {
 }
 
 export async function pickActiveNetworkService(preferred) {
-  const services = await listEnabledNetworkServices();
-  if (preferred && services.includes(preferred)) return preferred;
-  if (services.includes('Wi-Fi')) return 'Wi-Fi';
-  const eth = services.find((s) => /ethernet/i.test(s));
-  if (eth) return eth;
-  if (services.length === 0) throw new Error('no enabled network services found');
-  return services[0];
+  return selectNetworkService(preferred);
 }
 
-export async function setAutoProxyOn(networkService, pacUrl) {
-  await execFileP(NETWORKSETUP, ['-setautoproxyurl', networkService, pacUrl]);
-  await execFileP(NETWORKSETUP, ['-setautoproxystate', networkService, 'on']);
+export function validateRoutingDomains(domains, { allowBroad = false } = {}) {
+  if (!Array.isArray(domains) || !domains.length || domains.length > 64) throw routingError('ROUTING_DOMAINS_REQUIRED', 'Supply 1-64 explicit API host globs before changing system routing.');
+  const normalized = domains.map((value) => typeof value === 'string' ? value.trim().toLowerCase() : '');
+  if (normalized.some((host) => !host || host.length > 253 || !/^[a-z0-9*?._-]+$/.test(host))) throw routingError('ROUTING_DOMAIN_INVALID', 'Routing accepts host globs, without schemes, paths, ports or control characters.');
+  if (!allowBroad && normalized.some((host) => !/[a-z0-9]/.test(host))) throw routingError('BROAD_ROUTING_REQUIRES_CONSENT', 'All-host routing requires allow_broad_routing=true. Prefer explicit API hosts to avoid affecting unrelated Mac traffic.');
+  return [...new Set(normalized)];
 }
 
-export async function getAutoProxyState(networkService) {
+function routingError(code, message) { return Object.assign(new Error(message), { code, retryable: false }); }
+
+export async function setAutoProxyOn(networkService, pacUrl, run = execFileP) {
+  await run(NETWORKSETUP, ['-setautoproxyurl', networkService, pacUrl], COMMAND_OPTIONS);
+  await run(NETWORKSETUP, ['-setautoproxystate', networkService, 'on'], COMMAND_OPTIONS);
+}
+
+export async function getAutoProxyState(networkService, run = execFileP) {
   try {
-    const { stdout } = await execFileP(NETWORKSETUP, ['-getautoproxyurl', networkService]);
-    const url = stdout.match(/^URL:\s*(.*)$/mi)?.[1]?.trim() ?? '';
-    const enabled = /^Enabled:\s*Yes$/mi.test(stdout);
+    const { stdout } = await run(NETWORKSETUP, ['-getautoproxyurl', networkService], COMMAND_OPTIONS);
+    const rawUrl = stdout.match(/^URL:[ \t]*([^\r\n]*)/mi)?.[1]?.trim() ?? '';
+    const url = rawUrl === '(null)' ? '' : rawUrl;
+    const enabled = /^Enabled:[ \t]*Yes[ \t]*$/mi.test(stdout);
     return { enabled, url };
   } catch (error) {
     return { enabled: false, url: '', unreadable: error?.message ?? String(error) };
   }
 }
 
-export async function setAutoProxyOff(networkService) {
-  // Belt-and-braces: also clear the URL so a half-configured handoff doesn't
-  // point macOS at a dead PAC server.
-  try { await execFileP(NETWORKSETUP, ['-setautoproxystate', networkService, 'off']); }
-  catch { /* ignore */ }
-  try { await execFileP(NETWORKSETUP, ['-setautoproxyurl', networkService, '']); }
-  catch { /* ignore */ }
+export async function setAutoProxyOff(networkService, run = execFileP) {
+  await run(NETWORKSETUP, ['-setautoproxystate', networkService, 'off'], COMMAND_OPTIONS);
+  await run(NETWORKSETUP, ['-setautoproxyurl', networkService, ''], COMMAND_OPTIONS);
 }
 
 // Compose a full PAC setup: writes the PAC file, starts the PAC server, applies
 // networksetup. **Records state.json BEFORE touching networksetup** so dirty
 // kills can be reconciled on next boot.
-export async function applyPacRouting({ domains, networkService, pacPort, proxyPort, pacServer }) {
-  const service = await pickActiveNetworkService(networkService);
-  const currentState = await readState();
-  const priorAutoProxy = currentState?.routing_active && currentState?.network_service === service
-    ? currentState.prior_auto_proxy
-    : await getAutoProxyState(service);
+export async function applyPacRouting({ domains, networkService, pacPort, proxyPort, pacServer,
+  allowBroad = false, replaceExisting = false, durationSeconds = 3600,
+  run = execFileP, select = pickActiveNetworkService,
+}) {
+  domains = validateRoutingDomains(domains, { allowBroad });
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 86400) throw routingError('ROUTING_LEASE_INVALID', 'Routing duration must be 1-86400 seconds.');
+  const service = await select(networkService);
+  let currentState = await readState();
+  if (currentState?.routing_active && currentState.pid !== process.pid) {
+    throw Object.assign(new Error('Routing is owned by another runtime.'), { code: 'ROUTING_OWNED' });
+  }
+  if (currentState?.routing_active && currentState.network_service !== service) {
+    await clearPacRouting({ pacServer, run });
+    currentState = await readState();
+  }
+  const actualBefore = await getAutoProxyState(service, run);
+  if (actualBefore.unreadable) throw routingError('ROUTING_SNAPSHOT_FAILED', 'Cannot read current PAC settings; nothing was changed.');
+  const ownedBefore = currentState?.routing_active && currentState.network_service === service && actualBefore.url === currentState.pac_url;
+  const priorAutoProxy = ownedBefore ? currentState.prior_auto_proxy : actualBefore;
+  if (priorAutoProxy?.unreadable) throw Object.assign(new Error('Cannot snapshot the current PAC configuration; routing was not changed.'), { code: 'ROUTING_SNAPSHOT_FAILED' });
+  if (actualBefore.enabled && !ownedBefore && !replaceExisting) throw routingError('ROUTING_CONFLICT', 'Another automatic proxy is enabled. Inspect it first; replacing it requires replace_existing_proxy=true.');
+  for (const command of ['-getwebproxy', '-getsecurewebproxy']) {
+    const { stdout } = await run(NETWORKSETUP, [command, service], COMMAND_OPTIONS);
+    if (/^Enabled:\s*Yes$/mi.test(stdout) && !replaceExisting) throw routingError('ROUTING_CONFLICT', 'An HTTP(S) system proxy is already enabled. Inspect the other proxy before explicitly replacing system routing.');
+  }
   const pacBody = buildPacText(domains, '127.0.0.1', proxyPort);
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.writeFile(PAC_FILE, pacBody);
@@ -187,23 +235,50 @@ export async function applyPacRouting({ domains, networkService, pacPort, proxyP
     network_service: service,
     domains,
     routing_active: true,
+    routing_phase: 'applying',
     prior_auto_proxy: priorAutoProxy,
+    routing_expires_at: new Date(Date.now() + durationSeconds * 1000).toISOString(),
     started_at: new Date().toISOString(),
   });
 
-  await setAutoProxyOn(service, pacUrl);
-  return { networkService: service, pacUrl, domains };
+  try {
+    await setAutoProxyOn(service, pacUrl, run);
+    const actual = await getAutoProxyState(service, run);
+    if (!actual.enabled || actual.url !== pacUrl) throw routingError('ROUTING_APPLY_FAILED', 'macOS did not apply the requested PAC configuration.');
+    await patchState({ routing_phase: 'active' });
+    pacServer.setLease?.(durationSeconds * 1000, () => clearPacRouting({ pacServer, run }));
+    return { networkService: service, pacUrl, domains, fail_open: true, expires_at: new Date(Date.now() + durationSeconds * 1000).toISOString() };
+  } catch (error) {
+    try { await clearPacRouting({ pacServer, run }); }
+    catch (cleanup) {
+      pacServer.setBody('function FindProxyForURL() { return "DIRECT"; }');
+      error.details = { rollback_error: cleanup.message, recovery_state_retained: true };
+    }
+    throw error;
+  }
 }
 
-export async function clearPacRouting({ pacServer, networkService } = {}) {
+export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP } = {}) {
   const persisted = await readState();
-  const service = networkService || persisted?.network_service;
-  if (service && persisted?.prior_auto_proxy?.enabled && persisted.prior_auto_proxy.url) {
-    await setAutoProxyOn(service, persisted.prior_auto_proxy.url);
-  } else if (service) {
-    await setAutoProxyOff(service);
+  if (!persisted?.routing_active) {
+    await pacServer?.stop();
+    return { networkService: null, status: 'not_active' };
+  }
+  if (persisted.pid !== process.pid && !(recoverStale && await isStateStale())) {
+    throw Object.assign(new Error('Routing is owned by another runtime.'), { code: 'ROUTING_OWNED' });
+  }
+  const service = persisted.network_service;
+  if (networkService && networkService !== service) throw new Error('Only the recorded network service can be restored.');
+  const current = await getAutoProxyState(service, run);
+  if (current.unreadable) throw Object.assign(new Error('Cannot read current PAC settings; recovery state retained.'), { code: 'ROUTING_READ_FAILED' });
+  // Leave changes made by a VPN, another proxy, or the user alone.
+  const stillOwned = current.url === persisted.pac_url && (current.enabled || persisted.routing_phase === 'applying');
+  if (stillOwned) {
+    const prior = persisted.prior_auto_proxy ?? { enabled: false, url: '' };
+    await run(NETWORKSETUP, ['-setautoproxyurl', service, prior.url ?? ''], COMMAND_OPTIONS);
+    await run(NETWORKSETUP, ['-setautoproxystate', service, prior.enabled ? 'on' : 'off'], COMMAND_OPTIONS);
   }
   if (pacServer) await pacServer.stop();
-  await patchState({ routing_active: false, cleared_at: new Date().toISOString() });
-  return { networkService: service ?? null };
+  await patchState({ routing_active: false, routing_phase: null, routing_expires_at: null, cleared_at: new Date().toISOString() });
+  return { networkService: service ?? null, status: stillOwned ? 'restored' : 'changed_externally' };
 }

@@ -8,6 +8,7 @@ import path from 'node:path';
 process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-control-'));
 const { ControlServer, probeDaemon, callDaemon } = await import('../src/lib/control.mjs');
 const { readHandshake } = await import('../src/lib/state.mjs');
+const { SERVER_VERSION } = await import('../src/lib/config.mjs');
 
 function rawControlRequest({ port, path = '/health', method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -29,6 +30,19 @@ test('control health and RPC require the private bearer token', async (t) => {
   assert.equal(await probeDaemon(handshake.controlUrl, 'wrong-token'), false);
   assert.equal(await probeDaemon(handshake.controlUrl, handshake.token), true);
   assert.deepEqual(await callDaemon({ ...handshake, tool: 'echo', args: { ok: 1 } }), { ok: 1 });
+});
+
+test('RPC identifies refreshed bridges while accepting older clients without metadata', async (t) => {
+  const control = new ControlServer({ port: 0, tools: { get_proxy_status: async (_args, context) => ({ bridge_version: context.bridge_version }) } });
+  await control.start();
+  t.after(() => control.stop());
+  const handshake = await readHandshake();
+  assert.equal((await callDaemon({ ...handshake, tool: 'get_proxy_status' })).bridge_version, SERVER_VERSION);
+  const older = await rawControlRequest({ port: new URL(handshake.controlUrl).port, path: '/rpc', method: 'POST',
+    headers: { authorization: `Bearer ${handshake.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ tool: 'get_proxy_status', args: {} }) });
+  assert.equal(older.status, 200);
+  assert.equal(JSON.parse(older.body).result.bridge_version, null);
 });
 
 test('daemon RPC preserves machine-actionable tool error fields', async (t) => {
@@ -81,7 +95,7 @@ test('breakpoint resolution and reads are not blocked behind serialized mutation
 
   const start = callDaemon({ ...handshake, tool: 'start_proxy', args: {} });
   await entered;
-  assert.deepEqual(await callDaemon({ ...handshake, tool: 'resolve_breakpoint', args: {} }), { status: 'resolved' });
+  assert.deepEqual(await callDaemon({ ...handshake, tool: 'resolve_breakpoint', args: { breakpoint_id: 'test', action: 'continue' } }), { status: 'resolved' });
   assert.deepEqual(await callDaemon({ ...handshake, tool: 'get_proxy_status', args: {} }), { running: true });
 
   const stopped = callDaemon({ ...handshake, tool: 'stop_proxy', args: {} });

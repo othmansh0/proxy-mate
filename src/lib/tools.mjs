@@ -7,8 +7,11 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 
-import { CA_CERT, CA_DIR, ensureCA, rotateCA } from './proxy.mjs';
-import { applyPacRouting, clearPacRouting } from './pac.mjs';
+import { CA_CERT, CA_DIR, ensureCA, rotateCA, removeOwnedMockBody } from './proxy.mjs';
+import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains } from './pac.mjs';
+import { gettingStarted, searchHelp, setupWorkflows } from './guidance.mjs';
+import { runtimeIdentity, readRuntimeEvents } from './runtime-identity.mjs';
+import { encodeAgentJson, mergeJsonPatch } from './agent-json.mjs';
 import {
   trustCaOnSimulators, restartSimApps, watchSimulators,
   setupSimulatorCertificates, setupXcodePreviewCertificate, discoverXcodePreviewDeviceSets,
@@ -16,7 +19,7 @@ import {
 } from './sim.mjs';
 import { loadRules, saveRules, exportRulesTo, importRulesFrom } from './rules.mjs';
 import {
-  flowBodyToMockBody, exportBody, truncateInline, deleteFlowBodies,
+  flowBodyToMockBody, truncateInline, deleteFlowBodies,
 } from './bodies.mjs';
 import { doctorSweep, PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT } from './doctor.mjs';
 import {
@@ -25,6 +28,14 @@ import {
 } from './state.mjs';
 import { STATE_DIR, SERVER_VERSION, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { getHostCertificateStatus, setupHostCertificate, removeHostCertificate } from './host-cert.mjs';
+import { setupSimulatorRouting } from './simulator-routing.mjs';
+import { AppProxyGateway } from './app-gateway.mjs';
+import { activeConnectionAttemptTimeout } from './network-policy.mjs';
+import { createAppClassifier } from './app-identity.mjs';
+import { listSimulatorApplications, resolveSimulatorApplication, refreshSimulatorApplicationPath, simulatorProcessVerifier } from './simulator-apps.mjs';
+import { bodyForExport, MAX_EXPORTED_BODY_BYTES } from './body-export.mjs';
+import { inspectJson } from './json-inspection.mjs';
+import { CaptureLease, LEASE_PROTECTED_TOOLS, INTERNAL_CAPTURE_CONTROL } from './capture-lease.mjs';
 import { authorizeReadPath, authorizeWritePath, requireSensitiveAccess } from './paths.mjs';
 import { DeviceOnboardingPortal } from './device-onboarding.mjs';
 import {
@@ -52,11 +63,21 @@ import {
 } from './upstream-proxy.mjs';
 
 const HAR_EXPORT_DIR = path.join(STATE_DIR, 'exports');
+const RULE_CREATORS = new Set(['create_map_local', 'create_map_remote', 'create_blacklist', 'create_breakpoint',
+  'mock_json_response', 'create_network_condition', 'create_no_cache_rule', 'capture_to_mock', 'create_transform_plugin_rule']);
+
+function resourceRevision(config) {
+  const { hit_count: _hits, last_hit: _lastHit, ...stable } = config;
+  return crypto.createHash('sha256').update(JSON.stringify(stable)).digest('hex');
+}
 
 // Factory: builds a tool object given an engine + pac server pair. Optionally
 // owns lifecycle helpers (sim watcher stop fn, etc.).
 export function makeTools({ engine, pacServer, mode = 'in-process' }) {
+  const captureLease = new CaptureLease();
   let simWatchStop = null;
+  let appGateway = null;
+  let appScope = null;
   const simWatcherEvents = [];
   const onboardingPortal = new DeviceOnboardingPortal();
   const operatorUi = new OperatorUiServer({
@@ -78,6 +99,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     },
   });
   const reverseProxies = new ReverseProxyManager({
+    getProxyPort: () => engine.isRunning() ? engine.port : null,
     onExchange: (exchange) => {
       engine.diagnostics.push({ kind: 'reverse-proxy-exchange', timestamp: Date.now(), ...exchange });
       if (engine.diagnostics.length > engine.maxDiagnostics) engine.diagnostics.shift();
@@ -99,13 +121,46 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     await saveRules(engine.listRuleConfigs());
   }
 
-  function flowSummary(f, { includeSensitive = false } = {}) {
-    return {
+  async function readBodyBytes(part) {
+    if (!part || part.body_omitted) throw Object.assign(new Error(`Captured body is unavailable: ${part?.body_omitted ?? 'missing part'}`), { code: 'BODY_UNAVAILABLE' });
+    let bytes;
+    if (part.body_path) {
+      const file = await authorizeReadPath(part.body_path);
+      const handle = await fs.open(file, 'r');
+      try {
+        if ((await handle.stat()).size > 50 * 1024 * 1024) throw new Error('Stored body exceeds the 50 MiB replay limit.');
+        bytes = await handle.readFile();
+      } finally { await handle.close(); }
+    } else if (part.body_base64) {
+      bytes = Buffer.from(part.body_base64, 'base64');
+    } else {
+      if (part.body_inline == null && part.body_size > 0) throw Object.assign(new Error('Captured body bytes are missing.'), { code: 'BODY_UNAVAILABLE' });
+      bytes = Buffer.from(part.body_inline ?? '');
+    }
+    return bytes;
+  }
+
+  async function capturedBody(part, includeSensitive = false) {
+    const bytes = await readBodyBytes(part);
+    if (includeSensitive) return bytes;
+    const text = bytes.toString('utf8');
+    if (!Buffer.from(text).equals(bytes)) throw Object.assign(new Error('Binary replay requires the explicit sensitive-data grant.'), { code: 'SENSITIVE_ACCESS_REQUIRED' });
+    return Buffer.from(redactBody(text, part.headers));
+  }
+
+  function replayHeaders(headers, includeSensitive) {
+    const filtered = includeSensitive ? headers ?? {} : redactHeadersForReplay(headers);
+    return Object.fromEntries(Object.entries(filtered).filter(([name]) => !/^(host|content-length|transfer-encoding|content-encoding)$/i.test(name)));
+  }
+
+  function flowSummary(f, { includeSensitive = false, view = 'full' } = {}) {
+    const summary = {
       id: f.id,
       method: f.request?.method,
       url: includeSensitive ? f.request?.url : redactUrl(f.request?.url),
       hostname: f.request?.hostname ?? safeHostname(f.request?.url),
       status: f.response?.statusCode,
+      upstream_error: f.response?.upstream_error ?? null,
       size: f.response?.body_size ?? 0,
       timestamp: f.timestamp,
       protocol: f.request?.protocol ?? null,
@@ -113,17 +168,23 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       duration_ms: flowDurationMs(f),
       matched_rule_id: f.request?.matched_rule_id ?? null,
     };
+    if (view === 'compact') for (const key of ['hostname', 'protocol', 'http_version', 'duration_ms']) delete summary[key];
+    if (view === 'compact') for (const key of ['upstream_error', 'matched_rule_id']) if (summary[key] == null) delete summary[key];
+    return summary;
   }
 
   function safeHostname(url) {
     try { return new URL(url).hostname; } catch { return null; }
   }
 
-  function flowDetailForReturn(f, { full = false, includeSensitive = false } = {}) {
-    const reqRaw = full ? f.request?.body_inline : truncateInline(f.request?.body_inline).text;
-    const resRaw = full ? f.response?.body_inline : truncateInline(f.response?.body_inline).text;
-    const reqInline = includeSensitive ? reqRaw : redactBody(reqRaw, f.request?.headers);
-    const resInline = includeSensitive ? resRaw : redactBody(resRaw, f.response?.headers);
+  function flowDetailForReturn(f, { full = false, includeSensitive = false, previewBytes = 2048 } = {}) {
+    // Redact complete JSON before truncation; truncated JSON cannot reliably
+    // be parsed by the redactor or by an agent expecting a JSON document.
+    const reqRaw = includeSensitive ? f.request?.body_inline : redactBody(f.request?.body_inline, f.request?.headers);
+    const resRaw = includeSensitive ? f.response?.body_inline : redactBody(f.response?.body_inline, f.response?.headers);
+    const reqPreview = truncateInline(reqRaw, previewBytes), resPreview = truncateInline(resRaw, previewBytes);
+    const reqInline = full ? reqRaw : reqPreview.text;
+    const resInline = full ? resRaw : resPreview.text;
     return {
       id: f.id,
       timestamp: f.timestamp,
@@ -149,12 +210,14 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         body_omitted: Boolean(f.request.body_omitted),
         body_omission_reason: f.request.body_omitted ?? null,
         body_truncated: f.request?.body_inline && !full
-          ? truncateInline(f.request.body_inline).truncated : false,
+          ? reqPreview.truncated : false,
         untrusted_content: true,
       },
       response: f.response && {
         statusCode: f.response.statusCode,
         statusMessage: f.response.statusMessage,
+        tags: f.response.tags ?? [],
+        upstream_error: f.response.upstream_error ?? null,
         http_version: f.response.http_version ?? f.request?.http_version ?? null,
         headers: includeSensitive ? f.response.headers : redactHeaders(f.response.headers),
         cookies: parseSetCookies(f.response.headers?.['set-cookie'], includeSensitive),
@@ -168,7 +231,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         body_omitted: Boolean(f.response.body_omitted),
         body_omission_reason: f.response.body_omitted ?? null,
         body_truncated: f.response?.body_inline && !full
-          ? truncateInline(f.response.body_inline).truncated : false,
+          ? resPreview.truncated : false,
         untrusted_content: true,
       },
     };
@@ -176,6 +239,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   // ---- proxy lifecycle ----
   async function start_proxy(args = {}) {
+    if (appGateway) throw Object.assign(new Error('App-only capture is active. Stop it before switching capture modes.'), { code: 'APP_CAPTURE_ACTIVE' });
     const {
       port, auto_setup = false, network_service, pac_port, tls_passthrough, max_body_size,
       trust_host_ca = false, allow_remote = false, allowed_remote_ips = [],
@@ -197,6 +261,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const domains = args.domains?.length
       ? args.domains
       : (stateBefore?.domains?.length ? stateBefore.domains : ['*']);
+    if (auto_setup) validateRoutingDomains(domains, { allowBroad: args.allow_broad_routing === true });
     const started = await engine.start({
       port: port ?? PROXY_PORT_DEFAULT,
       tlsPassthrough: tls_passthrough,
@@ -211,10 +276,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       upstreamProxyConfig: upstream?.proxyConfig ?? null,
       upstreamProxyPublicConfig: upstream?.publicConfig ?? null,
     });
+    const newlyStarted = started.status === 'started';
+    if (newlyStarted) await patchState({ active_session_id: engine.sessionId });
+    if (!newlyStarted && !auto_setup) return { ...started, auto_setup: false };
     // Replay valid rules and surface invalid persisted entries instead of
     // silently claiming that every rule was restored.
     try {
-      const persisted = await loadRules();
+      const persisted = newlyStarted ? await loadRules() : [];
       const failures = [];
       for (const r of persisted) {
         try { await engine.registerRule(r); }
@@ -228,37 +296,42 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     await patchState({ pid: process.pid, proxy_port: engine.port, started_at: new Date().toISOString() });
     if (!auto_setup) return { ...started, auto_setup: false };
 
-    if (!caCertPath) await ensureCA();
-    const activeCaCert = caCertPath ?? CA_CERT;
+    const activeCaCert = await activeCaCertificate();
     const hostCertificate = trust_host_ca
       ? await setupHostCertificate(activeCaCert)
       : await getHostCertificateStatus(activeCaCert);
     const broadRouting = domains.includes('*');
-    if ((trust_host_ca && (!hostCertificate.ok || !hostCertificate.trusted))
-      || (!hostCertificate.trusted && broadRouting)) {
-      await engine.stop();
+    if (!hostCertificate.ok || !hostCertificate.trusted) {
+      if (newlyStarted) await engine.stop();
       const error = new Error(hostCertificate.recovery ?? hostCertificate.error
-        ?? 'Broad routing requires the proxy CA to be trusted in the user login keychain. Enable trust_host_ca or supply narrow domains.');
+        ?? 'System routing requires the proxy CA to be trusted in the user login keychain. Enable trust_host_ca or run setup_host_certificate first.');
       error.code = hostCertificate.code ?? 'HOST_CA_NOT_TRUSTED';
       throw error;
     }
 
     let routing;
+    let trust;
     try {
-      routing = await applyPacRouting({
-        domains,
-        networkService: network_service,
-        pacPort: pac_port ?? PAC_PORT_DEFAULT,
-        proxyPort: engine.port,
-        pacServer,
-      });
+      ({ trust, routing } = await setupSimulatorRouting({
+        certPath: activeCaCert,
+        keyPath: engine.caKeyPath,
+        applyRouting: () => applyPacRouting({
+          domains,
+          networkService: network_service,
+          pacPort: pac_port ?? PAC_PORT_DEFAULT,
+          proxyPort: engine.port,
+          pacServer,
+          allowBroad: args.allow_broad_routing === true,
+          replaceExisting: args.replace_existing_proxy === true,
+          durationSeconds: args.duration_seconds ?? 3600,
+        }),
+      }));
     } catch (error) {
-      try { await clearPacRouting({ pacServer }); } catch { /* preserve setup error */ }
-      await engine.stop();
-      await patchState({ proxy_port: null, routing_active: false, setup_error: error.message });
+      try { await clearPacRouting({ pacServer }); } catch { /* retain routing breadcrumbs */ }
+      if (newlyStarted) await engine.stop();
+      await patchState({ proxy_port: engine.port, setup_error: error.message });
       throw error;
     }
-    const trust = await trustCaOnSimulators(activeCaCert);
     const restartReport = trust.trusted?.length
       ? await restartSimApps({})
       : { restarted: [], skipped: 'certificate was not imported on a booted simulator' };
@@ -266,16 +339,95 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { ...started, auto_setup: true, host_certificate: hostCertificate, routing, trust, restart: restartReport, watcher };
   }
 
+  async function list_simulator_apps(args = {}) {
+    if (!args.udid) {
+      const listed = await listSimulators({ scope: 'booted' });
+      return { devices: listed.simulators, preflight: listed.preflight };
+    }
+    return listSimulatorApplications(args);
+  }
+
+  async function start_app_capture(args = {}) {
+    if (engine.isRunning() && appScope?.bundle_id === args.bundle_id && appScope?.device_id === args.udid) {
+      const state = await readState();
+      let routing = null;
+      if (!state?.routing_active || args.duration_seconds !== undefined) {
+        const applyRouting = () => applyPacRouting({ domains: ['*'], allowBroad: true,
+          networkService: args.network_service ?? state?.network_service,
+          pacPort: args.pac_port ?? state?.pac_port ?? PAC_PORT_DEFAULT,
+          proxyPort: appGateway.port, pacServer, durationSeconds: args.duration_seconds ?? 3600 });
+        if (state?.routing_active) routing = await applyRouting();
+        else ({ routing } = await setupSimulatorRouting({
+          certPath: await activeCaCertificate(), keyPath: engine.caKeyPath,
+          trust: (certPath) => trustCaOnSimulators(certPath, { device_ids: [args.udid] }), applyRouting,
+        }));
+      }
+      return { status: 'capturing_app', scope: appScope, port: appGateway.port, reused: true,
+        session: await engine.sessionStore.getSession(engine.sessionId),
+        routing, routing_expires_at: routing?.expires_at ?? state?.routing_expires_at ?? null,
+        next_actions: ['Existing capture was reused without restarting the app. Routing is renewed only when expired or duration_seconds is supplied. Inspect get_flows to verify the target request.'] };
+    }
+    if (engine.isRunning()) throw Object.assign(new Error('Stop the current capture before starting app-only capture.'), {
+      code: 'CAPTURE_ALREADY_RUNNING', details: { capture_scope: appScope ?? { mode: 'domains' }, active_session_id: engine.sessionId },
+      recovery: ['Reuse the running capture with get_flows/get_flow_detail.', 'Only stop and replace capture when the shared change is intended.'],
+    });
+    const publicPort = args.port ?? 8083;
+    const daemonPort = (await readState())?.daemon_proxy_port ?? PROXY_PORT_DEFAULT;
+    if (publicPort === daemonPort) throw Object.assign(new Error('App capture needs a separate gateway port so daemon recovery cannot turn cached app routing into broad capture.'), {
+      code: 'APP_PROXY_PORT_CONFLICT', recovery: ['Use the default app gateway port or choose a port different from the daemon proxy port.'],
+    });
+    const app = await resolveSimulatorApplication(args);
+    const session = await create_capture_session({
+      name: `${args.bundle_id} on ${app.device.name}`, activate: true,
+      metadata: { capture_scope: 'app', bundle_id: args.bundle_id, device_id: args.udid },
+    });
+    let routing;
+    let trust;
+    try {
+      await start_proxy({ port: 0, auto_setup: false, tls_passthrough: args.tls_passthrough });
+      ({ trust, routing } = await setupSimulatorRouting({
+        certPath: await activeCaCertificate(), keyPath: engine.caKeyPath,
+        trust: (certPath) => trustCaOnSimulators(certPath, { device_ids: [args.udid] }),
+        applyRouting: async () => {
+          appGateway = new AppProxyGateway({ proxyPort: engine.port, classify: createAppClassifier({
+            appPath: app.appPath, resolveAppPath: () => refreshSimulatorApplicationPath(app), verifyProcess: simulatorProcessVerifier(app),
+          }) });
+          await appGateway.start(publicPort);
+          return applyPacRouting({ domains: ['*'], allowBroad: true,
+            networkService: args.network_service, pacPort: args.pac_port ?? PAC_PORT_DEFAULT,
+            proxyPort: appGateway.port, pacServer, durationSeconds: args.duration_seconds ?? 3600,
+          });
+        },
+      }));
+      appScope = { mode: 'app', bundle_id: args.bundle_id, device_id: args.udid,
+        simulator: app.device.name, mac_keychain_changed: false,
+        coverage: 'Only connections attributed to the selected app process are inspected. Background helpers and unknown owners pass through without capture.' };
+      await patchState({ proxy_port: appGateway.port, capture_scope: appScope });
+      const restart = args.restart_app === false ? null
+        : await restartSimApps({ udid: args.udid, bundle_id: args.bundle_id, developer_dir: app.developerDir });
+      if (restart?.failed?.length) throw Object.assign(new Error('The selected app could not be launched.'), { code: 'APP_LAUNCH_FAILED' });
+      return { status: 'capturing_app', scope: appScope, port: appGateway.port, trust, routing, restart, session: session.session,
+        network_scope: 'Mac proxy routing uses a local gateway; other apps are forwarded without inspection or storage.' };
+    } catch (error) {
+      await stop_proxy();
+      throw error;
+    }
+  }
+
   async function stop_proxy() {
     let routingCleanupError = null;
     try { await clearPacRouting({ pacServer }); }
     catch (error) { routingCleanupError = error?.message ?? String(error); }
+    await appGateway?.stop();
+    appGateway = null;
+    appScope = null;
     const out = await engine.stop();
     await stop_sim_watcher();
     await onboardingPortal.stop();
     await reverseProxies.stopAll();
     await patchState({
       proxy_port: null,
+      capture_scope: null,
       stopped_at: new Date().toISOString(),
       ...(routingCleanupError ? { cleanup_error: routingCleanupError } : {}),
     });
@@ -286,6 +438,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function set_proxy_routing(args = {}) {
     await ensureProxyRunning();
+    if (appGateway) throw Object.assign(new Error('Stop app-only capture before selecting domain or Mac-wide capture.'), { code: 'APP_CAPTURE_ACTIVE' });
+    const hostTrust = await getHostCertificateStatus(await activeCaCertificate());
+    if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA with setup_host_certificate before changing Mac routing. No routing settings were changed.'), {
+      code: 'HOST_CA_UNTRUSTED', retryable: false, recovery: ['Call setup_host_certificate, then retry the scoped routing request.'],
+    });
     const { domains, network_service, pac_port } = args;
     if (!Array.isArray(domains) || domains.length === 0) {
       throw new Error('domains must be a non-empty array.');
@@ -294,6 +451,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       domains, networkService: network_service,
       pacPort: pac_port ?? PAC_PORT_DEFAULT,
       proxyPort: engine.port, pacServer,
+      allowBroad: args.allow_broad_routing === true,
+      replaceExisting: args.replace_existing_proxy === true,
+      durationSeconds: args.duration_seconds ?? 3600,
     });
     return { status: 'routing_on', ...routing };
   }
@@ -356,8 +516,15 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       xcode: preflight,
       booted_simulators: simulators,
       xcode_previews: previews,
-      verification: 'Per-device TLS trust currently uses simctl trusted-root import success; end-to-end URLSession probing is not bundled yet.',
+      verification: 'Use verify_simulator_certificate with a booted device UDID to check native URLSession trust. Import success alone is not end-to-end verification.',
     };
+  }
+
+  async function verify_simulator_certificate(args = {}, context = {}) {
+    const certPath = await activeCaCertificate();
+    const { verifySimulatorCertificate } = await import('./simulator-probe.mjs');
+    return verifySimulatorCertificate({ udid: args.udid, certPath, keyPath: engine.caKeyPath,
+      developer_dir: args.developer_dir, signal: context.signal });
   }
 
   async function start_device_onboarding(args = {}) {
@@ -383,11 +550,16 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function diagnose_ios_capture(args = {}) {
     const [certificate, state] = await Promise.all([get_certificate_status(args), readState()]);
+    const actualPac = state?.network_service ? await getAutoProxyState(state.network_service) : null;
+    const gateway = appGateway?.status() ?? null;
     const checks = {
       proxy_running: engine.isRunning(),
       recording: engine.recording,
       routing_active: state?.routing_active ?? false,
+      routing_matches_system: Boolean(state?.routing_active && actualPac?.enabled && actualPac.url === state.pac_url),
       host_ca_trusted: certificate.host?.trusted ?? false,
+      host_ca_required: appScope?.mode !== 'app' && args.routing_mode !== 'explicit',
+      app_capture_coverage_degraded: gateway?.coverage_degraded ?? false,
       simulator_tooling_ready: certificate.xcode?.ok ?? false,
       booted_simulators: certificate.booted_simulators?.length ?? 0,
       captured_flows: engine.flows.size,
@@ -396,10 +568,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const tlsFailures = diagnostics.filter((item) => item.kind === 'tls-client-error');
     const passthroughs = diagnostics.filter((item) => item.kind === 'tls-passthrough-opened');
     const findings = [];
+    if (checks.routing_active && !checks.routing_matches_system) findings.push(finding('ROUTING_CHANGED_EXTERNALLY', 'The recorded PAC no longer matches macOS. Check the active network service, VPN or other proxy, then explicitly reapply routing if appropriate.', 'warning'));
     if (!checks.proxy_running) findings.push(finding('PROXY_NOT_RUNNING', 'Start capture before diagnosing an iOS client.', 'error'));
     if (!checks.recording) findings.push(finding('RECORDING_PAUSED', 'Proxying is active but flows are not being recorded.', 'warning'));
     if (!checks.routing_active) findings.push(finding('ROUTING_INACTIVE', 'Automatic PAC routing is not active. Confirm the Simulator/device proxy configuration.', 'warning'));
-    if (!checks.host_ca_trusted) findings.push(finding('HOST_CA_UNTRUSTED', 'The proxy CA is not trusted in the current macOS login keychain.', 'warning'));
+    if (checks.host_ca_required && !checks.host_ca_trusted) findings.push(finding('HOST_CA_UNTRUSTED', 'The proxy CA is not trusted in the current macOS login keychain.', 'warning'));
+    if (checks.app_capture_coverage_degraded) findings.push(finding('APP_ATTRIBUTION_DEGRADED',
+      'Some socket owners could not be verified and passed through without capture. Inspect attribution reasons; zero persistence drops does not establish complete app coverage.', 'warning', gateway.attribution));
     if (!checks.simulator_tooling_ready) findings.push(finding(certificate.xcode?.code ?? 'SIMULATOR_TOOLING_UNAVAILABLE', certificate.xcode?.recovery ?? 'Select a full Xcode installation with Command Line Tools.', 'error'));
     if (checks.simulator_tooling_ready && checks.booted_simulators === 0) findings.push(finding('NO_BOOTED_SIMULATOR', 'Boot the target Simulator, then run setup_simulator_certificate.', 'warning'));
     if (tlsFailures.length) findings.push(finding('TLS_HANDSHAKE_FAILURE', 'The client reached the proxy but TLS failed. Check CA trust first, then certificate pinning or a custom trust evaluator.', 'error', { count: tlsFailures.length }));
@@ -411,11 +586,21 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       findings.push(finding('HOSTNAME_PASSTHROUGH', `${args.hostname} is configured for TLS passthrough.`, 'warning'));
     }
     return {
-      ok: !findings.some((item) => item.severity === 'error'),
+      ok: !findings.some((item) => item.severity === 'error') && checks.proxy_running && checks.recording
+        && (args.routing_mode === 'explicit' || checks.routing_matches_system),
+      readiness: {
+        service: checks.proxy_running ? 'ready' : 'stopped', recording: checks.recording ? 'ready' : 'paused',
+        routing: args.routing_mode === 'explicit' ? 'explicit_client_configuration_required'
+          : checks.routing_matches_system ? 'configured' : 'not_ready',
+        native_tls: 'use_verify_simulator_certificate',
+        app_traffic: checks.app_capture_coverage_degraded ? 'capture_coverage_degraded'
+          : checks.captured_flows > 0 ? 'observed_not_verified_for_target_request' : 'not_observed',
+      },
       checks,
+      app_gateway: gateway,
       hostname: args.hostname ?? null,
       findings,
-      verification: 'This diagnostic distinguishes observed proxy/TLS failures. Full system trust verification requires the optional Simulator URLSession probe.',
+      verification: 'This diagnostic distinguishes observed proxy/TLS failures. Call verify_simulator_certificate to test native URLSession trust.',
     };
   }
 
@@ -465,17 +650,30 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return await restartSimApps({ udid: args.udid, bundle_id: args.bundle_id });
   }
 
-  async function get_proxy_status() {
-    const [state, pid, storage] = await Promise.all([
-      readState(), readPidFile(), engine.sessionStore.storageStatus(),
+  async function get_proxy_status(_args = {}, context = {}) {
+    const [state, pid, storage, runtime, events, guardianEvents] = await Promise.all([
+      readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'),
     ]);
     return {
       running: engine.isRunning(),
-      port: engine.port,
+      capture_lease: captureLease.status(state),
+      active_session_id: engine.sessionId,
+      connection_attempt_timeout_ms: activeConnectionAttemptTimeout(),
+      port: appGateway?.port ?? engine.port,
+      capture_scope: appScope ?? { mode: 'domains' },
+      app_gateway: appGateway?.status() ?? null,
       allow_remote: engine.allowRemote,
       socks_enabled: engine.socksEnabled ?? false,
       remote_access: engine.remoteAccessStatus(),
       mode,
+      runtime,
+      ...(mode === 'daemon' && context.bridge_version !== SERVER_VERSION ? { client_compatibility: {
+        reported_bridge_version: context.bridge_version ?? null,
+        action: 'reconnect_mcp_client', capture_restart_required: false,
+        message: 'Refresh only the MCP client for compact output, JSON queries and task cleanup; shared capture continues.',
+      } } : {}),
+      recent_runtime_events: events.slice(-10),
+      recent_guardian_events: guardianEvents.slice(-10),
       ca_cert: engine.caCertPath ?? CA_CERT,
       mock_rules_count: engine.mockRules.size,
       flows_count: engine.flows.size,
@@ -487,6 +685,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       daemon_pid: pid,
       state_pid: state?.pid ?? null,
       domains: state?.domains ?? [],
+      routing_expires_at: state?.routing_expires_at ?? null,
+      routing_fail_open: true,
       tls_passthrough: engine.tlsPassthrough,
       simulator_watcher: simWatchStop ? 'running' : 'stopped',
       recent_simulator_events: simWatcherEvents.slice(-10),
@@ -494,6 +694,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       storage,
       capture_storage_policy: engine.captureBodyMode,
       persistence_queue_depth: engine.flowPersistence.size,
+      capture_queue_depth: engine.captureWork.size,
+      capture_dropped_events: engine.captureDropped,
       persistence_queue_limit: engine.maxPendingPersistence,
       persistence_queue_high_water_mark: engine.persistenceHighWaterMark,
       persistence_backpressure_waits: engine.persistenceBackpressureWaits,
@@ -540,6 +742,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { name: 'proxy-mcp', version: SERVER_VERSION, node: process.version, mode };
   }
 
+  async function get_started(args = {}) { return gettingStarted(args, await get_proxy_status()); }
+  async function search_docs(args = {}) { return searchHelp(args.query, args.limit); }
+  async function list_setup_workflows() { return setupWorkflows(); }
+
   async function start_operator_ui(args = {}) {
     const alreadyRunning = operatorUi.status.running;
     const started = await operatorUi.start({ port: args.port });
@@ -580,13 +786,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     if (!args.domain) throw new Error('domain is required');
     const state = await readState();
     const domains = [...new Set([...(state?.domains ?? []), args.domain])];
-    const routing = await applyPacRouting({
-      domains,
-      networkService: state?.network_service,
-      pacPort: state?.pac_port ?? PAC_PORT_DEFAULT,
-      proxyPort: engine.port,
-      pacServer,
-    });
+    const routing = await set_proxy_routing({ domains, network_service: state?.network_service, pac_port: state?.pac_port ?? PAC_PORT_DEFAULT });
     return { status: 'enabled', domain: args.domain, de_duplicated: domains.length === (state?.domains?.length ?? 0), routing };
   }
 
@@ -603,6 +803,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function create_capture_session(args = {}) {
+    if (args.activate && engine.isRunning()) throw Object.assign(new Error('Capture is running; use the active session or rename it without stopping capture.'), {
+      code: 'SESSION_SWITCH_REQUIRES_STOPPED_PROXY', details: { active_session_id: engine.sessionId },
+      recovery: ['Use get_flows with the existing session.', 'Use update_capture_session to rename the active session.', 'Create an inactive archive with activate=false.'],
+    });
     const session = await engine.sessionStore.createSession({
       id: args.session_id,
       name: args.name,
@@ -610,6 +814,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       metadata: args.metadata,
     });
     if (args.activate) await engine.setActiveSession(session.id, { create: false });
+    if (args.activate) await patchState({ active_session_id: session.id });
     return { session, active: engine.sessionId === session.id };
   }
 
@@ -619,6 +824,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function select_capture_session(args = {}) {
     const session = await engine.setActiveSession(args.session_id, { name: args.name, create: args.create ?? true });
+    await patchState({ active_session_id: session.id });
     return { status: 'selected', session };
   }
 
@@ -639,6 +845,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const sessionId = args.session_id ?? engine.sessionId;
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const document = await engine.sessionStore.exportSession(sessionId);
+    let remainingBytes = MAX_EXPORTED_BODY_BYTES;
+    let omittedBodies = 0;
     for (const exportedFlow of document.session.flows) {
       const storedFlow = await engine.sessionStore.getFlow({ sessionId, flowId: exportedFlow.id });
       if (!storedFlow) continue;
@@ -653,16 +861,23 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         if (!exported || !stored) continue;
         exported.headers = includeSensitive ? exported.headers : redactHeaders(exported.headers);
         exported.trailers = includeSensitive ? exported.trailers : redactHeaders(exported.trailers);
-        if (exported.body_inline != null && !includeSensitive) {
-          exported.body_inline = redactBody(exported.body_inline, exported.headers);
-        }
-        if (stored.body_path && existsSync(stored.body_path)) {
+        const body = await bodyForExport(stored, { includeSensitive, maxBytes: remainingBytes });
+        delete exported.body_inline;
+        delete exported.body_base64;
+        if (body.omitted) {
+          omittedBodies += 1;
+          exported.body_omitted = true;
+          exported.body_omission_reason = body.reason;
+        } else {
+          remainingBytes -= body.bytes;
+          exported.body_omitted = false;
+          delete exported.body_omission_reason;
           if (includeSensitive) {
-            exported.body_base64 = (await fs.readFile(stored.body_path)).toString('base64');
+            exported.body_base64 = body.buffer.toString('base64');
             exported.body_encoding = 'base64';
           } else {
-            exported.body_omitted = true;
-            exported.body_omission_reason = 'spilled or binary bodies require include_sensitive=true and the server-level sensitive-data grant';
+            exported.body_inline = body.text;
+            exported.body_encoding = 'utf8';
           }
         }
       }
@@ -673,7 +888,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       : path.join(HAR_EXPORT_DIR, `${sessionId}-${Date.now()}.proxy-mcp-session.json`);
     await fs.mkdir(path.dirname(out), { recursive: true, mode: 0o700 });
     await fs.writeFile(out, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
-    return { path: out, session_id: sessionId, flow_count: document.session.flows.length };
+    return { path: out, session_id: sessionId, flow_count: document.session.flows.length,
+      omitted_body_count: omittedBodies, redacted: !includeSensitive };
   }
 
   async function import_capture_session(args = {}) {
@@ -761,6 +977,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   async function get_diagnostics() {
     return {
       diagnostics: engine.diagnostics.slice(),
+      memory: process.memoryUsage(),
+      capture_queue_bytes: engine.captureQueuedBytes,
+      capture_queue_limit_bytes: engine.maxCaptureQueuedBytes,
+      capture_dropped_events: engine.captureDropped,
+      flow_cache_bytes: engine.flowCacheBytes,
+      flow_cache_limit_bytes: engine.maxFlowCacheBytes,
+      log_retention: { max_file_bytes: 5 * 1024 * 1024, archives_per_stream: 3, interval_ms: 30000 },
       storage: await engine.sessionStore.storageStatus(),
       capture_storage_policy: engine.captureBodyMode,
       persistence_queue_depth: engine.flowPersistence.size,
@@ -1017,6 +1240,23 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { status: 'registered', ...rule };
   }
 
+  async function mock_json_response(args = {}) {
+    return create_map_local({ rule_id: args.rule_id, url: args.url, method: args.method ?? 'GET',
+      status: args.status ?? 200, priority: args.priority, headers: args.headers,
+      body: encodeAgentJson(args.json), content_type: 'application/json; charset=utf-8' });
+  }
+
+  async function patch_mock_json(args = {}) {
+    const current = engine.listRuleConfigs().find((rule) => rule.rule_id === args.rule_id);
+    if (!current || current.type !== 'map_local' || current.directory) throw new Error('Select an existing non-directory Map Local rule.');
+    // Existing caller-provided fixture values are not captured credentials.
+    // Preserve them while editing; ordinary tool output redaction still applies.
+    const body = await readBodyBytes({ body_path: current.body_file, body_inline: current.body_inline });
+    let json;
+    try { json = JSON.parse(body.toString('utf8')); } catch { throw Object.assign(new Error('The mock body is not valid JSON.'), { code: 'INVALID_JSON_BODY' }); }
+    return update_rule({ rule_id: args.rule_id, patch: { body: encodeAgentJson(mergeJsonPatch(json, args.patch)), content_type: 'application/json; charset=utf-8' } });
+  }
+
   async function create_map_remote(args = {}) {
     await ensureProxyRunning();
     args = await authorizeRulePaths({ ...args });
@@ -1266,7 +1506,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   async function get_flows(args = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const limit = args.limit ?? 50;
+    const limit = args.limit ?? 10;
     const offset = args.offset ?? 0;
     if (args.cursor || args.since_flow_id || args.session_id) {
       const page = await engine.listDurableFlows({
@@ -1278,9 +1518,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       });
       const filtered = page.flows
         .filter((flow) => matchHost(flow, args) && matchUrl(flow, args) && matchMethod(flow, args) && matchStatus(flow, args))
-        .map((flow) => flowSummary(flow, { includeSensitive }));
+        .map((flow) => flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
       return {
-        flows: filtered,
+        flows: filtered, view: args.view ?? 'compact',
         session: page.session,
         next_cursor: page.next_cursor,
         snapshot_id: page.snapshot_id,
@@ -1299,8 +1539,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       matching.push(f);
     }
     const items = matching.slice(offset, offset + limit)
-      .map((flow) => flowSummary(flow, { includeSensitive }));
-    return { flows: items, offset, limit, total: matching.length, has_more: matching.length > offset + items.length };
+      .map((flow) => flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
+    return { flows: items, view: args.view ?? 'compact', offset, limit, total: matching.length, has_more: matching.length > offset + items.length };
   }
 
   async function get_flow_detail(args = {}) {
@@ -1310,6 +1550,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const bodyMode = args.body_mode ?? (args.full_body ? 'full' : 'preview');
     const detail = flowDetailForReturn(f, {
       full: bodyMode === 'full', includeSensitive,
+      previewBytes: args.preview_bytes ?? 2048,
     });
     if (bodyMode === 'full') {
       for (const [returned, stored] of [[detail.request, f.request], [detail.response, f.response]]) {
@@ -1358,7 +1599,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const conditions = Array.isArray(args.conditions) ? args.conditions : [];
     const combination = (args.combination ?? 'AND').toUpperCase();
     if (conditions.length === 0) throw new Error('conditions must be a non-empty array');
-    const pageSize = args.limit ?? 50;
+    const pageSize = args.limit ?? 10;
     let sourceFlows;
     let page = null;
     if (args.session_id || args.cursor || args.since_flow_id) {
@@ -1377,10 +1618,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       if (results.length >= pageSize) break;
       const checks = conditions.map((condition) => matchFlowCondition(flow, condition));
       const matches = combination === 'OR' ? checks.some(Boolean) : checks.every(Boolean);
-      if (matches) results.push(flowSummary(flow, { includeSensitive }));
+      if (matches) results.push(flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
     }
     return {
-      flows: results,
+      flows: results, view: args.view ?? 'compact',
       combination,
       conditions_count: conditions.length,
       ...(page ? {
@@ -1427,10 +1668,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return composeHttpRequest({
       url: includeSensitive ? flow.request.url : redactUrl(flow.request.url),
       method: flow.request.method,
-      headers: includeSensitive ? flow.request.headers : redactHeadersForReplay(flow.request.headers),
-      body: includeSensitive
-        ? (flow.request.body_inline ?? undefined)
-        : (redactBody(flow.request.body_inline, flow.request.headers) ?? undefined),
+      headers: replayHeaders(flow.request.headers, includeSensitive),
+      body: ['GET', 'HEAD'].includes(flow.request.method?.toUpperCase()) ? undefined : await capturedBody(flow.request, includeSensitive),
       timeout_ms: args.timeout_ms,
       signal: context.signal,
     });
@@ -1444,12 +1683,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       url: args.url ?? (includeSensitive ? flow.request.url : redactUrl(flow.request.url)),
       method: args.method ?? flow.request.method,
       headers: {
-        ...(includeSensitive ? flow.request.headers : redactHeadersForReplay(flow.request.headers)),
+        ...replayHeaders(flow.request.headers, includeSensitive),
+        ...(args.json !== undefined ? { 'content-type': 'application/json' } : {}),
         ...(args.headers ?? {}),
       },
-      body: args.body ?? (includeSensitive
-        ? (flow.request.body_inline ?? undefined)
-        : (redactBody(flow.request.body_inline, flow.request.headers) ?? undefined)),
+      body: args.body ?? (args.json !== undefined || args.form !== undefined || ['GET', 'HEAD'].includes((args.method ?? flow.request.method)?.toUpperCase()) ? undefined : await capturedBody(flow.request, includeSensitive)),
       json: args.json,
       form: args.form,
       timeout_ms: args.timeout_ms,
@@ -1697,36 +1935,72 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function save_body_to_file(args = {}) {
-    if (args.include_sensitive !== true) {
-      const error = new Error('Raw body export requires include_sensitive=true and the server-level sensitive-data grant.');
-      error.code = 'SENSITIVE_ACCESS_REQUIRED';
-      error.recovery = ['Set include_sensitive=true for this call', 'Restart a trusted local session with PROXY_MCP_ALLOW_SENSITIVE=1'];
-      throw error;
-    }
-    requireSensitiveAccess(true);
+    const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const { flow_id, kind = 'res', path: destPath } = args;
     const f = await engine.getDurableFlow(flow_id, args.session_id);
     if (!f) throw new Error(`flow not found: ${flow_id}`);
     const part = kind === 'req' ? f.request : f.response;
     if (!part) throw new Error(`flow has no ${kind}`);
+    const body = await bodyForExport(part, { includeSensitive });
+    if (body.omitted) throw Object.assign(new Error(`Cannot export body: ${body.reason}`), {
+      code: 'BODY_UNAVAILABLE', recovery: ['Use get_flow_detail for capture metadata and omission details.'],
+    });
     let dest = destPath ? await authorizeWritePath(destPath) : null;
     if (!dest) {
       const dir = path.join(STATE_DIR, 'exports');
       await fs.mkdir(dir, { recursive: true });
-      dest = path.join(dir, `${flow_id}.${kind}.bin`);
+      const safeId = String(f.id ?? flow_id).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128);
+      dest = path.join(dir, `${safeId}.${kind}.${includeSensitive ? 'bin' : 'txt'}`);
     }
-    if (part.body_path && existsSync(part.body_path)) {
-      await exportBody(part.body_path, dest);
-    } else if (part.body_base64 != null) {
-      await fs.mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
-      await fs.writeFile(dest, Buffer.from(part.body_base64, 'base64'), { mode: 0o600 });
-    } else if (part.body_inline != null) {
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.writeFile(dest, part.body_inline);
-    } else {
-      throw new Error('flow has no body to save');
+    await fs.mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
+    await fs.writeFile(dest, body.buffer, { mode: 0o600 });
+    await fs.chmod(dest, 0o600);
+    return { path: dest, size: body.bytes, sha: crypto.createHash('sha256').update(body.buffer).digest('hex'),
+      captured_size: part.body_size, captured_sha: part.body_sha, redacted: !includeSensitive };
+  }
+
+  async function query_flow_json(args = {}) {
+    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    if (!flow) throw flowNotFound(args.flow_id);
+    const part = args.kind === 'req' ? flow.request : flow.response;
+    const body = await bodyForExport(part);
+    if (body.omitted) throw Object.assign(new Error(`JSON query unavailable: ${body.reason}`), { code: 'BODY_UNAVAILABLE' });
+    let document;
+    try { document = JSON.parse(body.text); }
+    catch { throw Object.assign(new Error('The captured body is not a complete JSON document.'), {
+      code: 'BODY_NOT_JSON', recovery: ['Inspect Content-Type/omission metadata or use save_body_to_file.'],
+    }); }
+    return { flow_id: flow.id, kind: args.kind ?? 'res', redacted: true,
+      ...inspectJson(document, args) };
+  }
+
+  async function finish_capture_task(args = {}) {
+    const lease = await captureLease.assert(args.capture_lease_id);
+    if (!lease) throw Object.assign(new Error('Acquire the task lease before using task cleanup. Legacy fixtures must be removed by their explicit IDs.'), {
+      code: 'TASK_LEASE_REQUIRED', recovery: ['Use acquire_capture_lease for new task resources; never infer ownership from a broad ID prefix.'],
+    });
+    const removed = [], retained = [];
+    let storedRules = engine.isRunning() ? null : await loadRules();
+    let storedChanged = false;
+    for (const resource of lease.resources ?? []) {
+      const config = resource.kind === 'rule'
+        ? (storedRules ?? engine.listRuleConfigs()).find((rule) => rule.rule_id === resource.id)
+        : reverseProxies.list().find((proxy) => proxy.id === resource.id);
+      if (!config) continue;
+      if (args.keep_resources || resourceRevision(config) !== resource.revision) { retained.push({ kind: resource.kind, id: resource.id }); continue; }
+      if (resource.kind === 'rule' && storedRules) {
+        storedRules = storedRules.filter((rule) => rule.rule_id !== resource.id);
+        await saveRules(storedRules);
+        storedChanged = true;
+        if (!storedRules.some((rule) => rule.body_file === config.body_file)) await removeOwnedMockBody(config.body_file);
+      } else if (resource.kind === 'rule') await remove_rule({ rule_id: resource.id });
+      else await reverseProxies.remove(resource.id);
+      removed.push({ kind: resource.kind, id: resource.id });
     }
-    return { path: dest, size: part.body_size, sha: part.body_sha };
+    await captureLease.release(args);
+    return { status: 'finished', task_id: lease.task_id, removed, retained, lease_released: true,
+      capture_continues: engine.isRunning(), evidence_preserved: true, stored_rules_updated: storedChanged,
+      next_actions: retained.length ? ['Retained resources were explicitly kept or changed since this task owned them. Inspect before removing them.'] : [] };
   }
 
   // Capture-to-mock — the Proxyman killer feature.
@@ -1737,19 +2011,19 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const f = await engine.getDurableFlow(flow_id, args.session_id);
     if (!f) throw new Error(`flow not found: ${flow_id}`);
     if (!f.response) throw new Error('flow has no response yet');
-    if (f.response.body_path && !includeSensitive) {
-      const error = new Error('A spilled or binary captured response can only become a mock with include_sensitive=true and the server-level sensitive-data grant.');
-      error.code = 'SENSITIVE_ACCESS_REQUIRED';
-      error.recovery = ['Keep the body redacted and create_map_local manually', 'Or explicitly grant sensitive access for this trusted local session'];
-      throw error;
+    if (f.response.body_omitted) {
+      throw Object.assign(new Error(`Cannot create a mock from an omitted response: ${f.response.body_omitted}`), { code: 'BODY_UNAVAILABLE' });
     }
     const id = rule_id ?? `capture-${flow_id}`;
+    let captured = await capturedBody(f.response, includeSensitive);
+    if (Object.hasOwn(args, 'json_merge_patch')) {
+      let json;
+      try { json = JSON.parse(captured.toString('utf8')); } catch { throw Object.assign(new Error('The captured response is not valid JSON.'), { code: 'INVALID_JSON_BODY' }); }
+      captured = Buffer.from(encodeAgentJson(mergeJsonPatch(json, args.json_merge_patch)));
+    }
     const bodyFile = await flowBodyToMockBody({
       ruleId: id,
-      srcPath: includeSensitive ? f.response.body_path : null,
-      inlineText: includeSensitive
-        ? f.response.body_inline
-        : redactBody(f.response.body_inline, f.response.headers),
+      inlineText: captured,
     });
     // The captured URL goes through the same builder every other rule uses, so
     // the mock is anchored on the endpoint it was captured from. The old
@@ -1814,7 +2088,17 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       sourceFlows = engine.flowOrder.slice(-limit).map((id) => engine.flows.get(id)).filter(Boolean);
     }
     const entries = [];
+    let remainingBytes = MAX_EXPORTED_BODY_BYTES;
+    let omittedBodies = 0;
+    const exportPart = async (part) => {
+      const body = await bodyForExport(part, { includeSensitive, maxBytes: remainingBytes });
+      if (body.omitted) omittedBodies += 1;
+      else remainingBytes -= body.bytes;
+      return body;
+    };
     for (const f of sourceFlows) {
+      const requestBody = f.request ? await exportPart(f.request) : null;
+      const responseBody = f.response ? await exportPart(f.response) : null;
       entries.push({
         startedDateTime: new Date(f.request?.timing?.startTime ?? f.timestamp).toISOString(),
         time: harTiming(f).total,
@@ -1826,9 +2110,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
           headers: toHarHeaders(includeSensitive ? f.request?.headers : redactHeaders(f.request?.headers)),
           queryString: Object.entries(queryParams(f.request?.url, includeSensitive)).flatMap(([name, value]) =>
             (Array.isArray(value) ? value : [value]).map((item) => ({ name, value: String(item) }))),
-          postData: f.request?.body_inline ? {
+          postData: f.request?.body_size || f.request?.body_inline || f.request?.body_path || f.request?.body_base64 ? {
             mimeType: f.request?.headers?.['content-type'] ?? 'application/octet-stream',
-            text: includeSensitive ? f.request.body_inline : redactBody(f.request.body_inline, f.request.headers),
+            text: requestBody?.omitted ? '' : requestBody.text ?? requestBody.buffer.toString('base64'),
+            ...(requestBody?.omitted ? { _proxy_mcp_omitted: true, _proxy_mcp_omission_reason: requestBody.reason } : {}),
+            ...(includeSensitive && !requestBody?.omitted && requestBody.text === undefined ? { _encoding: 'base64' } : {}),
           } : undefined,
           headersSize: -1,
           bodySize: f.request?.body_size ?? -1,
@@ -1842,15 +2128,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
           content: {
             size: f.response.body_size ?? 0,
             mimeType: f.response.headers?.['content-type'] ?? 'application/octet-stream',
-            text: f.response.body_inline != null
-              ? (includeSensitive ? f.response.body_inline : redactBody(f.response.body_inline, f.response.headers))
-              : (f.response.body_path && includeSensitive ? (await fs.readFile(f.response.body_path)).toString('base64') : ''),
-            encoding: f.response.body_inline == null && f.response.body_path && includeSensitive ? 'base64' : undefined,
-            ...(f.response.body_inline == null && f.response.body_path && !includeSensitive
-              ? { _proxy_mcp_omitted: true, _proxy_mcp_omission_reason: 'binary or spilled body redacted' }
+            text: responseBody.omitted ? '' : responseBody.text ?? responseBody.buffer.toString('base64'),
+            encoding: !responseBody.omitted && responseBody.text === undefined ? 'base64' : undefined,
+            ...(responseBody.omitted
+              ? { _proxy_mcp_omitted: true, _proxy_mcp_omission_reason: responseBody.reason }
               : {}),
           },
-          redirectURL: f.response.headers?.location ?? '',
+          redirectURL: includeSensitive ? f.response.headers?.location ?? '' : redactUrl(f.response.headers?.location ?? ''),
           headersSize: -1,
           bodySize: f.response.body_size ?? -1,
         } : { status: 0, statusText: '', httpVersion: 'HTTP/1.1', cookies: [], headers: [], content: { size: 0, mimeType: '' }, redirectURL: '', headersSize: -1, bodySize: -1 },
@@ -1870,7 +2154,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       },
     };
     await fs.writeFile(out, JSON.stringify(har, null, 2), { mode: 0o600 });
-    return { path: out, entry_count: entries.length };
+    return { path: out, entry_count: entries.length, omitted_body_count: omittedBodies, redacted: !includeSensitive };
   }
 
   async function import_har(args = {}) {
@@ -1935,9 +2219,6 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       interval: args.interval ?? 5000,
       certPath: caCert,
       developer_dir: preflight.developer_dir,
-      onNew: async (sim) => {
-        try { await restartSimApps({ udid: sim.udid }); } catch { /* ignore */ }
-      },
       onResult: async (result) => {
         simWatcherEvents.push({ ...result, timestamp: new Date().toISOString() });
         if (simWatcherEvents.length > 50) simWatcherEvents.splice(0, simWatcherEvents.length - 50);
@@ -1946,21 +2227,22 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { status: 'started', developer_dir: preflight.developer_dir, xcode_version: preflight.xcode_version };
   }
   async function stop_sim_watcher() {
-    if (simWatchStop) { simWatchStop(); simWatchStop = null; return { status: 'stopped' }; }
+    if (simWatchStop) { const stop = simWatchStop; simWatchStop = null; await stop(); return { status: 'stopped' }; }
     return { status: 'not_running' };
   }
 
-  return {
+  const tools = {
     // lifecycle
-    start_proxy, stop_proxy, set_proxy_routing, clear_proxy_routing,
+    start_proxy, start_app_capture, list_simulator_apps, stop_proxy, set_proxy_routing, clear_proxy_routing,
     start_operator_ui, stop_operator_ui, get_operator_ui_status,
     trust_ca_on_simulators: trust_ca_on_simulators_tool,
     setup_simulator_certificate, setup_xcode_preview_certificate,
+    verify_simulator_certificate,
     setup_host_certificate, remove_host_certificate, rotate_certificate_authority, get_certificate_status,
     start_device_onboarding, stop_device_onboarding, diagnose_ios_capture,
     create_reverse_proxy, list_reverse_proxies, remove_reverse_proxy,
     restart_sim_apps: restart_sim_apps_tool,
-    get_version, get_proxy_status, toggle_recording,
+    get_version, get_proxy_status, toggle_recording, get_started, search_docs, list_setup_workflows,
     get_ssl_proxying_list, enable_ssl_proxying,
     clear_session, get_diagnostics, wait_for_flow,
     list_websocket_connections, get_websocket_connection, get_websocket_messages,
@@ -1970,6 +2252,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     export_capture_session, import_capture_session, purge_capture_session,
     // rules
     create_map_local, create_map_remote, create_blacklist, create_breakpoint,
+    mock_json_response, patch_mock_json,
     list_pending_breakpoints, get_pending_breakpoint, resolve_breakpoint,
     cancel_breakpoint, get_breakpoint_history,
     create_network_condition, create_no_cache_rule,
@@ -1986,12 +2269,39 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     compose_request, repeat_flow, edit_and_repeat_flow, compare_flows, export_flow_swift,
     export_flow_code, import_curl, analyze_capture, assert_capture,
     inspect_flow_protocol, validate_flow_openapi, validate_capture_openapi, get_protocol_capabilities,
-    save_body_to_file, get_ca_cert_path,
+    save_body_to_file, query_flow_json, get_ca_cert_path,
     // safety
     kill_orphan_proxy, reconcile_state, export_har, import_har,
     // sim
     start_sim_watcher, stop_sim_watcher,
+    acquire_capture_lease: (args) => captureLease.acquire(args),
+    release_capture_lease: (args) => captureLease.release(args),
+    finish_capture_task,
   };
+  for (const name of LEASE_PROTECTED_TOOLS) {
+    const fn = tools[name];
+    if (!fn) continue;
+    tools[name] = async (args = {}, context = {}) => {
+      const lease = await captureLease.assert(args.capture_lease_id);
+      const priorRules = lease && RULE_CREATORS.has(name) ? new Set(engine.mockRules.keys()) : null;
+      const result = await fn(args, context);
+      if (lease && name !== 'finish_capture_task') {
+        const ruleId = result?.rule_id ?? result?.rule?.rule_id ?? args.rule_id;
+        const ownedRule = ruleId && lease.resources?.some((resource) => resource.kind === 'rule' && resource.id === ruleId);
+        if (ruleId && (priorRules && !priorRules.has(ruleId) || ownedRule)) {
+          const config = engine.listRuleConfigs().find((rule) => rule.rule_id === ruleId);
+          if (config) await captureLease.trackResource(lease.lease_id, { kind: 'rule', id: ruleId, revision: resourceRevision(config) });
+        }
+        if (name === 'create_reverse_proxy') await captureLease.trackResource(lease.lease_id,
+          { kind: 'reverse_proxy', id: result.id, revision: resourceRevision(result) });
+      }
+      return result;
+    };
+  }
+  // The daemon must still release sockets/routing on SIGTERM while a task
+  // holds a lease. Symbols are never addressable through JSON-RPC tool names.
+  Object.defineProperty(tools, INTERNAL_CAPTURE_CONTROL, { value: { stop_proxy, start_sim_watcher } });
+  return tools;
 }
 
 function normalizeOfflineWebSocketMutation(sequence, output) {
@@ -2033,8 +2343,8 @@ function flowNotFound(flowId) {
 
 function redactHeadersForReplay(headers) {
   if (!headers) return {};
-  return Object.fromEntries(Object.entries(headers).filter(([name]) =>
-    !/^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|host|content-length)$/i.test(name)));
+  return Object.fromEntries(Object.entries(redactHeaders(headers)).filter(([name]) =>
+    !/^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|host|content-length|content-encoding|transfer-encoding)$/i.test(name)));
 }
 
 function redactedFlowForComparison(flow) {

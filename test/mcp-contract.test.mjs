@@ -43,6 +43,32 @@ test('high-traffic tools validate their canonical output payloads while retainin
   assert.equal(MCP_TOOLS.find((tool) => tool.name === 'list_rules').outputSchema.safeParse(rules).success, true);
 });
 
+test('captured headers preserve repeated values and redact sensitive arrays', () => {
+  const detail = successToolResult('get_flow_detail', {}, {
+    id: 'repeated-headers',
+    request: { headers: { accept: ['application/json', 'text/plain'], authorization: ['Bearer secret'] } },
+    response: { statusCode: 200, headers: {
+      'content-type': 'application/json',
+      'x-env-type': ['staging', 'staging'],
+      'set-cookie': ['session=secret', 'token=private'],
+    } },
+  }).structuredContent;
+  const schema = MCP_TOOLS.find((tool) => tool.name === 'get_flow_detail').outputSchema;
+  assert.equal(schema.safeParse(detail).success, true);
+  assert.deepEqual(detail.data.request.headers.accept, ['application/json', 'text/plain']);
+  assert.deepEqual(detail.data.response.headers['x-env-type'], ['staging', 'staging']);
+  assert.equal(detail.data.request.headers.authorization, '[REDACTED]');
+  assert.equal(detail.data.response.headers['set-cookie'], '[REDACTED]');
+  assert.equal(JSON.stringify(detail).includes('secret'), false);
+  for (const value of [42, null, ['valid', 42], { value: 'invalid' }]) {
+    assert.equal(schema.safeParse({ ...detail, data: {
+      ...detail.data, response: { headers: { invalid: value } },
+    } }).success, false);
+  }
+  const input = MCP_TOOLS.find((tool) => tool.name === 'mock_json_response').inputSchema.headers;
+  assert.equal(input.safeParse({ 'x-env-type': ['staging'] }).success, false);
+});
+
 test('pending breakpoint contracts explicitly gate sensitive previews', () => {
   for (const name of ['list_pending_breakpoints', 'get_pending_breakpoint']) {
     const definition = MCP_TOOLS.find((tool) => tool.name === name);
@@ -180,7 +206,12 @@ test('workflow prompts register concise, argument-aware MCP messages', () => {
   registerMcpPrompts({
     registerPrompt(name, config, callback) { prompts.set(name, { config, callback }); },
   });
-  assert.deepEqual([...prompts.keys()], ['diagnose-capture', 'mock-flow', 'compare-regression', 'security-review', 'set-up-capture-client']);
+  assert.deepEqual([...prompts.keys()], ['set-up-capture', 'debug-ios-api', 'diagnose-capture', 'mock-flow', 'compare-regression', 'security-review', 'set-up-capture-client']);
+  assert.match(prompts.get('set-up-capture').callback({}).messages[0].content.text, /start_app_capture/);
+  const workflow = prompts.get('debug-ios-api').callback({ url: 'https://api.example.test/users', task_id: 'login-test' }).messages[0].content.text;
+  assert.match(workflow, /mock_json_response/);
+  assert.match(workflow, /patch_mock_json/);
+  assert.match(workflow, /login-test/);
   assert.equal(prompts.get('diagnose-capture').config.argsSchema.hostname.safeParse('api.example.test').success, true);
   assert.match(prompts.get('mock-flow').callback({ flow_id: 'f-42' }).messages[0].content.text, /get_flow_detail/);
   assert.match(prompts.get('compare-regression').callback({ left_flow_id: 'before', right_flow_id: 'after' }).messages[0].content.text, /compare_flows/);

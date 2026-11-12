@@ -2,6 +2,8 @@
 
 This is a product-boundary comparison based on public documentation, not undocumented wire compatibility.
 
+The [current replacement-readiness audit](RELIABILITY_AUDIT.md) supersedes feature count as a readiness signal. Local daemon/client deployment, supervised recovery, failed-upgrade rollback, native iOS 27 PAC capture and crash fallback are verified. Wider native-platform/VPN acceptance, owned Android setup/trust and multi-day real-app qualification remain open. Current Android support consists of preflight and setup plans.
+
 | Product | Strongest fit | Advantage over proxy-mcp | proxy-mcp advantage |
 |---|---|---|---|
 | Proxyman | Polished Apple-first desktop debugging | Native full-featured GUI, richer JavaScript scripting surface, workspace tools, broader desktop/device support, mature visual viewers. | Headless MCP-first workflows, durable SQLite sessions, typed contracts, prompts/resources/subscriptions, CI assertions, a bounded QuickJS transform sandbox, and explicit sensitive-data controls. |

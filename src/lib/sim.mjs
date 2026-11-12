@@ -8,6 +8,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { X509Certificate } from 'node:crypto';
 import os from 'node:os';
+import { STATE_DIR } from './config.mjs';
+import { atomicWriteFile } from './state.mjs';
 
 const execFileP = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 30_000;
@@ -178,8 +180,11 @@ export async function inspectCertificate(certPath, { stage_der = true } = {}) {
   if (keyType === 'rsa' && (keyDetails.modulusLength ?? 0) < 2048) {
     return { ok: false, code: 'CA_KEY_TOO_SMALL', message: 'Apple TLS requires an RSA CA key of at least 2048 bits.' };
   }
-  const derPath = path.join(path.dirname(certPath), 'cert.der');
-  if (stage_der) await fs.writeFile(derPath, cert.raw, { mode: 0o644 });
+  // Custom CAs may live in read-only directories. Never overwrite a sibling
+  // cert.der belonging to another certificate or the original DER input.
+  const fingerprint = cert.fingerprint256.replaceAll(':', '').toLowerCase();
+  const derPath = path.join(STATE_DIR, 'ca', 'public', `${fingerprint}.der`);
+  if (stage_der) await atomicWriteFile(derPath, cert.raw, 0o644);
   return {
     ok: true,
     subject: cert.subject,
@@ -187,9 +192,21 @@ export async function inspectCertificate(certPath, { stage_der = true } = {}) {
     fingerprint_sha256: cert.fingerprint256.replaceAll(':', '').toLowerCase(),
     valid_from: cert.validFrom,
     valid_to: cert.validTo,
-    public_key: { type: keyType, ...keyDetails },
+    public_key: { type: keyType, ...jsonSafeKeyDetails(keyDetails) },
     der_path: stage_der ? derPath : null,
   };
+}
+
+// Node reports RSA publicExponent as a BigInt, which JSON.stringify refuses to
+// serialize. This result crosses the control plane and the MCP wire, so a raw
+// spread makes every certificate tool fail on an ordinary RSA CA.
+function jsonSafeKeyDetails(details) {
+  const safe = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (typeof value !== 'bigint') { safe[key] = value; continue; }
+    safe[key] = value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString();
+  }
+  return safe;
 }
 
 export async function trustCaOnSimulator(udid, certPath, { developer_dir, device_set } = {}) {
@@ -242,9 +259,9 @@ export async function setupSimulatorCertificates({
         status: 'trusted_root_imported',
         certificate_imported: true,
         system_tls_verified: false,
-        manual_trust_may_be_required: true,
-        verification_note: 'simctl reported successful root-certificate import. Apple documentation differs by Xcode/runtime on whether trust is immediately active, and an end-to-end URLSession probe is not yet bundled.',
-        recovery: 'If HTTPS still fails, open Simulator Settings > General > About > Certificate Trust Settings and enable proxy-mcp CA.',
+        manual_trust_may_be_required: false,
+        verification_note: 'simctl imported the CA into the trusted root store. Run verify_simulator_certificate to verify native URLSession TLS trust.',
+        recovery: 'If HTTPS still fails, run verify_simulator_certificate, then check routing and app-specific certificate pinning.',
         restart,
       });
     } catch (error) {
@@ -347,43 +364,52 @@ export async function restartSimApps({ udid, bundle_id, developer_dir, device_se
   return { restarted, failed };
 }
 
-export function watchSimulators({ interval = 5000, certPath, developer_dir, onNew, onResult } = {}) {
+export function watchSimulators({ interval = 5000, certPath, developer_dir, onNew, onResult,
+  list = listSimulators, trust = trustCaOnSimulator,
+} = {}) {
   let stopped = false;
   let timer = null;
   const reconciled = new Set();
   let ticking = false;
+  let pending = Promise.resolve();
   const tick = async () => {
     if (stopped || ticking) return;
     ticking = true;
     try {
-      const listed = await listSimulators({ scope: 'booted', developer_dir });
+      const listed = await list({ scope: 'booted', developer_dir });
+      if (!listed.preflight.ok) throw new Error(listed.preflight.recovery ?? 'Simulator tooling unavailable.');
+      if (stopped) return;
       const active = new Set(listed.simulators.map((sim) => sim.udid));
       for (const udid of reconciled) if (!active.has(udid)) reconciled.delete(udid);
       for (const sim of listed.simulators.filter((item) => !reconciled.has(item.udid))) {
+        if (stopped) break;
         let result;
         try {
-          await trustCaOnSimulator(sim.udid, certPath, { developer_dir: listed.preflight.developer_dir });
+          await trust(sim.udid, certPath, { developer_dir: listed.preflight.developer_dir });
           reconciled.add(sim.udid);
           result = { ...sim, status: 'trusted_root_imported' };
-          if (onNew) await onNew(sim);
+          if (!stopped && onNew) await onNew(sim);
         } catch (error) {
           if (isDuplicateCertificateError(error)) {
             reconciled.add(sim.udid);
             result = { ...sim, status: 'already_present_unverified' };
-            if (onNew) await onNew(sim);
+            if (!stopped && onNew) await onNew(sim);
           } else {
             result = { ...sim, status: 'failed', error: classifySimctlError(error) };
           }
         }
-        if (onResult) await onResult(result);
+        if (!stopped && onResult) await onResult(result);
       }
+    } catch (error) {
+      if (!stopped && onResult) await onResult({ status: 'watcher_error', error: classifySimctlError(error) });
     } finally {
       ticking = false;
-      if (!stopped) timer = setTimeout(tick, Math.max(2000, interval));
+      if (!stopped) timer = setTimeout(schedule, Math.max(2000, interval));
     }
   };
-  tick().catch(() => {});
-  return () => { stopped = true; if (timer) clearTimeout(timer); };
+  const schedule = () => { pending = tick().catch(() => {}); };
+  schedule();
+  return async () => { stopped = true; if (timer) clearTimeout(timer); await pending; };
 }
 
 function classifySimctlError(error) {

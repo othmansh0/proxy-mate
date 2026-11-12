@@ -1,6 +1,6 @@
 {
   "name": "proxy-mcp",
-  "version": "0.7.0",
+  "version": "0.8.2",
   "description": "Production-oriented local MCP server for HTTP(S) capture, mocking, routing, and automated Xcode Simulator CA trust.",
   "type": "module",
   "bin": {
@@ -34,31 +34,35 @@
   "scripts": {
     "start": "node src/server.mjs",
     "doctor": "node src/server.mjs doctor",
+    "verify:simulator": "node scripts/verify-simulator.mjs",
+    "test:soak": "node scripts/soak-proxy.mjs",
     "analyze:capture": "node scripts/analyze-capture.mjs",
     "benchmark:storage": "node scripts/benchmark-session-store.mjs",
     "test": "node --test --test-reporter=spec",
-    "check": "node --check src/server.mjs && node --test --test-reporter=spec"
+    "check": "node --check src/server.mjs && node --check src/client.mjs && node --check src/guardian.mjs && node --test --test-reporter=spec"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "async-exit-hook": "^2.0.1",
-    "mockttp": "^4.6.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "mockttp": "^4.6.5",
+    "proper-lockfile": "^4.1.2",
     "quickjs-emscripten": "0.32.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "better-sqlite3": "^12.6.2"
   },
   "overrides": {
-    "@hono/node-server": "1.19.15",
-    "body-parser": "2.3.0",
-    "fast-uri": "3.1.5",
-    "hono": "4.13.2",
-    "ip-address": "10.5.0",
-    "ws": "8.21.3"
+    "@hono/node-server": "2.1.6",
+    "body-parser": "2.4.0",
+    "fast-uri": "3.1.9",
+    "hono": "4.13.17",
+    "ip-address": "10.7.6",
+    "ws": "8.21.3",
+    "qs": "6.17.1",
+    "basic-ftp": "6.2.6"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public",

@@ -9,12 +9,13 @@ The MCP tool registry is the source of truth. Every tool has an input schema, ou
 | Capture | HTTP/HTTPS interception, optional SOCKS clients, custom CA pairs, HTTP/2 fallback, recording control, metadata-first flow lists, exact/substring/safe-regex filters, cursors, and live waiting. |
 | Sessions | Named SQLite/WAL sessions, atomic metadata and retention updates, import/export, quotas, migration diagnostics, and capture analysis/assertions. |
 | Bodies | `none`, `preview`, and `full` reads; hashes, byte sizes, explicit omission reasons, spill files, and MCP body resources. |
-| Rules | Map Local/Remote, blacklist, request/response transforms, delay/fault profiles, no-cache, priority/order, dry-run matching, and portable import/export. |
+| Rules | Map Local/Remote, JSON mocks and RFC 7396 merge patches, blacklist, request/response transforms, delay/fault profiles, no-cache, priority/order, dry-run matching, portable import/export, and atomic HTTP-rule replacement. |
 | Breakpoints | Bounded request/response pauses with continue, modify, synthetic response, abort, close, reset, deadline fallback, and redacted history. |
 | Requests | Safe cURL parsing, cURL/JavaScript/Python/Go/Swift export, compose, repeat/edit-and-repeat, and semantic flow comparison. |
 | Protocols | GraphQL operation parsing and batch matching, gRPC/grpc-web frame metadata, authorized Protobuf decode, and OpenAPI 3.x single-flow/session validation. |
 | WebSockets | Durable bounded connection/message capture, paging, hashes, close state, transcript/snapshot import-export, and offline replay plans. |
 | Apple setup | Host CA trust, Simulator and feature-detected Xcode Preview setup, app restart, watcher, diagnostics, and expiring physical-device onboarding. |
+| App capture | CLI/chat setup defaults to one unmodified Simulator app. Socket owner, bundle path and Simulator process identity gate inspection; other and unknown connections pass through without capture. Mac trust and automatic Simulator imports are opt-in. |
 | Operations | Authenticated local daemon, exact PAC restoration, reverse proxies, structured diagnostics, persistence health/fail-closed mode, CI, and a headless assertion CLI. |
 | Transform plugins | QuickJS-sandboxed request/response/websocket_offline transforms with a bounded JSON-only manifest, disabled by default, no imports or host APIs. |
 | Capture adapters | Preflight and setup plans for Apple Simulator, physical Apple devices, Android (ADB), Docker, and terminal/environment clients; read-only detection plus inert, human-executed setup plans — no adapter executes a mutation itself. |
@@ -31,7 +32,7 @@ Use `get_protocol_capabilities` when a client needs a machine-readable statement
 - Protobuf decoding requires an authorized local descriptor and `protoc`; automatic reflection is not performed.
 - WebSocket transcripts can be analyzed and turned into offline replay plans, but live frame injection is not claimed.
 - Network profiles apply HTTP-level delay and faults; they are not packet loss, bandwidth, radio, jitter, or DNS simulation.
-- Mockttp rule changes rebuild the ordered rule set because the engine has no per-endpoint removal API; a rebuild can briefly affect in-flight requests.
+- HTTP rule changes compile off-server and atomically replace the ordered rules without resetting capture subscriptions, WebSocket rules, or existing breakpoint pauses. Rules remain ordered alternatives rather than a middleware chain; clients share the same rules and active session.
 - Simulator CA import can be verified, but Apple does not provide a safe targeted command to remove one Simulator root. The destructive keychain-reset command is intentionally absent.
 - Physical-device CA installation and full-trust confirmation remain manual Apple Settings actions.
 - Transform plugins run in a fresh QuickJS runtime per execution, JSON-in/JSON-out only, with no module imports, no `require`/`process`/`Buffer`/`fetch`/`WebSocket`/host APIs. Registering a live `request`/`response` rule for one — by tool call, rule import, or startup replay — requires `PROXY_MCP_ENABLE_TRANSFORM_PLUGINS=1` on the server; storing, upserting, or test-executing a plugin does not.
@@ -74,6 +75,8 @@ Use `get_protocol_capabilities` when a client needs a machine-readable statement
 - Flow lists are bounded and metadata-only; request large bodies explicitly.
 - Session OpenAPI validation defaults to 100 flows and caps at 1,000.
 - WebSocket connection/message stores and breakpoint queues are bounded.
+- Flow-cache and queued-body estimates are each capped at 32 MiB; session hydration pages 50 flows at a time, composed responses retain at most 64 KiB, and sustained process RSS above 1 GiB triggers graceful shutdown by default. These are layered safeguards, not a hard OS memory guarantee.
+- Managed CA writes have a private durable recovery journal. Daemon logs rotate at 5 MiB (three archives per stream), checked every 30 seconds.
 - The control plane limits request bytes, concurrent work, rate, headers, connections, and socket reuse.
 - File access is limited to the state directory, current working directory, and explicit `PROXY_MCP_ALLOWED_PATHS` roots with symlink containment.
 

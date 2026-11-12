@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { X509Certificate } from 'node:crypto';
+import { confirmHostCertificateTrust } from './host-permission.mjs';
 
 const execFileP = promisify(execFile);
 const SECURITY = '/usr/bin/security';
@@ -26,8 +27,12 @@ export async function getHostCertificateStatus(certPath) {
   const fingerprint = cert.fingerprint256.replaceAll(':', '').toUpperCase();
   let output = '';
   try {
+    // Identify by SHA-256 fingerprint, not by common name: the CA's subject is
+    // whatever the generator produced, and a name filter that drifts silently
+    // reports an installed, trusted CA as absent — which also makes uninstall
+    // leave a trusted root behind.
     const result = await execFileP(SECURITY, [
-      'find-certificate', '-a', '-Z', '-c', 'proxy-mcp CA', LOGIN_KEYCHAIN,
+      'find-certificate', '-a', '-Z', LOGIN_KEYCHAIN,
     ], options());
     output = `${result.stdout}\n${result.stderr}`;
   } catch (error) {
@@ -54,13 +59,16 @@ export async function getHostCertificateStatus(certPath) {
   };
 }
 
-export async function setupHostCertificate(certPath) {
-  const before = await getHostCertificateStatus(certPath);
+export async function setupHostCertificate(certPath, {
+  getStatus = getHostCertificateStatus, confirm = confirmHostCertificateTrust, execute = execFileP,
+} = {}) {
+  const before = await getStatus(certPath);
   if (before.ok && before.installed && before.trusted) {
     return { ...before, status: 'already_trusted' };
   }
   try {
-    await execFileP(SECURITY, [
+    await confirm();
+    await execute(SECURITY, [
       'add-trusted-cert', '-r', 'trustRoot', '-p', 'ssl', '-k', LOGIN_KEYCHAIN, path.resolve(certPath),
     ], options(60_000));
   } catch (error) {
@@ -68,13 +76,14 @@ export async function setupHostCertificate(certPath) {
       ok: false,
       installed: before.installed ?? false,
       trusted: false,
-      status: 'failed',
-      code: 'HOST_CA_TRUST_FAILED',
+      status: error.code === 'HOST_CA_TRUST_CANCELLED' ? 'cancelled' : 'failed',
+      code: ['HOST_CA_TRUST_CANCELLED', 'HOST_CA_EXPLANATION_UNAVAILABLE'].includes(error.code)
+        ? error.code : 'HOST_CA_TRUST_FAILED',
       error: compactError(error),
-      recovery: 'Run `proxy-mcp install` from an interactive macOS user session and approve Keychain access, or use --no-host-trust with narrowly scoped --domains.',
+      recovery: error.recovery ?? 'Run `proxy-mcp install` from an interactive macOS user session and approve Keychain access, or use --no-host-trust with narrowly scoped --domains.',
     };
   }
-  const after = await getHostCertificateStatus(certPath);
+  const after = await getStatus(certPath);
   return {
     ...after,
     status: after.trusted ? 'trusted' : 'installed_unverified',

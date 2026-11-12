@@ -5,9 +5,10 @@ import { isIP } from 'node:net';
 import { buildRemoteAccessPolicy } from './proxy.mjs';
 
 export class ReverseProxyManager {
-  constructor({ onExchange } = {}) {
+  constructor({ onExchange, getProxyPort } = {}) {
     this.entries = new Map();
     this.onExchange = onExchange;
+    this.getProxyPort = getProxyPort;
   }
 
   async create({
@@ -16,6 +17,8 @@ export class ReverseProxyManager {
     preserve_host_header = false, timeout_ms = 30_000,
   } = {}) {
     const target = validateTarget(target_url);
+    const proxyPort = this.getProxyPort?.();
+    if (this.getProxyPort && !proxyPort) throw codedError('PROXY_NOT_RUNNING', 'Start the capture engine before creating a captured reverse proxy.');
     if (!allow_remote && !isLoopback(listen_host)) throw codedError('REMOTE_BIND_REQUIRES_CONSENT', 'Set allow_remote=true explicitly before binding a reverse proxy to a non-loopback interface.');
     const remotePolicy = buildRemoteAccessPolicy({
       allowRemote: allow_remote,
@@ -30,9 +33,11 @@ export class ReverseProxyManager {
       const destination = resolveDestination(target, incoming.url);
       const headers = { ...incoming.headers };
       if (!preserve_host_header) headers.host = destination.host;
-      const transport = destination.protocol === 'https:' ? https : http;
-      const upstream = transport.request(destination, {
+      const transport = proxyPort ? http : (destination.protocol === 'https:' ? https : http);
+      const endpoint = proxyPort ? new URL(`http://127.0.0.1:${proxyPort}`) : destination;
+      const upstream = transport.request(endpoint, {
         method: incoming.method,
+        ...(proxyPort ? { path: destination.toString() } : {}),
         headers,
         timeout: timeout_ms,
       }, (response) => {
@@ -50,16 +55,17 @@ export class ReverseProxyManager {
         if (!outgoing.writableEnded) outgoing.end(JSON.stringify({ error: 'reverse_proxy_upstream_failed', code: error.code ?? 'UPSTREAM_FAILED' }));
       });
       incoming.pipe(upstream);
+      incoming.once('aborted', () => upstream.destroy());
+      outgoing.once('close', () => { if (!outgoing.writableEnded) upstream.destroy(); });
     });
     server.requestTimeout = Math.max(1_000, timeout_ms + 1_000);
     server.headersTimeout = Math.min(server.requestTimeout, 10_000);
     const sockets = new Set();
     server.prependListener('connection', (socket) => {
       const address = String(socket.remoteAddress ?? '').split('%', 1)[0].toLowerCase();
-      if (isLoopback(address)) return;
-      const allowed = remotePolicy.enabled
+      const allowed = isLoopback(address) || (remotePolicy.enabled
         && Date.now() < Date.parse(remotePolicy.expiresAt)
-        && remotePolicy.allowlist.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4');
+        && remotePolicy.allowlist.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4'));
       if (!allowed) return socket.destroy();
       sockets.add(socket);
       socket.once('close', () => sockets.delete(socket));
@@ -80,6 +86,8 @@ export class ReverseProxyManager {
       preserve_host_header,
       timeout_ms,
       created_at: new Date().toISOString(),
+      capture_enabled: Boolean(proxyPort),
+      local_url: `http://${listen_host.includes(':') ? `[${listen_host}]` : listen_host}:${typeof address === 'object' ? address.port : listen_port}`,
     };
     const timer = remotePolicy.enabled
       ? setTimeout(() => this.remove(entryId), remotePolicy.ttlSeconds * 1000)

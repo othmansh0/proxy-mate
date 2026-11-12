@@ -6,7 +6,10 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readPidFile } from './state.mjs';
+import { readPidFile, readHandshake } from './state.mjs';
+import { probeDaemon } from './control.mjs';
+import path from 'node:path';
+import { readState, STATE_DIR } from './state.mjs';
 import { PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT, CONTROL_PORT_DEFAULT } from './config.mjs';
 
 const execFileP = promisify(execFile);
@@ -80,18 +83,27 @@ export async function portIsListening(port, host = '127.0.0.1') {
 export async function killOrphans({ ports, force = false, exclude_pid = process.pid } = {}) {
   const targets = await scanPorts(ports);
   const recordedPid = await readPidFile();
+  const recorded = await readState();
+  const auth = await readHandshake();
+  const healthy = auth && await probeDaemon(auth.controlUrl, auth.token);
   const results = [];
   for (const t of targets) {
     if (t.pid === exclude_pid) {
       results.push({ ...t, action: 'skip-self' });
       continue;
     }
+    if (t.pid === recordedPid && healthy) {
+      results.push({ ...t, action: 'skip-healthy-daemon' });
+      continue;
+    }
     const args = await argsForPid(t.pid);
+    const expected = recorded?.runtime_entry;
     const identityMatches = isOurCommand(t.comm)
       && t.pid === recordedPid
-      && /(?:^|[/\s])server\.mjs(?:\s|$)/.test(args ?? '')
-      && /(?:^|\s)--daemon(?:\s|$)/.test(args ?? '');
-    const isOurs = identityMatches || force;
+      && recorded?.pid === t.pid && recorded.runtime_role === 'daemon'
+      && typeof expected === 'string' && expected.startsWith(path.join(STATE_DIR, 'runtime', 'build-'))
+      && (args ?? '').includes(`${expected} --daemon`);
+    const isOurs = identityMatches;
     if (!isOurs) {
       results.push({ ...t, args: args?.slice(0, 500) ?? null, action: 'skip-unverified-owner' });
       continue;

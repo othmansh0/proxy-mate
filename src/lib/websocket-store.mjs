@@ -34,17 +34,23 @@ export class WebSocketStore {
     maxConnections = DEFAULT_MAX_CONNECTIONS,
     maxMessagesPerConnection = DEFAULT_MAX_MESSAGES,
     maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES,
+    maxTotalMessageBytes = 16 * 1024 * 1024,
     clock = () => Date.now(),
     backend = null,
   } = {}) {
     this.maxConnections = positiveInteger(maxConnections, 'maxConnections');
     this.maxMessagesPerConnection = positiveInteger(maxMessagesPerConnection, 'maxMessagesPerConnection');
     this.maxMessageBytes = positiveInteger(maxMessageBytes, 'maxMessageBytes');
+    this.maxTotalMessageBytes = positiveInteger(maxTotalMessageBytes, 'maxTotalMessageBytes');
+    this.retainedMessageBytes = 0;
     this.clock = clock;
     this.connections = new Map();
     this.connectionOrder = [];
     this.backend = backend;
     this.persistence = Promise.resolve();
+    this.persistenceScheduled = false;
+    this.persistenceDirty = false;
+    this.persistenceError = null;
   }
 
   // Mockttp event adapter methods. They intentionally accept the source event
@@ -164,6 +170,7 @@ export class WebSocketStore {
     const cleared = this.connections.size;
     this.connections.clear();
     this.connectionOrder.length = 0;
+    this.retainedMessageBytes = 0;
     this.#persist();
     return { cleared };
   }
@@ -183,6 +190,7 @@ export class WebSocketStore {
     if (replace) { this.connections.clear(); this.connectionOrder.length = 0; }
     for (const raw of snapshot.connections) this.#importConnection(raw);
     this.#enforceConnectionRetention();
+    this.#recountAndLimitBytes();
     this.#persist();
     return { imported: snapshot.connections.length, total: this.connections.size };
   }
@@ -197,7 +205,7 @@ export class WebSocketStore {
     if (!transcript || transcript.format !== 'proxy-mcp.websocket-transcript/v1' || !transcript.connection) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxy-mcp.websocket-transcript/v1 export');
     if (replace) this.connections.delete(normalizeConnectionId(transcript.connection.id));
     this.#importConnection(transcript.connection);
-    this.#enforceConnectionRetention(); this.#persist();
+    this.#enforceConnectionRetention(); this.#recountAndLimitBytes(); this.#persist();
     return this.getConnection({ connectionId: transcript.connection.id, includeSensitive: true });
   }
 
@@ -208,7 +216,10 @@ export class WebSocketStore {
     return { ...this.importSnapshot(snapshot), restored: snapshot.connections.length, supported: true };
   }
 
-  async flush() { await this.persistence; }
+  async flush() {
+    do { await this.persistence; } while (this.persistenceScheduled);
+    if (this.persistenceError) throw this.persistenceError;
+  }
 
   #appendMessage(event, direction) {
     const connection = this.#ensure(event);
@@ -216,8 +227,9 @@ export class WebSocketStore {
     const message = normalizeMessage({ event, direction, sequence: connection.next_message_sequence, timestamp, maxBytes: this.maxMessageBytes });
     connection.next_message_sequence += 1;
     connection.messages.push(message);
+    this.retainedMessageBytes += messageStorageBytes(message);
     while (connection.messages.length > this.maxMessagesPerConnection) {
-      connection.messages.shift();
+      this.retainedMessageBytes -= messageStorageBytes(connection.messages.shift());
       connection.dropped_message_count += 1;
     }
     if (connection.state === 'opening') {
@@ -225,6 +237,7 @@ export class WebSocketStore {
       connection.opened_at ??= timestamp;
     }
     connection.updated_at = timestamp;
+    this.#limitBytes();
     this.#persist();
     return publicMessage(message);
   }
@@ -253,6 +266,7 @@ export class WebSocketStore {
     this.connectionOrder.push(id);
     while (this.connectionOrder.length > this.maxConnections) {
       const staleId = this.connectionOrder.shift();
+      for (const message of this.connections.get(staleId)?.messages ?? []) this.retainedMessageBytes -= messageStorageBytes(message);
       this.connections.delete(staleId);
     }
     return connection;
@@ -276,11 +290,48 @@ export class WebSocketStore {
   }
 
   #enforceConnectionRetention() { while (this.connectionOrder.length > this.maxConnections) this.connections.delete(this.connectionOrder.shift()); }
+  #recountAndLimitBytes() {
+    this.retainedMessageBytes = 0;
+    for (const connection of this.connections.values()) {
+      for (const message of connection.messages) this.retainedMessageBytes += messageStorageBytes(message);
+    }
+    this.#limitBytes();
+  }
+
+  #limitBytes() {
+    // Bound the whole store, not just each connection independently. Include
+    // string expansion and metadata so tiny frames are bounded as well.
+    for (const id of this.connectionOrder) {
+      if (this.retainedMessageBytes <= this.maxTotalMessageBytes) break;
+      const connection = this.connections.get(id);
+      while (connection?.messages.length && this.retainedMessageBytes > this.maxTotalMessageBytes) {
+        this.retainedMessageBytes -= messageStorageBytes(connection.messages.shift());
+        connection.dropped_message_count += 1;
+      }
+    }
+  }
   #persist() {
     if (!this.backend?.save) return;
-    const snapshot = this.exportSnapshot({ includeSensitive: true });
-    this.persistence = this.persistence.catch(() => undefined).then(() => this.backend.save(snapshot));
+    this.persistenceDirty = true;
+    if (this.persistenceScheduled) return;
+    this.persistenceScheduled = true;
+    // Previously every frame eagerly copied the entire store and queued it
+    // behind disk IO. A fast socket could retain thousands of full snapshots.
+    this.persistence = Promise.resolve().then(async () => {
+      while (this.persistenceDirty) {
+        this.persistenceDirty = false;
+        await this.backend.save(this.exportSnapshot({ includeSensitive: true }));
+        this.persistenceError = null;
+      }
+    }).catch((error) => { this.persistenceError = error; }).finally(() => {
+      this.persistenceScheduled = false;
+      if (this.persistenceDirty && !this.persistenceError) this.#persist();
+    });
   }
+}
+
+function messageStorageBytes(message) {
+  return 256 + 2 * ((message.data.text?.length ?? 0) + (message.data.base64?.length ?? 0));
 }
 
 /** Portable one-line JSON snapshot backend. Writes are private (0600) and atomic. */
