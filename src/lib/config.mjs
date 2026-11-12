@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 
 // A single overridable data root keeps runtime files consistent and makes the
 // server testable without touching a developer's real ~/.proxy-mcp directory.
@@ -17,7 +18,8 @@ export function liveTransformGrantEnabled() {
 }
 
 export const SERVER_NAME = 'proxy-mcp';
-export const SERVER_VERSION = '0.8.3';
+// npm version updates the package/lock once; installed snapshots include this manifest.
+export const SERVER_VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 export const PROXY_PORT_DEFAULT = 8080;
 export const PAC_PORT_DEFAULT = 8081;
 export const CONTROL_PORT_DEFAULT = 8082;

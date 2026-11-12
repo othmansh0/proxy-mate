@@ -84,5 +84,5 @@ CI tests Node.js 22, 24, and 26 on macOS, audits production dependencies, runs t
 
 CI also runs a short mixed-traffic soak, with a longer soak and dependency audit on a weekly schedule. Daemon logs rotate at 5 MiB with three archives per stream; sustained RSS above 1 GiB triggers graceful recovery/restart. Set `PROXY_MCP_MAX_RSS_MB` (minimum 128) before reinstalling to adjust that guard; it is not an OS-enforced hard memory limit.
 
-Private package publishing is described in [Packaging and releases](PACKAGING.md).
+Public npm publishing and versioning are described in [Packaging and releases](PACKAGING.md).
 

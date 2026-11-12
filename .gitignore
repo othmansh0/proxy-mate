@@ -4,3 +4,6 @@ coverage/
 *.log
 .proxy-mcp/
 
+
+artifacts/
+*.tgz

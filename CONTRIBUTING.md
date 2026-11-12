@@ -17,6 +17,8 @@ When a change depends on Mockttp, the MCP TypeScript SDK, Xcode, or `simctl`, ve
 
 The 8 November setup preserves the previous local main tip as `archive/local-main-before-develop-20261108`. Earlier unpushed hardening commits are reachable from `develop`; remote `main` stays at its existing baseline until testing is accepted. A local runtime install is separate from Git publication: reinstall after executable/dependency changes and compare the runtime fingerprint. MCP clients use the stable installed `src/client.mjs` entry.
 
-## Private package
+## Public npm releases
 
-Distribution uses `@othmansh0/proxy-mcp` on private GitHub Packages. Follow [Packaging and releases](docs/PACKAGING.md); never publish to public npm. Keep package/lock/runtime versions aligned, bundle runtime dependencies from the audited lockfile, and smoke-test the actual tarball in a clean consumer. Merging to `develop` does not publish or promote `main`.
+Distribution uses `@othmansh0/proxy-mcp` on npm. Follow [Releases and versioning](docs/PACKAGING.md). Add a concise note under `## Unreleased` for user-facing changes. After merging and committing those notes, `npm version patch`, `minor` or an explicit prerelease updates the package/lock, promotes the changelog notes and creates the version commit/tag. Runtime version comes from package.json. Push the commit and annotated tag to run release qualification and OIDC publishing.
+
+Keep runtime dependencies bundled from the audited lockfile and smoke-test the actual tarball in a clean consumer. Publishing requires the configured npm trusted publisher and GitHub environment; do not add an npm automation token to repository secrets. Merging to develop alone does not publish a package or promote main.

@@ -1,6 +1,6 @@
 # Node.js API
 
-Install `@othmansh0/proxy-mcp` after the [private registry login](../README.md#quick-start). Requires macOS and Node.js 22+. The package is ESM and includes TypeScript declarations.
+Install `@othmansh0/proxy-mcp` from npm. No registry login is required for public releases. Requires macOS and Node.js 22+. The package is ESM and includes TypeScript declarations.
 
 ```js
 import { createProxyClient } from '@othmansh0/proxy-mcp';

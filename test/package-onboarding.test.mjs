@@ -108,7 +108,7 @@ test('upgrade preserves reverse listeners and explicit advanced configurations',
   await assert.rejects(initializePackage({ upgrade: true }, deps), /advanced/);
 });
 
-test('real CLI previews setup without creating daemon state and rejects public publishing', async (t) => {
+test('real CLI previews setup without creating daemon state and rejects restricted publishing', async (t) => {
   const { home } = await fixture(t);
   const state = path.join(home, 'not-created');
   const run = promisify(execFile);
@@ -118,7 +118,7 @@ test('real CLI previews setup without creating daemon state and rejects public p
   });
   assert.equal(JSON.parse(result.stdout).status, 'preview');
   await assert.rejects(fs.access(state), { code: 'ENOENT' });
-  await assert.rejects(run(process.execPath, ['scripts/check-private-package.mjs'], {
-    cwd: root, env: { ...process.env, npm_config_access: 'public' },
-  }), /restricted access/);
+  await assert.rejects(run(process.execPath, ['scripts/check-package.mjs'], {
+    cwd: root, env: { ...process.env, npm_config_access: 'restricted' },
+  }), /public npm/);
 });
