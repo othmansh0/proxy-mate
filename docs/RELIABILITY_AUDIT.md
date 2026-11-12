@@ -1,5 +1,37 @@
 # Reliability and replacement readiness
 
+## 12 November 2026 agent efficiency follow-up (0.8.2)
+
+Reviewed 200 distinct proxy tool calls from the available 11–12 November Claude session logs, including newer QA child sessions. Flow discovery accounted for the largest response volume. Successful body exports now work without a sensitive-data grant; one newer arbitrary export-path rejection still needed clearer recovery. Identical repeated reads occurred occasionally, without evidence of a widespread polling loop. No additional crash pattern was found in the inspected logs.
+
+Refreshed bridges return one canonical `data` payload; `PROXY_MCP_LEGACY_OUTPUT=1` retains legacy aliases. Discovery defaults to ten compact rows with exact URLs and available rule/error evidence; full metadata and explicit limits remain available. Body previews default to 2 KiB and redact complete JSON before truncating. `query_flow_json` selects bounded redacted fields/counts using JSON Pointers and one-segment wildcards, with explicit scan/output completeness flags. Updated prompts and unchanged-read feedback guide agents toward narrow queries and `wait_for_flow` without caching or suppressing actual reads.
+
+`finish_capture_task` removes only unchanged rules/listeners recorded under the task lease, then releases it. Preexisting/changed/explicitly retained fixtures, shared mock body assets and durable evidence survive. Stopped-proxy cleanup updates persisted owned rules without restarting capture. Disconnect never triggers task cleanup. Older bridges can receive smaller daemon-side previews and a reconnect notice, but must reconnect to discover new tools and the compact formatter.
+
+Validation:
+
+- Full suites: **276 passing tests each** on Node 22.23.4, 24.22.2 and 26.13.0; zero failures/skips. Coverage includes real stdio canonical/legacy output, two-bridge ownership/cleanup, expired-lease reacquisition, JSON redaction/truncation and safe shared mock assets.
+- Sixty-second isolated mixed-traffic soak: **2,308 requests**, 119 rule updates and 30 breakpoint resolutions; zero failures/dropped captures, peak RSS 222,703,672 bytes. This is bounded qualification, not a multi-day guarantee.
+- Production dependency audit: zero advisories. Package dry-run includes the JSON inspection module; whitespace/diff checks passed.
+
+Hosted CI account runner/billing restrictions remain separate from local qualification. No hosted green status or native Simulator requalification is claimed for this follow-up.
+
+## 11 November 2026 agent workflow follow-up (0.8.1)
+
+Reviewed the two local Claude sessions with direct proxy calls (88 distinct calls), durable capture metadata and daemon stderr. Repeated failures involved restarting an already-running capture, raw-only body export, unauthorized scratch paths, active-session switching and one diagnostic timeout. No additional fatal/heap/crash signatures were found in the inspected daemon log. Unknown socket ownership is a coverage omission and is not counted as a dropped persistence event.
+
+The follow-up batches fresh socket ownership lookups, shares process checks only within each batch, refreshes verified selected-app paths after reinstall and reports degraded attribution. It adds private redacted file exports and includes spilled textual bodies in HAR/session archives with a 50 MiB body budget and explicit omission counts/reasons. Repeated same-target app setup reuses capture and can explicitly renew routing; rejected active-session creation does not create an orphan. Selected durable sessions and task leases survive daemon recovery. Task leases protect shared mutations while reads, exports and replay remain available; expiry/release does not stop capture or remove mocks. Updated prompts explain ownership, export paths, cleanup and coverage limits.
+
+Validation:
+
+- Full suites: **265 passing tests each** on Node 22.23.4, 24.22.2 and 26.13.0, with zero skips/failures. Real two-bridge tests cover foreign mutation rejection, safe observation/export, concurrent breakpoint resolution, release and renewal. Daemon lifecycle checks preserve the selected session/lease through SIGTERM and SIGKILL recovery.
+- Native iOS 27.0 Simulator URLSession: HTTPS mock, HTTPS request-breakpoint response, HTTP response-breakpoint modification and redacted file export all passed against an isolated proxy using the existing trusted CA. No host routing changes, app edits, certificate installation or app UI manipulation were required. All qualification rules/listeners were cleaned up.
+- Sixty-second mixed-traffic soak: **2,279 requests**, 119 live rule updates and 30 breakpoint resolutions; zero failures or dropped captures, peak RSS 233,583,344 bytes. This is bounded qualification, not a multi-day leak guarantee.
+- Production dependency audit: zero advisories. Storage benchmark: 10,000 flows persisted/updated/read. Package dry-run includes the new body-export and capture-lease modules.
+
+App reinstall/burst cases have deterministic regression coverage; the native smoke above uses explicit URLSession proxy configuration and does not prove automatic PAC routing or universal app/background-helper attribution. Certificate pinning and clients bypassing proxy settings remain explicit limits. Existing MCP bridges keep their previously loaded tool schemas/instructions until reconnected; reconnect once after upgrade to discover lease tools and new export guidance. Hosted CI remains a separate qualification gate while account runner/billing restrictions prevent execution; local tests do not constitute green GitHub checks.
+
+
 ## Current assessment — 8 November 2026
 
 Version 0.8.0 addresses the concrete MCP lifetime, network cleanup and onboarding defects below. The release is local; full Android/Network Extension parity and multi-day real-app qualification remain open. Source belongs to `othmansh0/proxy-mcp`, with its permanent checkout at `/Users/othmanshahrouri/Documents/Tools/proxy-mcp`. Temporary worktrees and test data now use the dedicated `Tools/proxy-mcp-workspace/scratch` area.

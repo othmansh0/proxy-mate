@@ -26,6 +26,7 @@ import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
 import { SERVER_INSTRUCTIONS } from './lib/guidance.mjs';
 import { recordRuntimeEvent } from './lib/runtime-identity.mjs';
+import { rememberCaptureLease, INTERNAL_CAPTURE_CONTROL } from './lib/capture-lease.mjs';
 import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/network-policy.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
@@ -74,7 +75,7 @@ async function runStdio({ requireDaemon = false } = {}) {
     await localQueue;
     if (localTools) {
       await localTools.stop_operator_ui();
-      await localTools.stop_proxy();
+      await localTools[INTERNAL_CAPTURE_CONTROL].stop_proxy();
     }
     if (releaseRuntime) await releaseRuntime();
   }, { stdin: true });
@@ -137,7 +138,7 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (flowId && /flow|request|curl/.test(tool)) void resourceSubscriptions.notifyLiveFlow(flowId).catch(() => {});
     return value;
   };
-  registerMcpTools(mcp, observableDispatch);
+  registerMcpTools(mcp, rememberCaptureLease(observableDispatch), { legacyAliases: process.env.PROXY_MCP_LEGACY_OUTPUT === '1' });
   registerMcpResources(mcp, observableDispatch);
   registerMcpPrompts(mcp);
   const transport = new StdioServerTransport();
@@ -153,6 +154,11 @@ async function runDaemon(args) {
   const stopLogMaintenance = startLogMaintenance();
 
   const engine = new ProxyEngine();
+  const priorState = await readState();
+  if (priorState?.active_session_id) {
+    try { await engine.setActiveSession(priorState.active_session_id, { create: false }); }
+    catch (error) { engine.diagnostics.push({ kind: 'session-restore-failed', code: error.code ?? 'SESSION_RESTORE_FAILED' }); }
+  }
   const pacServer = new PacServer();
   const tools = makeTools({ engine, pacServer, mode: 'daemon' });
 
@@ -176,9 +182,14 @@ async function runDaemon(args) {
     // Cancel control work before draining capture or restoring routing.
     await ctrl?.stop();
     await tools.stop_operator_ui();
-    const stopped = await tools.stop_proxy();
+    const stopped = await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy();
     await clearPidFile();
-    if (!stopped.routing_cleanup_error) await clearState();
+    if (!stopped.routing_cleanup_error) {
+      const lease = (await readState())?.capture_lease;
+      await clearState();
+      await patchState({ active_session_id: engine.sessionId,
+        ...(lease && Date.parse(lease.expires_at) > Date.now() ? { capture_lease: lease } : {}) });
+    }
     await releaseRuntime();
   };
   const shutdown = installShutdownHandlers(cleanup);
@@ -256,7 +267,7 @@ async function runDaemon(args) {
   }
 
   // Start the sim watcher in the daemon (Phase 3.4).
-  if (!args.skipTrust) await tools.start_sim_watcher({ interval: 5000 });
+  if (!args.skipTrust) await tools[INTERNAL_CAPTURE_CONTROL].start_sim_watcher({ interval: 5000 });
   // Publish readiness only after routing, trust and persisted rules are ready.
   ctrl = new ControlServer({ port: controlPort, tools });
   await writePidFile(process.pid);

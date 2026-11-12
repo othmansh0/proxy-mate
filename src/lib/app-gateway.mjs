@@ -141,7 +141,11 @@ export class AppProxyGateway {
   }
 
   status() {
-    return { port: this.port, connections: { ...this.counts }, unknown_connections: 'Passed through without inspection or storage.' };
+    const attribution = this.classify.status?.() ?? null;
+    return { port: this.port, connections: { ...this.counts },
+      attribution,
+      coverage_degraded: attribution?.coverage === 'degraded',
+      unknown_connections: 'Passed through without inspection or storage. These are capture omissions, not persistence drops.' };
   }
 
   async stop() {

@@ -1,5 +1,22 @@
 # Agent network debugging playbook
 
+Prefer small structured evidence: narrow `get_flows`/`filter_flows` (default 10 compact rows), `get_flow_detail` with `body_mode=none` for headers, then `query_flow_json` for selected JSON fields. Example: `{"flow_id":"FLOW_ID","pointers":["/data/itineraries/*/vendor"],"distinct":true}`. Scalars return bounded values/counts; arrays/objects return key/length summaries. Honor truncation flags. Use `wait_for_flow` for fresh evidence rather than identical reads. `save_body_to_file` is the fallback for full offline analysis; do not paste its entire body into a tool response.
+
+Finish with `finish_capture_task`, which removes only tracked, unchanged task-created rules/listeners and releases the lease. It keeps shared capture and evidence; `keep_resources=true` deliberately retains QA fixtures. Never infer completion from a disconnect, guess ownership from names, or delete shared sessions. Resources changed since ownership tracking are retained for inspection. Read the canonical `structuredContent.data`; refreshed bridges use compact envelopes and `PROXY_MCP_LEGACY_OUTPUT=1` enables legacy aliases.
+
+Before shared mutations, acquire a task lease:
+
+```json
+{"task_id":"qa-orders","ttl_seconds":900}
+```
+
+Call `acquire_capture_lease` with those arguments. The thin bridge remembers its `capture_lease_id` for subsequent shared mutations, including breakpoint resolution. Direct RPC callers include the returned ID on each mutation. Renew before expiry with the same task/ID. `CAPTURE_OWNED` means inspect the existing capture instead of stopping it. Reads, file exports and request replay remain available to other agents. After removing your task's rules/listeners, call `release_capture_lease`; releasing/expiry does not stop capture or remove mocks. No lease is inferred from an agent name or a shared MCP connection token.
+
+Reuse the active session shown by `get_proxy_status`; rename it with `update_capture_session`. Starting an active session while capture runs is rejected before creating anything. Repeating `start_app_capture` for the same target reuses it; `duration_seconds` explicitly renews routing. After reinstall, the selected app path refreshes only after its Simulator/process identity is verified.
+
+Use `save_body_to_file` with `flow_id` and optional `session_id`/`kind`, omitting `path`, to save complete redacted JSON under the authorized private exports directory. HAR/session exports preserve spilled text. Check `omitted_body_count` and per-body omission reasons; files/archives have a 50 MiB body budget. Raw/binary access still requires a daemon-level sensitive grant, and enabling it on the bridge alone cannot widen daemon scope. Do not query private SQLite files as an export workaround.
+
+
 Use the MCP prompt `debug-ios-api` with `url` and a unique `task_id` for a guided workflow. All examples below are tool arguments, not shell commands. Replace the example URL with the real API endpoint your app calls.
 
 ## Establish capture first
@@ -90,7 +107,7 @@ Remove only your own rules with `remove_rule`. Never call `clear_rules`, `clear_
 
 ## Reliability checks
 
-`get_diagnostics` exposes capture drops, queue bytes, cache bytes, process memory and persistence health. Treat nonzero drops/omitted bodies as incomplete evidence, not a complete trace. `diagnose_ios_capture` identifies external PAC changes but does not override a VPN or another proxy silently.
+`get_diagnostics` exposes capture drops, queue bytes, cache bytes, process memory and persistence health. Also inspect `app_gateway.attribution.unknown_reasons` and `coverage_degraded`; unattributed connections bypass capture and are not persistence drops. Treat nonzero drops/omitted bodies as incomplete evidence, not a complete trace. `diagnose_ios_capture` identifies external PAC changes but does not override a VPN or another proxy silently.
 
 The isolated `npm run test:soak -- 300` test exercises concurrent HTTP requests, compressed large responses, JSON updates, breakpoints and session restart. It does not change host routing or certificate trust. Use `3600` for a one-hour local soak, up to `86400` for 24 hours. CI runs 60 seconds per change and 300 seconds on the weekly schedule. Testing one machine/runtime cannot prove every iOS app, VPN or pinning configuration.
 

@@ -40,11 +40,16 @@ The daemon survives client exits. A restart gets a bounded 15-second authenticat
 
 Ask your MCP client to:
 
-1. Call `get_started` with the API URL and a unique `task_id`; follow its exact next-call arguments.
-2. Call `setup_simulator_certificate` for a booted Simulator.
-3. Call `verify_simulator_certificate` with that Simulator's `udid` to test native iOS TLS trust.
-4. For localhost use `create_reverse_proxy` and its returned `local_url`. For external hosts use scoped `set_proxy_routing` after host CA trust. Trigger an app request; relaunch only that app if it cached old routing.
-5. Call `wait_for_flow`, then `get_flow_detail` for the selected request.
+1. Call `get_started` with a unique `task_id` and follow its exact next-call arguments. Reuse an existing capture and its active session.
+2. Acquire `acquire_capture_lease` before changing shared capture, routing or mock rules. The thin bridge remembers the returned ID; direct RPC callers pass `capture_lease_id`. Other agents can still read, export and replay. Leases default to 15 minutes, can be renewed, and persist across reconnects/restarts until expiry.
+3. For a new Simulator capture, select one device/app with `list_simulator_apps`, then `start_app_capture`. It imports/verifies that Simulator's CA before routing. Repeating the same target reuses capture; supply `duration_seconds` to renew routing. Broader domain/Mac capture remains an explicit choice.
+4. For localhost use `create_reverse_proxy` and its returned `local_url`. Trigger the actual app request, then use `wait_for_flow` and `get_flow_detail` to inspect it.
+5. For large JSON use `save_body_to_file` without `path`; read the returned private file. It exports complete redacted text without a sensitive grant. HAR/session exports also retain spilled text, with explicit omission reasons/counts for binary, missing or over-budget bodies. Body export is bounded to 50 MiB per file/archive.
+6. Remove only your task's rules/listeners and release its capture lease. Release/expiry does not stop capture or expire mocks. Legacy calls remain compatible when no task holds a lease.
+
+App attribution batches fresh socket lookups and re-resolves the selected bundle after reinstall. `app_gateway.attribution` and `coverage_degraded` expose unknown ownership and overload. Unknown connections remain uninspected; zero persistence drops does not prove full capture coverage. App/background helpers that bypass attribution or proxy settings and certificate pinning remain coverage limits.
+
+`update_capture_session` can rename the active session without interrupting capture. Selecting another active session still requires stopping capture, and rejected activation no longer leaves an empty session behind. The daemon restores the selected durable session after recovery; app routing still requires explicit restart.
 
 Certificate verification uses a native URLSession request through an explicit test proxy. It does **not** claim to verify your app's automatic PAC routing or certificate-pinning policy.
 
@@ -69,6 +74,24 @@ The MCP server also provides guided prompts, typed result envelopes, status/flow
 See [capabilities and limits](docs/CAPABILITIES.md) for the complete surface.
 
 For coding agents, use the `debug-ios-api` MCP prompt or follow the [agent playbook](docs/AGENT_NETWORK_WORKFLOW.md). It includes copyable tool arguments, breakpoint JSON editing, rule precedence, and multi-agent cleanup rules.
+
+## Efficient agent tasks
+
+Refreshed bridges return the canonical `schema_version`/`data` envelope without repeating its payload in top-level compatibility aliases. Read `result.structuredContent.data`. Set `PROXY_MCP_LEGACY_OUTPUT=1` on a bridge if an older integration needs the aliases; the schema version remains 1.0. Existing unrefreshed bridges retain their loaded formatter, but receive the daemon's smaller discovery results, previews and recovery guidance.
+
+`get_flows` and `filter_flows` default to 10 compact summaries. Exact URLs, status, size, capture time, matched rule IDs and proxy-error markers remain available; `view:"full"` adds protocol/timing metadata and list resource links. Explicit limits and cursor ordering are unchanged. Use URL/host filters or `wait_for_flow`, rather than dumping a large page repeatedly. Three identical reads on one refreshed bridge return a next-step hint; reads still go to the live daemon.
+
+Use `get_flow_detail` with `body_mode:"none"` for headers. Default previews are limited to 2 KiB per part and may be incomplete JSON. Select fields instead of printing whole files:
+
+```json
+{"flow_id":"FLOW_ID","pointers":["/data/itineraries/*/vendor","/data/itineraries/*/attributes/isMixedCarrierTicketing"],"distinct":true}
+```
+
+Pass this to `query_flow_json`. It returns redacted, bounded scalar values/counts with example pointers. Arrays/objects are structural summaries, not complete values. Wildcards cover one segment; pointer escaping uses `~1` for `/` and `~0` for `~`. Inspect `truncated` and `match_count_complete` before concluding a field/value is absent. For complex offline analysis use `save_body_to_file`, omitting `path`, and read its returned private file.
+
+After a leased task, call `finish_capture_task`. It removes only unchanged rules/reverse listeners created under that lease, deletes no-longer-referenced owned mock files, and releases the lease. It preserves captured evidence, exports, preexisting/modified fixtures, and shared capture. Use `keep_resources:true` to deliberately leave QA fixtures installed. Cleanup also handles a deliberately stopped proxy's persisted task rules. `release_capture_lease` alone retains fixtures. MCP disconnects never imply task completion or trigger cleanup. Legacy untracked fixtures must be removed by explicit IDs; ownership is never guessed from a prefix.
+
+The daemon reports when a client has old/unreported bridge metadata: reconnect the MCP client to load the new tools/instructions; do not restart capture.
 
 ## Security defaults
 

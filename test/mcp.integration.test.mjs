@@ -18,7 +18,7 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
     command: process.execPath,
     args: [path.join(root, 'src/server.mjs'), '--in-process'],
     cwd: root,
-    env: { ...process.env, PROXY_MCP_HOME: state },
+    env: { ...process.env, PROXY_MCP_HOME: state, PROXY_MCP_LEGACY_OUTPUT: '0' },
     stderr: 'pipe',
   });
   const client = new Client({ name: 'proxy-mcp-test', version: '1.0.0' });
@@ -30,7 +30,7 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
   for (const expected of [
     'get_version', 'get_proxy_status', 'get_flows', 'get_flow_detail',
     'create_map_local', 'create_map_remote', 'create_blacklist',
-    'filter_flows', 'export_flow_curl', 'setup_simulator_certificate',
+    'filter_flows', 'query_flow_json', 'finish_capture_task', 'export_flow_curl', 'setup_simulator_certificate',
   ]) assert.equal(names.has(expected), true, `missing MCP tool ${expected}`);
   for (const tool of listed.tools) {
     assert.equal(tool.outputSchema?.type, 'object', `${tool.name} is missing an output schema`);
@@ -42,7 +42,7 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
 
   const result = await client.callTool({ name: 'get_version', arguments: {} });
   assert.equal(result.isError, undefined);
-  assert.equal(result.structuredContent.version, pkg.version);
+  assert.equal(result.structuredContent.version, undefined);
   assert.equal(result.structuredContent.schema_version, '1.0');
   assert.equal(result.structuredContent.ok, true);
   assert.equal(result.structuredContent.data.version, pkg.version);
@@ -60,4 +60,22 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
   assert.equal(status.contents[0].mimeType, 'application/json');
   assert.equal(typeof JSON.parse(status.contents[0].text).running, 'boolean');
 
+});
+
+test('stdio MCP can explicitly retain legacy output aliases', async (t) => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-legacy-'));
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(root, 'src/server.mjs'), '--in-process'],
+    cwd: root,
+    env: { ...process.env, PROXY_MCP_HOME: state, PROXY_MCP_LEGACY_OUTPUT: '1' },
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'legacy-output-test', version: '1.0.0' });
+  await client.connect(transport);
+  t.after(async () => { await client.close(); await fs.rm(state, { recursive: true, force: true }); });
+  const { structuredContent } = await client.callTool({ name: 'get_version', arguments: {} });
+  assert.equal(structuredContent.version, structuredContent.data.version);
+  assert.equal(structuredContent.ok, true);
 });

@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { writeHandshake, clearHandshake } from './state.mjs';
 import { MCP_TOOLS } from './mcp-contract.mjs';
+import { SERVER_VERSION } from './config.mjs';
 
 export const DEFAULT_CONTROL_PORT = 8082;
 const MAX_RPC_BYTES = 1024 * 1024;
@@ -19,6 +20,7 @@ const DEFAULT_RATE_LIMIT = 600;
 const DEFAULT_RATE_WINDOW_MS = 60_000;
 const READ_ONLY_TOOL_NAMES = new Set(MCP_TOOLS.filter((tool) => tool.annotations.readOnlyHint).map((tool) => tool.name));
 export const SERIAL_TOOL_NAMES = new Set([
+  'acquire_capture_lease', 'release_capture_lease', 'finish_capture_task', 'toggle_recording', 'import_har', 'restart_sim_apps',
   'start_proxy', 'stop_proxy', 'set_proxy_routing', 'clear_proxy_routing',
   'start_app_capture',
   'setup_host_certificate', 'remove_host_certificate', 'setup_simulator_certificate',
@@ -210,6 +212,9 @@ export class ControlServer {
             code: 'FORBIDDEN_SCOPE',
             message: `Control token lacks required ${args?.include_sensitive === true ? 'sensitive' : requiredScope} scope.`,
             details: { required_scope: args?.include_sensitive === true ? 'sensitive' : requiredScope },
+            recovery: args?.include_sensitive === true
+              ? ['Retry include_sensitive=false for redacted text. Do not restart shared capture merely to export JSON.']
+              : ['Use a control-authorized connection for this mutation.'],
           },
         }));
         return;
@@ -226,7 +231,8 @@ export class ControlServer {
         });
         const invoke = () => {
           if (controller.signal.aborted) throw controller.signal.reason ?? codedCancellation();
-          return fn(args ?? {}, { signal: controller.signal });
+          return fn(args ?? {}, { signal: controller.signal,
+            bridge_version: typeof payload.client?.bridge_version === 'string' ? payload.client.bridge_version.slice(0, 32) : null });
         };
         const operation = SERIAL_TOOL_NAMES.has(tool)
           ? this.queue.then(invoke)
@@ -247,7 +253,7 @@ export class ControlServer {
       } catch (e) {
         if (res.headersSent || res.writableEnded || res.destroyed) { res.destroy(); return; }
         let body;
-        try { body = JSON.stringify({ ok: false, error: serializeToolError(e) }); }
+        try { body = JSON.stringify({ ok: false, error: serializeToolError(e, tool) }); }
         catch { body = JSON.stringify({ ok: false, error: { code: 'TOOL_FAILED', message: 'Tool failed with non-serializable error details.' } }); }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(body);
@@ -317,7 +323,7 @@ function constantTimeEqual(a, b) {
 // Client side: connect to a running daemon, forward an RPC call.
 export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rpcTimeoutFor(tool, args), signal } = {}) {
   const url = new URL('/rpc', controlUrl);
-  const body = JSON.stringify({ tool, args: args ?? {} });
+  const body = JSON.stringify({ tool, args: args ?? {}, client: { bridge_version: SERVER_VERSION } });
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(codedCancellation('Daemon RPC was cancelled before it started.'));
     let settled = false;
@@ -401,12 +407,15 @@ function transportFailure(error, tool) {
   });
 }
 
-function serializeToolError(error) {
+function serializeToolError(error, tool) {
+  const recovery = error?.recovery ?? (error?.code === 'PATH_NOT_AUTHORIZED'
+    && ['save_body_to_file', 'export_har', 'export_capture_session'].includes(tool)
+    ? ['Retry without path and read the returned private export file. Arbitrary scratch paths are not authorized.'] : undefined);
   return {
     code: error?.code ?? 'TOOL_FAILED',
     message: error?.message ?? String(error),
     ...(error?.retryable !== undefined ? { retryable: error.retryable === true } : {}),
-    ...(error?.recovery !== undefined ? { recovery: error.recovery } : {}),
+    ...(recovery !== undefined ? { recovery } : {}),
     ...(error?.details !== undefined ? { details: error.details } : {}),
   };
 }

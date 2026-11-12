@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.2 — 2026-11-12
+
+- Add compact canonical envelopes on refreshed bridges, with opt-in legacy aliases; smaller discovery defaults/metadata and 2 KiB body previews reduce context use. Preserve exact URLs, rule/error evidence, explicit limits and paging.
+- Add bounded redacted JSON Pointer/wildcard queries for scalar values/counts and structural summaries, avoiding full body/file dumps. Expose scan/output truncation explicitly.
+- Promote next actions, flag repeated unchanged reads without caching traffic, and return deterministic export-path/sensitive-scope recovery guidance. Report old/unreported bridge metadata without restarting capture.
+- Track resources created under task leases and add finish_capture_task for safe one-call cleanup/release, including stopped-proxy persistence. Retain evidence, preexisting/changed fixtures and explicitly kept QA resources; preserve mock assets still referenced by another rule.
+
+
+## 0.8.1 — 2026-11-11
+
+- Batch fresh app socket ownership checks, share process verification only within a batch, refresh verified app bundle paths after reinstall, and expose attribution omissions/overload separately from persistence health.
+- Reuse app capture for repeated setup and renew routing only when expired or explicitly requested. Reuse/rename active sessions; reject active-session creation before persisting an orphan and restore the selected durable session after daemon recovery.
+- Export complete redacted text/JSON to private files and HAR/session archives, including spilled bodies, without sensitive access. Bound body export to 50 MiB and report binary/missing/over-budget omissions. Redact HAR redirect URLs and enforce private file permissions.
+- Add bounded persistent task leases for shared capture/routing/rule mutations. Thin bridges remember an explicitly acquired lease; reads, exports and replay remain available to other agents. Keep breakpoint resolution concurrent and preserve trusted daemon shutdown/recovery.
+- Improve startup guidance, distinguish slow status from an unreachable daemon, and report app attribution degradation without recommending unnecessary Mac trust in app mode. Give long diagnostics progress/deadline metadata.
+
+
 ## 0.8.0 — 2026-11-08 (local release)
 
 - Give capture-owner processes a configurable 2000 ms connection-attempt window while preserving address-family selection, TLS validation and single-shot HTTP forwarding. Expose the active setting in proxy status.
