@@ -19,6 +19,7 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
   const engine = new ProxyEngine();
   await engine.start({ port: 0 });
   const tools = makeTools({ engine, pacServer: new PacServer(), mode: 'test' });
+  await tools.mock_json_response({ rule_id: 'existing-qa-fixture', url: 'http://fixture.invalid/keep', json: { keep: true } });
   const control = new ControlServer({ port: 0, tools });
   await control.start();
   const clients = [];
@@ -76,7 +77,16 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
   const exported = await call(1, 'save_body_to_file', { flow_id: observed.flow.id });
   assert.equal(exported.redacted, true);
   await call(0, 'remove_rule', { rule_id: 'qa-a-pause' });
-  assert.equal((await call(0, 'release_capture_lease')).capture_continues, true);
+  await call(0, 'mock_json_response', { rule_id: 'qa-a-cleanup', url: 'http://fixture.invalid/cleanup', json: { cleanup: true } });
+  await call(0, 'patch_mock_json', { rule_id: 'qa-a-cleanup', patch: { updated: true } });
+  const reverse = await call(0, 'create_reverse_proxy', { id: 'qa-a-local', target_url: 'http://127.0.0.1:9' });
+  assert.ok(reverse.local_url);
+  const finished = await call(0, 'finish_capture_task');
+  assert.equal(finished.capture_continues, true);
+  assert.ok(finished.removed.some((item) => item.id === 'qa-a-cleanup'));
+  assert.ok(finished.removed.some((item) => item.id === 'qa-a-local'));
+  assert.equal((await call(1, 'list_reverse_proxies')).reverse_proxies.length, 0);
+  assert.deepEqual((await call(1, 'list_rules')).rules.map((rule) => rule.rule_id), ['existing-qa-fixture']);
   assert.equal((await call(1, 'get_proxy_status')).running, true);
   await call(1, 'acquire_capture_lease', { task_id: 'qa-b' });
   const renewed = await call(1, 'acquire_capture_lease', { task_id: 'qa-b', ttl_seconds: 1800 });

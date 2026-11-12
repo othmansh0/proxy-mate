@@ -1,5 +1,9 @@
 # Agent network debugging playbook
 
+Prefer small structured evidence: narrow `get_flows`/`filter_flows` (default 10 compact rows), `get_flow_detail` with `body_mode=none` for headers, then `query_flow_json` for selected JSON fields. Example: `{"flow_id":"FLOW_ID","pointers":["/data/itineraries/*/vendor"],"distinct":true}`. Scalars return bounded values/counts; arrays/objects return key/length summaries. Honor truncation flags. Use `wait_for_flow` for fresh evidence rather than identical reads. `save_body_to_file` is the fallback for full offline analysis; do not paste its entire body into a tool response.
+
+Finish with `finish_capture_task`, which removes only tracked, unchanged task-created rules/listeners and releases the lease. It keeps shared capture and evidence; `keep_resources=true` deliberately retains QA fixtures. Never infer completion from a disconnect, guess ownership from names, or delete shared sessions. Resources changed since ownership tracking are retained for inspection. Read the canonical `structuredContent.data`; refreshed bridges use compact envelopes and `PROXY_MCP_LEGACY_OUTPUT=1` enables legacy aliases.
+
 Before shared mutations, acquire a task lease:
 
 ```json

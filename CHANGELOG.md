@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.2 — 2026-11-12
+
+- Add compact canonical envelopes on refreshed bridges, with opt-in legacy aliases; smaller discovery defaults/metadata and 2 KiB body previews reduce context use. Preserve exact URLs, rule/error evidence, explicit limits and paging.
+- Add bounded redacted JSON Pointer/wildcard queries for scalar values/counts and structural summaries, avoiding full body/file dumps. Expose scan/output truncation explicitly.
+- Promote next actions, flag repeated unchanged reads without caching traffic, and return deterministic export-path/sensitive-scope recovery guidance. Report old/unreported bridge metadata without restarting capture.
+- Track resources created under task leases and add finish_capture_task for safe one-call cleanup/release, including stopped-proxy persistence. Retain evidence, preexisting/changed fixtures and explicitly kept QA resources; preserve mock assets still referenced by another rule.
+
+
 ## 0.8.1 — 2026-11-11
 
 - Batch fresh app socket ownership checks, share process verification only within a batch, refresh verified app bundle paths after reinstall, and expose attribution omissions/overload separately from persistence health.

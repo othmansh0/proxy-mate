@@ -75,6 +75,24 @@ See [capabilities and limits](docs/CAPABILITIES.md) for the complete surface.
 
 For coding agents, use the `debug-ios-api` MCP prompt or follow the [agent playbook](docs/AGENT_NETWORK_WORKFLOW.md). It includes copyable tool arguments, breakpoint JSON editing, rule precedence, and multi-agent cleanup rules.
 
+## Efficient agent tasks
+
+Refreshed bridges return the canonical `schema_version`/`data` envelope without repeating its payload in top-level compatibility aliases. Read `result.structuredContent.data`. Set `PROXY_MCP_LEGACY_OUTPUT=1` on a bridge if an older integration needs the aliases; the schema version remains 1.0. Existing unrefreshed bridges retain their loaded formatter, but receive the daemon's smaller discovery results, previews and recovery guidance.
+
+`get_flows` and `filter_flows` default to 10 compact summaries. Exact URLs, status, size, capture time, matched rule IDs and proxy-error markers remain available; `view:"full"` adds protocol/timing metadata and list resource links. Explicit limits and cursor ordering are unchanged. Use URL/host filters or `wait_for_flow`, rather than dumping a large page repeatedly. Three identical reads on one refreshed bridge return a next-step hint; reads still go to the live daemon.
+
+Use `get_flow_detail` with `body_mode:"none"` for headers. Default previews are limited to 2 KiB per part and may be incomplete JSON. Select fields instead of printing whole files:
+
+```json
+{"flow_id":"FLOW_ID","pointers":["/data/itineraries/*/vendor","/data/itineraries/*/attributes/isMixedCarrierTicketing"],"distinct":true}
+```
+
+Pass this to `query_flow_json`. It returns redacted, bounded scalar values/counts with example pointers. Arrays/objects are structural summaries, not complete values. Wildcards cover one segment; pointer escaping uses `~1` for `/` and `~0` for `~`. Inspect `truncated` and `match_count_complete` before concluding a field/value is absent. For complex offline analysis use `save_body_to_file`, omitting `path`, and read its returned private file.
+
+After a leased task, call `finish_capture_task`. It removes only unchanged rules/reverse listeners created under that lease, deletes no-longer-referenced owned mock files, and releases the lease. It preserves captured evidence, exports, preexisting/modified fixtures, and shared capture. Use `keep_resources:true` to deliberately leave QA fixtures installed. Cleanup also handles a deliberately stopped proxy's persisted task rules. `release_capture_lease` alone retains fixtures. MCP disconnects never imply task completion or trigger cleanup. Legacy untracked fixtures must be removed by explicit IDs; ownership is never guessed from a prefix.
+
+The daemon reports when a client has old/unreported bridge metadata: reconnect the MCP client to load the new tools/instructions; do not restart capture.
+
 ## Security defaults
 
 - System routing is opt-in, scoped, leased (one hour by default), and uses PAC `PROXY; DIRECT` fallback. Existing proxies/VPN changes are preserved unless replacement is explicit.

@@ -1,6 +1,6 @@
 {
   "name": "proxy-mcp",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Production-oriented local MCP server for HTTP(S) capture, mocking, routing, and automated Xcode Simulator CA trust.",
   "type": "module",
   "bin": {

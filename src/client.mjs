@@ -36,7 +36,7 @@ const dispatch = rememberCaptureLease(async (tool, args, context = {}) => {
   if (flowId && /flow|request|curl/.test(tool)) void subscriptions.notifyLiveFlow(flowId).catch(() => {});
   return result;
 });
-registerMcpTools(mcp, dispatch);
+registerMcpTools(mcp, dispatch, { legacyAliases: process.env.PROXY_MCP_LEGACY_OUTPUT === '1' });
 registerMcpResources(mcp, dispatch);
 registerMcpPrompts(mcp);
 
