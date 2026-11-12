@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+## 0.9.0 — 2026-11-12
+
+- Prepare the first public npm release of @othmansh0/proxy-mcp with a one-command npx setup and no package authentication for users. This is a pre-1.0 release.
+- Add version-tagged GitHub releases, audited package artifacts, checksum files, clean-consumer smoke tests and tokenless npm trusted publishing with provenance. Keep prereleases on the next npm channel.
+- Read the runtime version from package.json and use npm version hooks to update the changelog, package version, lockfile and annotated Git tag together.
+
 ## 0.8.3 — 2026-11-12
 
 - Rewrite the README around a two-command private install and natural-language QA/developer workflows; move advanced operational detail into focused guides.

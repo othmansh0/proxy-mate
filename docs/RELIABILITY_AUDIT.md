@@ -1,5 +1,15 @@
 # Reliability and replacement readiness
 
+## 12 November 2026 public release preparation (0.9.0)
+
+Prepared public npm distribution, one-command installation, annotated version tags, changelog hooks, integrity/checksum assets and tokenless trusted publishing. The actual repository is still private until the owner changes visibility; no public version or release tag is created by this preparation. Initial npm scope ownership/bootstrap, trusted-publisher settings and the GitHub npm environment remain owner setup.
+
+Local qualification on Apple Silicon: 290 tests passed on each Node 22.23.4, 24.22.2 and 26.13.0 with zero failures/skips. Actual npm version integration creates a matching commit, annotated tag, promoted changelog notes and runtime version; a mismatched tag is rejected. Public package checks reject restricted/foreign-registry publication and keep prereleases off latest. Workflow syntax passed actionlint 1.7.12. Production dependency audit reports zero advisories.
+
+The actual bundled tarball installs offline into a clean consumer, including native SQLite, typed ESM exports and CLI preview without creating capture state. A second clean installation in a tagged Git checkout produced byte-identical tarballs after removing regenerable node-gyp output containing build-machine paths. Registry-provided Darwin prebuilds are retained and verified. Gitleaks 8.30.1 scanned available Git history with no detected credentials. This does not certify historical external logs or unrelated artifacts.
+
+The release workflow adds required hosted Node 24 Intel qualification alongside Apple Silicon Node 22/24/26, then a protected npm environment gate, OIDC publication/provenance and GitHub release assets. Hosted execution, Intel results and OIDC upload remain unverified until account-side setup and a successful workflow run; prior hosted jobs were blocked by account billing/spending restrictions. Current local test results are not a hosted green status.
+
 ## 12 November 2026 private package onboarding (0.8.3)
 
 The README now starts with private registry login and one init command, followed by natural-language QA/developer examples. Detailed configuration, client registration, library usage and publishing live in focused guides. The scoped package exports a side-effect-free daemon client API with TypeScript declarations; its bundled dependency tree retains the audited pins when installed in another project.
@@ -44,7 +54,7 @@ App reinstall/burst cases have deterministic regression coverage; the native smo
 
 ## Current assessment — 8 November 2026
 
-Version 0.8.0 addresses the concrete MCP lifetime, network cleanup and onboarding defects below. The release is local; full Android/Network Extension parity and multi-day real-app qualification remain open. Source belongs to `othmansh0/proxy-mcp`, with its permanent checkout at `/Users/othmanshahrouri/Documents/Tools/proxy-mcp`. Temporary worktrees and test data now use the dedicated `Tools/proxy-mcp-workspace/scratch` area.
+Version 0.8.0 addresses the concrete MCP lifetime, network cleanup and onboarding defects below. The release is local; full Android/Network Extension parity and multi-day real-app qualification remain open. Source belongs to `othmansh0/proxy-mcp`, with its permanent checkout at `~/Tools/proxy-mcp`. Temporary worktrees and test data now use the dedicated `Tools/proxy-mcp-workspace/scratch` area.
 
 ### Research and implementation decisions
 
@@ -93,7 +103,7 @@ The existing private repository now uses `develop` as its default/integration br
 
 [GitHub Actions run 42454225276](https://github.com/othmansh0/proxy-mcp/actions/runs/42454225276) failed before any job steps started. The authenticated GitHub page reports an account billing/spending restriction. No CI tests ran; this is not a green CI result or a test failure attribution. The API token can read Actions job status but cannot read check annotations, so the blocker was verified through the repository's logged-in GitHub UI. Billing changes remain an owner action. Local Node 22.23.4, Node 24.22.2 and Node 26.8.1 suites each pass all 217 tests, with no skipped cases.
 
-No new repository was created: the existing private remote is `othmansh0/proxy-mcp`. Integration uses `develop`; remote `main` is reserved for promotion after owner testing. Temporary implementation work belongs to this MCP's dedicated Tools workspace, not Recipe Jar's iOS/backend repositories.
+No new repository was created: the existing private remote is `othmansh0/proxy-mcp`. Integration uses `develop`; remote `main` is reserved for promotion after owner testing. Temporary implementation work belongs to this MCP's dedicated workspace.
 
 ## Assessment — 7 November 2026 (historical where superseded above)
 

@@ -4,19 +4,13 @@
 
 Inspect backend requests, responses and headers from the iOS Simulator. Ask your agent to mock an API, pause a response, reproduce a failure, or check what changed—without adding debugging code to your app.
 
-Works with Claude Code, Codex, Cursor, Claude Desktop, and other local stdio MCP clients. Distributed as the private npm package **`@othmansh0/proxy-mcp`** through GitHub Packages.
+Works with Claude Code, Codex, Cursor, Claude Desktop, and other local stdio MCP clients. The npm package is **`@othmansh0/proxy-mcp`**. Public releases install without a GitHub account or registry login.
 
 ## Quick start
 
-You need **macOS**, **Node.js 22+** (Node 24 recommended), **Xcode with an iOS Simulator**, and read access to the private package. A maintainer must grant your GitHub account package access.
+You need **macOS**, **Node.js 22+** (Node 24 recommended), and **Xcode with an iOS Simulator**.
 
-**1. Sign in once.** Use your GitHub username and a personal access token (classic) with `read:packages` as the password. Enter it in npm's prompt, not in chat or a command argument. [GitHub authentication guide →](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages)
-
-```bash
-npm login --scope=@othmansh0 --registry=https://npm.pkg.github.com --auth-type=legacy
-```
-
-**2. Install and connect your agent.** This example configures Claude Code:
+Install the latest published release and connect Claude Code:
 
 ```bash
 npx --yes @othmansh0/proxy-mcp@latest init --client claude
@@ -99,7 +93,7 @@ See [Security](SECURITY.md), [Privacy](PRIVACY.md), and [advanced configuration]
 
 ## Use from Node.js
 
-After the one-time registry login, add the private package to a QA script or developer tool:
+Add the package to a QA script or developer tool:
 
 ```bash
 npm install @othmansh0/proxy-mcp
@@ -140,7 +134,7 @@ Remove the `proxy-mcp` entry from your client's MCP settings if you no longer wa
 
 | Problem | Next step |
 | --- | --- |
-| npm returns `401`, `403` or `404` | Check package access, token scope and the `@othmansh0` registry login. `404` can mean no access or an unpublished version. |
+| npm returns `401`, `403` or `404` | Check that the version is published on npm. If you used the earlier private setup, [remove its GitHub registry mapping](docs/CLIENT_SETUP.md#migrate-from-private-github-packages). |
 | MCP is missing after setup | Reconnect the client. Run `npx --yes @othmansh0/proxy-mcp@latest status` to inspect the service. |
 | Setup cannot parse an existing config | Fix that file or use `--client json`. Setup preserves invalid files. |
 | No requests appear | Ask the agent to diagnose capture for the selected app and Simulator. Trigger a new app request. |
@@ -156,6 +150,8 @@ npm ci
 npm run check
 ```
 
-For a source checkout, run `node src/server.mjs init --client claude`. See [Contributing](CONTRIBUTING.md), [private package releases](docs/PACKAGING.md), [agent workflows](docs/AGENT_NETWORK_WORKFLOW.md), and the [reliability audit](docs/RELIABILITY_AUDIT.md).
+For a source checkout, run `node src/server.mjs init --client claude`. See [Contributing](CONTRIBUTING.md), [releases and versioning](docs/PACKAGING.md), [agent workflows](docs/AGENT_NETWORK_WORKFLOW.md), and the [reliability audit](docs/RELIABILITY_AUDIT.md).
+
+Releases before 1.0 may change the API. Version tags, checksums and release notes are available through [GitHub Releases](https://github.com/othmansh0/proxy-mcp/releases).
 
 MIT licensed. Independent project; not affiliated with Proxyman.

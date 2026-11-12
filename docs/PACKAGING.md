@@ -1,36 +1,107 @@
-# Private package releases
+# Public releases and versioning
 
-Package: `@othmansh0/proxy-mcp` at `https://npm.pkg.github.com`, linked to `othmansh0/proxy-mcp`. Source remains MIT licensed; package access is managed separately in GitHub Packages. Do not publish this package to the public npm registry.
-
-## What ships
-
-The CLI, thin MCP bridge, ESM client API, TypeScript declarations, scripts and documentation ship together. Runtime dependencies are bundled from the audited lockfile. npm does not honor an installed library's root dependency overrides, so bundling preserves the tested dependency versions for consumers. There are no automatic install/postinstall hooks that start capture, install services or change certificate trust.
-
-`init` explicitly installs a private immutable runtime snapshot and registers a client. That snapshot survives npm-cache eviction and source checkout changes.
-
-## Prepare a release
-
-1. Update the version in `package.json`, `package-lock.json` and `src/lib/config.mjs`, and record changes in the changelog.
-2. Run `npm ci`, `npm run check`, the fallback storage check and `npm audit --omit=dev` on macOS. Run the Node 22/24/26 matrix when changing executable code.
-3. Run `node scripts/check-private-package.mjs`, then `npm pack`. Test the actual tarball in an empty consumer project, including the import API and `proxy-mcp init --dry-run --client json`.
-4. Review the packed contents. Local capture state, `.npmrc` credentials, tests, Git metadata and developer backups must be absent.
-
-The publish guard enforces the package identity, restricted access, GitHub registry and audited bundled dependencies. `private: true` is deliberately absent: npm uses that flag to prohibit all publishing, including publishing to a private registry. Privacy comes from the restricted registry package and its GitHub access settings.
-
-## Publish
-
-The `Publish private package` workflow uses `GITHUB_TOKEN` with `packages: write`, after tests and an audit. It runs for `private-v*` tags and can be dispatched once the workflow is available on the repository's default branch. Merging into `develop` alone does not publish a package or promote `main`. GitHub account runner/billing restrictions can prevent this workflow from starting.
-
-For a maintainer publishing locally, authenticate to the scoped registry with a personal access token (classic) containing `write:packages` (which includes package read permission), then run:
+Package: **`@othmansh0/proxy-mcp`** on **npm**, with source and release assets at `othmansh0/proxy-mcp`. GitHub Packages is no longer required. People install a published version with:
 
 ```bash
-npm publish --registry=https://npm.pkg.github.com --access=restricted
+npx --yes @othmansh0/proxy-mcp@latest init --client claude
 ```
 
-Enter tokens through npm's password prompt or a private temporary npm configuration. Never commit tokens, pass them as command arguments, or put them in MCP client configuration. A normal GitHub CLI login with only repository permissions cannot publish packages.
+The first public release candidate in this checkout is **0.9.0**. It is pre-1.0 software; keep the documented platform and capture limits visible. Preparing this checkout does not itself publish anything, change repository visibility or push a release tag.
 
-GitHub Packages creates new npm packages as private by default. After the first publish, verify the package's visibility is **Private** and grant intended team members read access in GitHub package settings. Do not change visibility to Public. A repository link does not replace an explicit access review; package permissions and source visibility are distinct.
+## One-time owner setup
 
-Verify the published version with `npm view @othmansh0/proxy-mcp version` under an authorized package reader, then test the README's exact `npx` command. A local tarball test is not proof of registry publication or another person's access.
+### 1. Make the source repository public
 
-Upstream references: [GitHub npm registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry), [package access and visibility](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility), [npm bundled dependencies](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#bundledependencies).
+In GitHub, open this repository's **Settings → General → Danger Zone → Change repository visibility → Public**. This exposes Git history and Actions history/logs as well as the current files. Review those before confirming. The local readiness audit found no credentials with Gitleaks 8.30.1 across available Git history; that is a scanner result, not a guarantee about all past external logs or artifacts.
+
+Enable private vulnerability reporting and review the existing [security policy](../SECURITY.md). Resolve or retest the account's Actions billing/spending restriction: hosted jobs previously could not start. The default branch is currently `develop`; a branch rename or promotion to `main` is not required for version-tagged releases.
+
+### 2. Own the matching npm scope
+
+Create or sign into the npm account **othmansh0**, verify the account and enable two-factor authentication. A GitHub username does not automatically reserve the same npm username. If the npm handle is unavailable, choose an npm organization/scope and update the package identity before the first publish.
+
+```bash
+npm login --registry=https://registry.npmjs.org
+npm whoami --registry=https://registry.npmjs.org
+```
+
+The identity must have publish access to `@othmansh0`. No GitHub package token is needed. If a previous private setup mapped this scope to GitHub, change it once:
+
+```bash
+npm config set @othmansh0:registry https://registry.npmjs.org --location=user
+```
+
+### 3. Bootstrap the npm package once
+
+npm trusted publishing is configured on an existing package, so first publish the tested **0.9.0** artifact manually using your npm login and interactive 2FA. Use a clean checkout of the merged release-preparation commit and Node 24 with npm 11.19.1, matching the release publisher.
+
+```bash
+npm ci
+npm run release:pack
+npm run release:smoke
+npm publish ./artifacts/release/othmansh0-proxy-mcp-0.9.0.tgz --registry=https://registry.npmjs.org --access=public --tag=latest
+```
+
+This is the first public upload. Review `manifest.json`, `SHA256SUMS` and the tarball before publishing. The prepack hook removes regenerable node-gyp output containing absolute build paths; registry-provided Darwin prebuilds remain and are tested in the installed consumer. Do not upload capture files, local CA material, configuration backups or credentials. `release:pack` excludes those paths and bundles the audited runtime dependencies. A checked and already-built artifact may be published directly instead of rebuilding it.
+
+The manual bootstrap does not claim CI provenance. Subsequent OIDC publications generate provenance from the public repository. npm versions are immutable: never replace an uploaded version with different bytes.
+
+### 4. Configure tokenless npm trusted publishing
+
+In npm: **Packages → @othmansh0/proxy-mcp → Settings → Trusted publishing → GitHub Actions**. Set:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `othmansh0` |
+| Repository | `proxy-mcp` |
+| Workflow filename | `release.yml` |
+| Environment | `npm` |
+| Allowed actions | Allow direct `npm publish` |
+
+In GitHub: **Settings → Environments**, create **npm**. Add a required reviewer if you want an owner approval before public uploads. Protect `v*` tags from unauthorized creation/deletion/updates. Do not add an `NPM_TOKEN` secret: the workflow uses GitHub OIDC and `id-token: write`.
+
+A new npm trusted-publisher configuration must complete a successful OIDC publish within two days. An identical-version retry that skips npm upload does not test that authentication. Verify it with the next actual version publication before the configuration expires; if it expires, recreate it.
+
+### 5. Create the first GitHub release
+
+Tag the exact merged commit whose package and changelog are version 0.9.0:
+
+```bash
+git tag -a v0.9.0 -m "Release 0.9.0"
+git push origin v0.9.0
+```
+
+The `Public release` workflow runs the complete suite on Node 22/24/26 on Apple Silicon plus Node 24 on Intel. It audits dependencies, validates the tag/checkout/version, builds the package and smoke-tests an offline consumer. After qualification and the `npm` environment gate, it publishes via OIDC and creates a GitHub release with the tarball, `SHA256SUMS`, manifest and changelog notes.
+
+For the manually bootstrapped 0.9.0 version, it skips npm upload only when the registry's integrity exactly matches the built artifact. A mismatch fails instead of overwriting anything; investigate and release a new version. This initial skip does not validate OIDC. The next new version must be published successfully to validate the trusted publisher.
+
+If a later step fails after npm publication, rerun `release.yml` with its existing tag. It accepts only the identical uploaded npm artifact and completes the GitHub release. Published GitHub releases are preserved; draft assets can be completed before publication. GitHub immutable releases may be enabled after this flow is verified.
+
+## Future releases
+
+1. Add a useful note under `## Unreleased` while making changes, then commit/merge them.
+2. From a clean checkout of the accepted release commit, choose a SemVer bump:
+
+```bash
+npm version patch -m "Release %s"
+git push origin HEAD --follow-tags
+```
+
+`npm version` updates `package.json` and `package-lock.json`. Its version hook promotes the committed Unreleased notes and includes the changelog in the version commit; npm creates an annotated `vX.Y.Z` tag. The runtime reads its version from the package manifest, so no source constant needs editing.
+
+Use `minor` for new capability. Before 1.0, use a minor bump for incompatible API changes; publish a major bump for breaking changes from 1.0 onward. Never move a released tag. A new npm version is required for every changed artifact.
+
+For a candidate release:
+
+```bash
+npm version prerelease --preid=rc -m "Release %s"
+git push origin HEAD --follow-tags
+```
+
+Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh0/proxy-mcp@next init --client claude`.
+
+## What is automated, and what is not
+
+Release qualification and publishing are implemented in `.github/workflows/release.yml`. First account login, repository visibility, npm scope ownership, trusted-publisher configuration, environment review and release-tag creation are owner actions. A local test run is not a hosted CI result, and a local tarball is not proof of registry publication.
+
+References: [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/), [npm scope/public publication](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/), [GitHub repository visibility](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility).

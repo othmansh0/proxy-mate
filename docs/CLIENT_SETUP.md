@@ -1,6 +1,6 @@
 # MCP client setup
 
-Start with the [README quick start](../README.md). After registry login, `npx --yes @othmansh0/proxy-mcp@latest init --client CLIENT` installs the shared service and connects a client.
+Start with the [README quick start](../README.md). `npx --yes @othmansh0/proxy-mcp@latest init --client CLIENT` installs the shared service and connects a client.
 
 ## Automatic registration
 
@@ -28,7 +28,7 @@ Preview reads service/configuration metadata but writes no service, certificate,
 npx --yes @othmansh0/proxy-mcp@latest init --client json
 ```
 
-Copy the returned `client.config.mcpServers` into your client's MCP settings. Both the Node executable and bridge path are absolute. No GitHub token belongs in the MCP configuration: private registry authentication is needed only when retrieving the npm package. The installed runtime works independently of the source checkout or npm cache.
+Copy the returned `client.config.mcpServers` into your client's MCP settings. Both the Node executable and bridge path are absolute. No GitHub token belongs in the MCP configuration: public npm packages need no registry authentication. The installed runtime works independently of the source checkout or npm cache.
 
 `PROXY_MCP_HOME` can select a separate state directory before running setup. Registration records that absolute path so the daemon and client use the same state. Each state directory has one capture owner; ordinary agents should share the default installed service.
 
@@ -41,3 +41,13 @@ Installation can succeed while client registration fails, for example if a clien
 Upstream configuration references: [Claude Code MCP](https://code.claude.com/docs/en/mcp-quickstart), [Codex MCP](https://developers.openai.com/codex/mcp/).
 
 Automatic upgrades preserve proxy/control ports, textual capture policy and TLS passthrough. Services using custom CA files, upstream chaining, raw storage or remote access require the advanced `install` command with those explicit settings; `init` refuses to reset them to defaults.
+
+## Migrate from private GitHub Packages
+
+If you previously mapped this scope to GitHub Packages, point it at npm once:
+
+```bash
+npm config set @othmansh0:registry https://registry.npmjs.org --location=user
+```
+
+Then run the README init command. A GitHub Packages token is not needed for public releases.

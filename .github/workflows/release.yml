@@ -1,0 +1,77 @@
+name: Public release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to release or resume (for example v0.9.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  qualify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, node: 22 }
+          - { os: macos-15, node: 24 }
+          - { os: macos-15, node: 26 }
+          - { os: macos-15-intel, node: 24 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm audit --omit=dev
+      - run: npm run release:check
+      - run: node --test --test-reporter=spec --test-concurrency=1
+      - run: node --no-experimental-sqlite --test test/session-store.test.mjs
+
+  publish:
+    needs: qualify
+    runs-on: macos-15
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Use the qualified npm version with OIDC support
+        run: npm install --global npm@11.19.1
+      - run: npm ci
+      - run: npm audit --omit=dev
+      - run: npm run release:check
+      - run: npm run release:pack
+      - run: npm run release:smoke
+      - name: Publish the verified tarball to npm using trusted publishing
+        run: node scripts/release.mjs publish
+      - name: Publish GitHub release and checksum assets
+        run: node scripts/release.mjs github
+        env:
+          GH_TOKEN: ${{ github.token }}
