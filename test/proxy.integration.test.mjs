@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-integration-'));
+process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-integration-'));
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { PacServer } = await import('../src/lib/pac.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
@@ -285,12 +285,12 @@ test('Map Local, Map Remote, and Blacklist rules execute and persist normalized 
   await tools.create_blacklist({ url: blockedUrl });
   const blocked = await requestViaProxy(engine.port, blockedUrl, { method: 'GET', headers: {}, body: null });
   assert.equal(blocked.status, 403);
-  assert.match(blocked.body, /Blocked by proxy-mcp/);
+  assert.match(blocked.body, /Blocked by proxy-mate/);
 
   const types = new Set((await tools.list_rules()).rules.map((rule) => rule.type));
   assert.deepEqual(types, new Set(['map_local', 'map_remote', 'blacklist']));
 
-  const exportPath = path.join(process.env.PROXY_MCP_HOME, 'portable-rules.json');
+  const exportPath = path.join(process.env.PROXY_MATE_HOME, 'portable-rules.json');
   await tools.export_rules({ path: exportPath });
   await tools.clear_rules();
   assert.equal((await tools.list_rules()).rules.length, 0);

@@ -119,7 +119,7 @@ test('exports/imports durable snapshots and produces data-only replay plans', ()
 });
 
 test('JSONL backend restores snapshots through private atomic files', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'proxy-mcp-ws-'));
+  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-'));
   const backend = new JsonlWebSocketStoreBackend(join(directory, 'sockets.jsonl'));
   const store = new WebSocketStore({ backend }); store.onRequest({ id: 'disk', url: 'wss://disk.test' }); store.onMessageReceived({ id: 'disk', data: 'persisted' }); await store.flush();
   assert.equal((await stat(join(directory, 'sockets.jsonl'))).mode & 0o777, 0o600);

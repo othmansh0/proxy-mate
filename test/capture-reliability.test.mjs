@@ -7,7 +7,7 @@ import http from 'node:http';
 import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 
 const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-capture-reliability-'));
-process.env.PROXY_MCP_HOME = state;
+process.env.PROXY_MATE_HOME = state;
 const { ProxyEngine, ensureCA, rotateCA, validateCA } = await import('../src/lib/proxy.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
 const { PacServer } = await import('../src/lib/pac.mjs');

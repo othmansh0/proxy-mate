@@ -4,7 +4,7 @@ This is a product-boundary comparison based on public documentation, not undocum
 
 The [current replacement-readiness audit](RELIABILITY_AUDIT.md) supersedes feature count as a readiness signal. Local daemon/client deployment, supervised recovery, failed-upgrade rollback, native iOS 27 PAC capture and crash fallback are verified. Wider native-platform/VPN acceptance, owned Android setup/trust and multi-day real-app qualification remain open. Current Android support consists of preflight and setup plans.
 
-| Product | Strongest fit | Advantage over proxy-mcp | proxy-mcp advantage |
+| Product | Strongest fit | Advantage over proxy-mate | proxy-mate advantage |
 |---|---|---|---|
 | Proxyman | Polished Apple-first desktop debugging | Native full-featured GUI, richer JavaScript scripting surface, workspace tools, broader desktop/device support, mature visual viewers. | Headless MCP-first workflows, durable SQLite sessions, typed contracts, prompts/resources/subscriptions, CI assertions, a bounded QuickJS transform sandbox, and explicit sensitive-data controls. |
 | Charles | Mature cross-platform desktop proxy | Windows/Linux GUI, DNS spoofing, true bandwidth throttling, and long-established rewrite tooling. | Automated Simulator setup, optional SOCKS clients, upstream proxy chaining, agent-native flow/rule workflows, structured errors, and safer local-daemon authorization. |
@@ -26,9 +26,9 @@ The [current replacement-readiness audit](RELIABILITY_AUDIT.md) supersedes featu
 
 ## Implemented parity with public Proxyman MCP intent
 
-Status/version, recording, session clear, flow list/detail/filter, cURL export, Map Local/Remote, blacklist, headless breakpoints, rule management, SSL routing, certificate status/setup, and capture control are implemented. `proxy-mcp` additionally exposes durable sessions, pagination, protocol tools, WebSocket transcripts, request code generation, reverse proxies, capture assertions, guided prompts, MCP resources/subscriptions, sandboxed transform plugins, upstream proxy chaining, capture adapter preflight, and an optional read-only operator dashboard.
+Status/version, recording, session clear, flow list/detail/filter, cURL export, Map Local/Remote, blacklist, headless breakpoints, rule management, SSL routing, certificate status/setup, and capture control are implemented. `proxy-mate` additionally exposes durable sessions, pagination, protocol tools, WebSocket transcripts, request code generation, reverse proxies, capture assertions, guided prompts, MCP resources/subscriptions, sandboxed transform plugins, upstream proxy chaining, capture adapter preflight, and an optional read-only operator dashboard.
 
-The public Proxyman MCP documentation does not define every JSON schema, body limit, pagination rule, or error code. `proxy-mcp` therefore publishes its own versioned contract instead of claiming byte-for-byte compatibility.
+The public Proxyman MCP documentation does not define every JSON schema, body limit, pagination rule, or error code. `proxy-mate` therefore publishes its own versioned contract instead of claiming byte-for-byte compatibility.
 
 ## Deliberate backlog
 

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
-process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-upstream-wiring-'));
+process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-upstream-wiring-'));
 
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');

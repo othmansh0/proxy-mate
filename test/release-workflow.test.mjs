@@ -9,12 +9,12 @@ import { promisify } from 'node:util';
 test('npm version creates a matching commit/tag/changelog without editing a runtime constant', async (t) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-version-workflow-'));
   t.after(() => fs.rm(temporary, { recursive: true, force: true }));
-  for (const file of ['scripts/release.mjs', 'scripts/check-package.mjs', 'scripts/lib/release-policy.mjs', 'src/lib/config.mjs']) {
+  for (const file of ['scripts/release.mjs', 'scripts/check-package.mjs', 'scripts/lib/release-policy.mjs', 'src/lib/config.mjs', 'src/lib/environment.mjs']) {
     await fs.mkdir(path.dirname(path.join(temporary, file)), { recursive: true });
     await fs.copyFile(path.resolve(import.meta.dirname, '..', file), path.join(temporary, file));
   }
   for (const file of ['src/index.mjs', 'src/index.d.ts', 'src/client.mjs', 'src/server.mjs', 'README.md']) await fs.writeFile(path.join(temporary, file), '');
-  const pkg = { name: '@othmansh0/proxy-mcp', version: '0.9.0', type: 'module',
+  const pkg = { name: '@othmansh0/proxy-mate', version: '0.9.0', type: 'module',
     publishConfig: { registry: 'https://registry.npmjs.org', access: 'public' }, dependencies: {}, bundleDependencies: [],
     scripts: { preversion: 'node scripts/release.mjs preversion', version: 'node scripts/release.mjs version' } };
   await fs.writeFile(path.join(temporary, 'package.json'), JSON.stringify(pkg));

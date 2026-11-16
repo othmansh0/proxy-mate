@@ -10,7 +10,7 @@ import * as mockttp from 'mockttp';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-reliability-'));
+process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-reliability-'));
 const { ProxyEngine, ensureCA, validateCA } = await import('../src/lib/proxy.mjs');
 const { ControlServer, callDaemon, rpcTimeoutFor } = await import('../src/lib/control.mjs');
 const { readHandshake, writeState, readState } = await import('../src/lib/state.mjs');
@@ -66,7 +66,7 @@ test('CA mismatch and incomplete CA fail without silently replacing trust', asyn
   const stable = await ensureCA();
   const original = await fs.readFile(stable.certPath);
   const other = await mockttp.generateCACertificate();
-  const key = path.join(process.env.PROXY_MCP_HOME, 'other-key.pem');
+  const key = path.join(process.env.PROXY_MATE_HOME, 'other-key.pem');
   await fs.writeFile(key, other.key);
   await assert.rejects(validateCA(key, stable.certPath), { code: 'CA_KEY_MISMATCH' });
   const savedKey = await fs.readFile(stable.keyPath);
@@ -79,7 +79,7 @@ test('CA mismatch and incomplete CA fail without silently replacing trust', asyn
 test('DER staging leaves a custom certificate and sibling files unchanged', async () => {
   const { certPath } = await ensureCA();
   const original = await fs.readFile(certPath);
-  const custom = path.join(process.env.PROXY_MCP_HOME, 'custom'); await fs.mkdir(custom);
+  const custom = path.join(process.env.PROXY_MATE_HOME, 'custom'); await fs.mkdir(custom);
   await fs.writeFile(path.join(custom, 'custom.pem'), original);
   await fs.writeFile(path.join(custom, 'cert.der'), 'user-owned');
   const inspected = await inspectCertificate(path.join(custom, 'custom.pem'));
@@ -180,10 +180,10 @@ test('unowned or inactive routing never triggers a network mutation', async () =
 });
 
 test('LaunchAgent specifies state, working directory, restart policy and verified readiness', async () => {
-  const plist = plistXml({ programArgs: ['/opt/homebrew/bin/node', '/tmp/A&B/src/server.mjs', '--daemon'], environment: { PROXY_MCP_MAX_FLOWS: '100' } });
+  const plist = plistXml({ programArgs: ['/opt/homebrew/bin/node', '/tmp/A&B/src/server.mjs', '--daemon'], environment: { PROXY_MATE_MAX_FLOWS: '100' } });
   assert.match(plist, /<key>KeepAlive<\/key>\s*<true\/>/);
   assert.match(plist, /<key>WorkingDirectory<\/key>\s*<string>\/tmp\/A&amp;B<\/string>/);
-  assert.match(plist, /PROXY_MCP_HOME/);
+  assert.match(plist, /PROXY_MATE_HOME/);
   await assert.rejects(waitForDaemonReady({ timeoutMs: 10, previousToken: 'old', read: async () => ({ token: 'old' }), probe: async () => true }), { code: 'DAEMON_STARTUP_TIMEOUT' });
   assert.equal(await waitForDaemonReady({ read: async () => ({ token: 'new' }), probe: async () => true }), true);
 });
@@ -196,7 +196,7 @@ test('invalid CLI flags fail promptly instead of entering stdio or truncating nu
 
 test('stdio EOF exits even after an in-process listener has been started', async (t) => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-stdio-eof-'));
-  const child = spawn(process.execPath, ['src/server.mjs', '--in-process'], { cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXY_MCP_HOME: state }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['src/server.mjs', '--in-process'], { cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXY_MATE_HOME: state }, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
   let output = ''; let errors = '';
   child.stdout.on('data', (data) => { output += data; }); child.stderr.on('data', (data) => { errors += data; });

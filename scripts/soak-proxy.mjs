@@ -10,7 +10,7 @@ import { gzipSync } from 'node:zlib';
 const seconds = Number(process.argv[2] ?? 300);
 if (!Number.isFinite(seconds) || seconds < 5 || seconds > 86400) throw new Error('Duration must be 5–86400 seconds.');
 const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mixed-soak-'));
-process.env.PROXY_MCP_HOME = state;
+process.env.PROXY_MATE_HOME = state;
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { SessionStore } = await import('../src/lib/session-store.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');

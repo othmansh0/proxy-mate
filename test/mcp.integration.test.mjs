@@ -13,15 +13,15 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
   const lock = JSON.parse(await fs.readFile(path.join(root, 'package-lock.json'), 'utf8'));
   assert.equal(lock.version, pkg.version, 'package-lock.json root version must match package.json');
   assert.equal(lock.packages?.[''].version, pkg.version, 'package-lock.json "" package entry must match package.json');
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-stdio-'));
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-stdio-'));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(root, 'src/server.mjs'), '--in-process'],
     cwd: root,
-    env: { ...process.env, PROXY_MCP_HOME: state, PROXY_MCP_LEGACY_OUTPUT: '0' },
+    env: { ...process.env, PROXY_MATE_HOME: state, PROXY_MATE_LEGACY_OUTPUT: '0' },
     stderr: 'pipe',
   });
-  const client = new Client({ name: 'proxy-mcp-test', version: '1.0.0' });
+  const client = new Client({ name: 'proxy-mate-test', version: '1.0.0' });
   await client.connect(transport);
   t.after(() => client.close());
 
@@ -47,29 +47,32 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
   assert.equal(result.structuredContent.ok, true);
   assert.equal(result.structuredContent.data.version, pkg.version);
   assert.equal(result.structuredContent.error, null);
-  assert.match(result.content[0].text, /^proxy-mcp v/);
+  assert.match(result.content[0].text, /^proxy-mate v/);
   assert.equal(result.content[0].text.includes('{'), false);
 
   const resources = await client.listResources();
-  assert.equal(resources.resources.some((resource) => resource.uri === 'proxy-mcp://status'), true);
+  assert.equal(resources.resources.some((resource) => resource.uri === 'proxy-mate://status'), true);
   const templates = await client.listResourceTemplates();
-  assert.equal(templates.resourceTemplates.some((template) => template.uriTemplate === 'proxy-mcp://flows/{flow_id}'), true);
-  assert.equal(templates.resourceTemplates.some((template) => template.uriTemplate === 'proxy-mcp://flows/{flow_id}/bodies/{kind}'), true);
-  assert.equal(templates.resourceTemplates.some((template) => template.uriTemplate === 'proxy-mcp://sessions/{session_id}/flows/{flow_id}'), true);
-  const status = await client.readResource({ uri: 'proxy-mcp://status' });
+  assert.equal(templates.resourceTemplates.some((template) => template.uriTemplate === 'proxy-mate://flows/{flow_id}'), true);
+  assert.equal(templates.resourceTemplates.some((template) => template.uriTemplate === 'proxy-mate://flows/{flow_id}/bodies/{kind}'), true);
+  assert.equal(templates.resourceTemplates.some((template) => template.uriTemplate === 'proxy-mate://sessions/{session_id}/flows/{flow_id}'), true);
+  const status = await client.readResource({ uri: 'proxy-mate://status' });
   assert.equal(status.contents[0].mimeType, 'application/json');
   assert.equal(typeof JSON.parse(status.contents[0].text).running, 'boolean');
+  const legacyStatus = await client.readResource({ uri: 'proxy-mcp://status' });
+  assert.equal(legacyStatus.contents[0].uri, 'proxy-mcp://status');
+  assert.equal(typeof JSON.parse(legacyStatus.contents[0].text).running, 'boolean');
 
 });
 
 test('stdio MCP can explicitly retain legacy output aliases', async (t) => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-legacy-'));
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-legacy-'));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(root, 'src/server.mjs'), '--in-process'],
     cwd: root,
-    env: { ...process.env, PROXY_MCP_HOME: state, PROXY_MCP_LEGACY_OUTPUT: '1' },
+    env: { ...process.env, PROXY_MATE_HOME: state, PROXY_MATE_LEGACY_OUTPUT: '1' },
     stderr: 'pipe',
   });
   const client = new Client({ name: 'legacy-output-test', version: '1.0.0' });

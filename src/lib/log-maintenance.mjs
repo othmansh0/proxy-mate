@@ -37,7 +37,7 @@ export function rotateDaemonLogs({ directory = path.join(STATE_DIR, 'logs'), max
 export function startLogMaintenance(options = {}) {
   const run = () => {
     try { rotateDaemonLogs(options); }
-    catch (error) { process.stderr.write(`[proxy-mcp] log retention failed: ${error.message}\n`); }
+    catch (error) { process.stderr.write(`[proxy-mate] log retention failed: ${error.message}\n`); }
   };
   run();
   const timer = setInterval(run, 30_000);

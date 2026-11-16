@@ -29,7 +29,7 @@ export function physicalDeviceInstructions({ addresses = listLanAddresses(), pro
       'Connect the Mac and device to the same trusted network.',
       'On the device Wi-Fi network, configure HTTP Proxy manually using one candidate address and the proxy port.',
       'Open the temporary portal URL in Safari and install the downloaded profile.',
-      'Open Settings > General > About > Certificate Trust Settings and enable full trust for proxy-mcp CA.',
+      'Open Settings > General > About > Certificate Trust Settings and enable full trust for proxy-mate CA.',
     ],
     safety: [
       'Stop the onboarding portal after installation.',
@@ -62,7 +62,7 @@ export class DeviceOnboardingPortal {
       if (request.url === `${base}/cert` || request.url === `${base}/cert.der`) {
         response.writeHead(200, {
           'Content-Type': 'application/x-x509-ca-cert',
-          'Content-Disposition': 'attachment; filename="proxy-mcp-ca.der"',
+          'Content-Disposition': 'attachment; filename="proxy-mate-ca.der"',
           'Content-Length': certificate.length,
         });
         return response.end(certificate);
@@ -113,7 +113,7 @@ export class DeviceOnboardingPortal {
 }
 
 function onboardingHtml({ token, proxyPort }) {
-  return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>proxy-mcp iOS setup</title></head><body><main><h1>proxy-mcp device setup</h1><p>Proxy port: <strong>${proxyPort}</strong></p><ol><li>Configure this Wi-Fi network's HTTP proxy to the Mac address shown in your MCP result and port ${proxyPort}.</li><li><a href="/${token}/cert.der">Download proxy-mcp CA</a> and install the profile.</li><li>Open Settings &gt; General &gt; About &gt; Certificate Trust Settings and enable full trust.</li><li>Return to your development app and run the MCP diagnostic.</li></ol><p>Remove the proxy and certificate when debugging is complete.</p></main></body></html>`;
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>proxy-mate iOS setup</title></head><body><main><h1>proxy-mate device setup</h1><p>Proxy port: <strong>${proxyPort}</strong></p><ol><li>Configure this Wi-Fi network's HTTP proxy to the Mac address shown in your MCP result and port ${proxyPort}.</li><li><a href="/${token}/cert.der">Download proxy-mate CA</a> and install the profile.</li><li>Open Settings &gt; General &gt; About &gt; Certificate Trust Settings and enable full trust.</li><li>Return to your development app and run the MCP diagnostic.</li></ol><p>Remove the proxy and certificate when debugging is complete.</p></main></body></html>`;
 }
 
 function reply(response, status, body) {

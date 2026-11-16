@@ -18,7 +18,7 @@ test('required-daemon clients report an outage without claiming a local runtime 
     clients.push(client);
     await client.connect(new StdioClientTransport({ command: process.execPath,
       args: ['src/server.mjs', '--require-daemon'], cwd: path.resolve(import.meta.dirname, '..'),
-      env: { ...process.env, PROXY_MCP_HOME: directory }, stderr: 'pipe' }));
+      env: { ...process.env, PROXY_MATE_HOME: directory }, stderr: 'pipe' }));
   }
   const results = await Promise.all(clients.map((client) => client.callTool({ name: 'get_proxy_status', arguments: {} })));
   for (const result of results) {

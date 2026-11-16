@@ -22,7 +22,7 @@ Registry publication and another person's package access require separate verifi
 
 Reviewed 200 distinct proxy tool calls from the available 11–12 November Claude session logs, including newer QA child sessions. Flow discovery accounted for the largest response volume. Successful body exports now work without a sensitive-data grant; one newer arbitrary export-path rejection still needed clearer recovery. Identical repeated reads occurred occasionally, without evidence of a widespread polling loop. No additional crash pattern was found in the inspected logs.
 
-Refreshed bridges return one canonical `data` payload; `PROXY_MCP_LEGACY_OUTPUT=1` retains legacy aliases. Discovery defaults to ten compact rows with exact URLs and available rule/error evidence; full metadata and explicit limits remain available. Body previews default to 2 KiB and redact complete JSON before truncating. `query_flow_json` selects bounded redacted fields/counts using JSON Pointers and one-segment wildcards, with explicit scan/output completeness flags. Updated prompts and unchanged-read feedback guide agents toward narrow queries and `wait_for_flow` without caching or suppressing actual reads.
+Refreshed bridges return one canonical `data` payload; `PROXY_MATE_LEGACY_OUTPUT=1` retains legacy aliases. Discovery defaults to ten compact rows with exact URLs and available rule/error evidence; full metadata and explicit limits remain available. Body previews default to 2 KiB and redact complete JSON before truncating. `query_flow_json` selects bounded redacted fields/counts using JSON Pointers and one-segment wildcards, with explicit scan/output completeness flags. Updated prompts and unchanged-read feedback guide agents toward narrow queries and `wait_for_flow` without caching or suppressing actual reads.
 
 `finish_capture_task` removes only unchanged rules/listeners recorded under the task lease, then releases it. Preexisting/changed/explicitly retained fixtures, shared mock body assets and durable evidence survive. Stopped-proxy cleanup updates persisted owned rules without restarting capture. Disconnect never triggers task cleanup. Older bridges can receive smaller daemon-side previews and a reconnect notice, but must reconnect to discover new tools and the compact formatter.
 
@@ -54,7 +54,7 @@ App reinstall/burst cases have deterministic regression coverage; the native smo
 
 ## Current assessment — 8 November 2026
 
-Version 0.8.0 addresses the concrete MCP lifetime, network cleanup and onboarding defects below. The release is local; full Android/Network Extension parity and multi-day real-app qualification remain open. Source belongs to `othmansh0/proxy-mcp`, with its permanent checkout at `~/Tools/proxy-mcp`. Temporary worktrees and test data now use the dedicated `Tools/proxy-mcp-workspace/scratch` area.
+Version 0.8.0 addresses the concrete MCP lifetime, network cleanup and onboarding defects below. The release is local; full Android/Network Extension parity and multi-day real-app qualification remain open. Source belongs to `othmansh0/proxy-mate`, with its permanent checkout at `~/Tools/proxy-mate`. Temporary worktrees and test data now use the dedicated `Tools/proxy-mate-workspace/scratch` area.
 
 ### Research and implementation decisions
 
@@ -84,7 +84,7 @@ Open production acceptance: native automatic routing across the remaining suppor
 
 ### Installed local qualification — 8 November
 
-- Both supervised jobs are installed under the user LaunchAgents domain. The daemon uses Homebrew Node 24.22.2 LTS; default system routing is off. Claude's user registration reports connected to `~/.proxy-mcp/runtime/current/src/client.mjs`, and Codex uses the same bridge with bounded per-server startup/operation deadlines. Existing sessions using the old registration require one client-controlled reconnect to adopt it; the setup does not terminate unrelated agent sessions.
+- Both supervised jobs are installed under the user LaunchAgents domain. The daemon uses Homebrew Node 24.22.2 LTS; default system routing is off. Claude's user registration reports connected to `~/.proxy-mate/runtime/current/src/client.mjs`, and Codex uses the same bridge with bounded per-server startup/operation deadlines. Existing sessions using the old registration require one client-controlled reconnect to adopt it; the setup does not terminate unrelated agent sessions.
 - Two persistent real MCP clients discovered 108 tools (197,959-byte tools/list frame) and 1,336 characters of server instructions. Local-backend capture/mocking succeeded through the scoped reverse proxy. Doctor preserved the healthy daemon. Closing one client left capture operational for the other.
 - A deliberately invalid staged CA configuration prevented an update from becoming ready. The previous runtime link and daemon were restored and became healthy. A further check exposed split IPv4/IPv6 ownership of a requested port; startup now preflights both loopback address families and refuses an occupied port, with regressions for each family.
 - Two hard-killed installed daemons restarted without replacing either MCP connection and without tool errors in those checks. A deliberately SIGSTOP-paused daemon triggered the independent guardian's sustained-health policy; it recovered after two bounded service errors. Those are outage results through a live bridge, not an MCP transport disconnect. The guardian journal identifies the controlled restart. No submitted mutation was automatically repeated.
@@ -101,9 +101,9 @@ A live MCP bridge does not make a crashed capture engine lossless. In-flight req
 
 The existing private repository now uses `develop` as its default/integration branch. Functional integration head `ca6694cde928612dde93578bab578c3f14f078c6` is pushed; remote `main` remains `e837b361e7374d6387c697b609b6492abc1d5fc1`, awaiting owner testing/promotion. Local archive and feature refs preserve the earlier main tip and implementation history.
 
-[GitHub Actions run 42454225276](https://github.com/othmansh0/proxy-mcp/actions/runs/42454225276) failed before any job steps started. The authenticated GitHub page reports an account billing/spending restriction. No CI tests ran; this is not a green CI result or a test failure attribution. The API token can read Actions job status but cannot read check annotations, so the blocker was verified through the repository's logged-in GitHub UI. Billing changes remain an owner action. Local Node 22.23.4, Node 24.22.2 and Node 26.8.1 suites each pass all 217 tests, with no skipped cases.
+[GitHub Actions run 42454225276](https://github.com/othmansh0/proxy-mate/actions/runs/42454225276) failed before any job steps started. The authenticated GitHub page reports an account billing/spending restriction. No CI tests ran; this is not a green CI result or a test failure attribution. The API token can read Actions job status but cannot read check annotations, so the blocker was verified through the repository's logged-in GitHub UI. Billing changes remain an owner action. Local Node 22.23.4, Node 24.22.2 and Node 26.8.1 suites each pass all 217 tests, with no skipped cases.
 
-No new repository was created: the existing private remote is `othmansh0/proxy-mcp`. Integration uses `develop`; remote `main` is reserved for promotion after owner testing. Temporary implementation work belongs to this MCP's dedicated workspace.
+No new repository was created: the existing private remote is `othmansh0/proxy-mate`. Integration uses `develop`; remote `main` is reserved for promotion after owner testing. Temporary implementation work belongs to this MCP's dedicated workspace.
 
 ## Assessment — 7 November 2026 (historical where superseded above)
 
@@ -129,7 +129,7 @@ This assessment inspected current source, the actual local client registration a
 
 ### Local configuration at audit time
 
-The default CLI status reported no installed LaunchAgent, state, handshake or live daemon. Claude's global registration launched the checkout's `src/server.mjs` with no arguments. Codex had no `proxy-mcp` entry in its global MCP configuration. These are observations of the default home/global configuration, not proof about every project-specific client registration or custom state directory.
+The default CLI status reported no installed LaunchAgent, state, handshake or live daemon. Claude's global registration launched the checkout's `src/server.mjs` with no arguments. Codex had no `proxy-mate` entry in its global MCP configuration. These are observations of the default home/global configuration, not proof about every project-specific client registration or custom state directory.
 
 The fixes in this change are source changes. Global client configuration, system PAC, host trust and the user's booted Simulator are not migrated by running the test suite. Reinstall the runtime and use the registration in [Simulator setup](IOS_SIMULATOR_SETUP.md) to activate the production connection mode. A missing installation now remains a visible prerequisite rather than silently becoming an in-process proxy when `--require-daemon` is selected.
 

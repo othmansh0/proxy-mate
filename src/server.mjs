@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// proxy-mcp — local HTTP(S) capture, routing, mocking, and Simulator setup.
+import { readEnvironment } from './lib/environment.mjs';
+// proxy-mate — local HTTP(S) capture, routing, mocking, and Simulator setup.
 //
 // Two run shapes share the same internals:
 //   * stdio MCP server (default)  — forwards to the shared daemon. It never
@@ -79,7 +80,7 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (releaseRuntime) await releaseRuntime();
   }, { stdin: true });
   const dispatch = async (tool, args, context = {}) => {
-    if (closing) throw new Error('proxy-mcp is shutting down.');
+    if (closing) throw new Error('proxy-mate is shutting down.');
     // Resolve the handshake for EVERY call: launchd restarts rotate the token
     // and can change the port. Never retry a mutation after an ambiguous error.
     if (!localReady) {
@@ -95,8 +96,8 @@ async function runStdio({ requireDaemon = false } = {}) {
       if (daemonExpected) {
         throw Object.assign(new Error('The shared daemon is unavailable after a bounded readiness wait. This MCP connection remains open.'), {
           code: 'DAEMON_UNAVAILABLE', retryable: true,
-          recovery: ['Run proxy-mcp status and inspect the daemon stderr log.',
-            'If not installed, run proxy-mcp install with the capture options for your workflow.',
+          recovery: ['Run proxy-mate status and inspect the daemon stderr log.',
+            'If not installed, run proxy-mate install with the capture options for your workflow.',
             'Retry the tool call after daemon recovery; do not restart the MCP client.'],
         });
       }
@@ -137,7 +138,7 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (flowId && /flow|request|curl/.test(tool)) void resourceSubscriptions.notifyLiveFlow(flowId).catch(() => {});
     return value;
   };
-  registerMcpTools(mcp, rememberCaptureLease(observableDispatch), { legacyAliases: process.env.PROXY_MCP_LEGACY_OUTPUT === '1' });
+  registerMcpTools(mcp, rememberCaptureLease(observableDispatch), { legacyAliases: readEnvironment('PROXY_MATE_LEGACY_OUTPUT') === '1' });
   registerMcpResources(mcp, observableDispatch);
   registerMcpPrompts(mcp);
   const transport = new StdioServerTransport();
@@ -217,7 +218,7 @@ async function runDaemon(args) {
     caKeyPath: args.caKeyPath,
     caCertPath: args.caCertPath,
   });
-  process.stderr.write(`[proxy-mcp] proxy listening on :${engine.port}\n`);
+  process.stderr.write(`[proxy-mate] proxy listening on :${engine.port}\n`);
 
   let routing = null;
   let trust = null;
@@ -234,13 +235,13 @@ async function runDaemon(args) {
     else ({ trust, routing } = await setupSimulatorRouting({
       certPath: activeCaCert, keyPath: engine.caKeyPath, applyRouting,
     }));
-    process.stderr.write(`[proxy-mcp] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
+    process.stderr.write(`[proxy-mate] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
   }
 
   if (!args.skipTrust) {
     trust ??= await trustCaOnSimulators(activeCaCert);
     if (trust.trusted?.length) {
-      process.stderr.write(`[proxy-mcp] CA imported on ${trust.trusted.length} simulator(s): ${trust.trusted.map((s) => s.name).join(', ')}\n`);
+      process.stderr.write(`[proxy-mate] CA imported on ${trust.trusted.length} simulator(s): ${trust.trusted.map((s) => s.name).join(', ')}\n`);
     }
   }
 
@@ -255,14 +256,14 @@ async function runDaemon(args) {
         failures.push({ rule_id: r.rule_id ?? r.id ?? null, error: error?.message ?? String(error) });
       }
     }
-    if (replayed) process.stderr.write(`[proxy-mcp] replayed ${replayed} persisted rule(s)\n`);
+    if (replayed) process.stderr.write(`[proxy-mate] replayed ${replayed} persisted rule(s)\n`);
     if (failures.length) {
       engine.diagnostics.push({ kind: 'rule-replay-failures', timestamp: Date.now(), failures });
-      process.stderr.write(`[proxy-mcp] failed to replay ${failures.length} persisted rule(s); inspect get_diagnostics\n`);
+      process.stderr.write(`[proxy-mate] failed to replay ${failures.length} persisted rule(s); inspect get_diagnostics\n`);
     }
   } catch (error) {
     engine.diagnostics.push({ kind: 'rule-load-error', timestamp: Date.now(), error: error?.message ?? String(error) });
-    process.stderr.write(`[proxy-mcp] could not load persisted rules: ${error?.message ?? error}\n`);
+    process.stderr.write(`[proxy-mate] could not load persisted rules: ${error?.message ?? error}\n`);
   }
 
   // Start the sim watcher in the daemon (Phase 3.4).
@@ -272,10 +273,10 @@ async function runDaemon(args) {
   await writePidFile(process.pid);
   await patchState({ control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
   await ctrl.start();
-  process.stderr.write(`[proxy-mcp] control plane listening on :${ctrl.port}\n`);
+  process.stderr.write(`[proxy-mate] control plane listening on :${ctrl.port}\n`);
   await recordRuntimeEvent('ready');
   } catch (error) {
-    process.stderr.write(`[proxy-mcp] daemon startup failed; rolling back: ${error?.message ?? error}\n`);
+    process.stderr.write(`[proxy-mate] daemon startup failed; rolling back: ${error?.message ?? error}\n`);
     finishStartup();
     await shutdown(1);
     return;
@@ -380,21 +381,21 @@ function validateCliArgs(args) {
 }
 
 function printHelp() {
-  process.stderr.write(`proxy-mcp v${SERVER_VERSION} — selective HTTP(S) interception for iOS Simulator testing
+  process.stderr.write(`proxy-mate v${SERVER_VERSION} — selective HTTP(S) interception for iOS Simulator testing
 
 USAGE
-  proxy-mcp init [--client name]    Install the service and connect a client (default claude)
-  proxy-mcp init --dry-run          Preview setup without changing services or client files
-  proxy-mcp init --upgrade          Upgrade an idle service; keep existing capture evidence
-  proxy-mcp                         Run the thin stdio MCP bridge to the shared daemon
-  proxy-mcp --in-process            Explicit single-client development engine
-  proxy-mcp --require-daemon        Shared-daemon MCP client; never owns capture or routing
-  proxy-mcp --daemon [opts]         Long-lived daemon (manages proxy, PAC, sim trust, control plane)
-  proxy-mcp doctor                  Inspect ports, stop only a verified stale daemon, restore recorded PAC state
-  proxy-mcp install [opts]          Install LaunchAgent for persistent daemon (~/Library/LaunchAgents)
-  proxy-mcp uninstall               Remove the LaunchAgent
-  proxy-mcp status                  Daemon + LaunchAgent + handshake state
-  proxy-mcp setup                   Friendly interactive capture setup; app-only by default
+  proxy-mate init [--client name]    Install the service and connect a client (default claude)
+  proxy-mate init --dry-run          Preview setup without changing services or client files
+  proxy-mate init --upgrade          Upgrade an idle service; keep existing capture evidence
+  proxy-mate                         Run the thin stdio MCP bridge to the shared daemon
+  proxy-mate --in-process            Explicit single-client development engine
+  proxy-mate --require-daemon        Shared-daemon MCP client; never owns capture or routing
+  proxy-mate --daemon [opts]         Long-lived daemon (manages proxy, PAC, sim trust, control plane)
+  proxy-mate doctor                  Inspect ports, stop only a verified stale daemon, restore recorded PAC state
+  proxy-mate install [opts]          Install LaunchAgent for persistent daemon (~/Library/LaunchAgents)
+  proxy-mate uninstall               Remove the LaunchAgent
+  proxy-mate status                  Daemon + LaunchAgent + handshake state
+  proxy-mate setup                   Friendly interactive capture setup; app-only by default
 
 INIT OPTIONS
   --client <name>          claude (default), codex, cursor, claude-desktop or json
@@ -424,7 +425,7 @@ DAEMON OPTIONS
   --tls-passthrough <list>  Comma-separated hostnames to tunnel raw (cert-pinned hosts)
 
 UNINSTALL OPTIONS
-  --keep-ca                 Keep the proxy-mcp CA in the user login keychain
+  --keep-ca                 Keep the proxy-mate CA in the user login keychain
 
 State lives in ${STATE_DIR}.
 `);
@@ -512,7 +513,7 @@ async function runSetup() {
   if (!process.stdin.isTTY) throw Object.assign(new Error('Interactive setup needs a terminal. Use the set-up-capture MCP prompt in chat instead.'), { code: 'INTERACTIVE_TERMINAL_REQUIRED' });
   const handshake = await readHandshake();
   if (!handshake || !await probeDaemon(handshake.controlUrl, handshake.token)) {
-    throw new Error('Install or start the shared service first with: proxy-mcp install --no-routing --no-trust-ca');
+    throw new Error('Install or start the shared service first with: proxy-mate install --no-routing --no-trust-ca');
   }
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -536,7 +537,7 @@ async function main() {
     });
     if (args.dryRun || result.client?.status === 'manual') process.stdout.write(JSON.stringify(result, null, 2) + '\n');
     else {
-      process.stdout.write(`Proxy MCP ${result.service.version} ready. Service ${result.service.status}.\n`);
+      process.stdout.write(`Proxy Mate ${result.service.version} ready. Service ${result.service.status}.\n`);
       process.stdout.write(`${args.client ?? 'claude'}: ${result.client.status} (${result.client.config_path})\n`);
       if (result.client.backup_path) process.stdout.write(`Previous client configuration: ${result.client.backup_path}\n`);
       if (result.update_available) process.stdout.write(`${result.update_available}\n`);
@@ -559,6 +560,6 @@ async function main() {
 
 main().catch((e) => {
   const detail = process.argv.includes('setup') || process.argv.includes('init') ? e?.message || String(e) : e?.stack || e;
-  process.stderr.write(`[proxy-mcp] fatal: ${detail}\n`);
+  process.stderr.write(`[proxy-mate] fatal: ${detail}\n`);
   process.exit(1);
 });

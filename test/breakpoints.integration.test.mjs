@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-breakpoints-integration-'));
+process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-breakpoints-integration-'));
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
 

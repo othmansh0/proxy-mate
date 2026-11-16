@@ -394,7 +394,7 @@ function dockerPlan(base, ca, options) {
       ...(ca ? [step('provide-ca', 'manual_or_image_build', {
         type: 'mount_or_copy_plan',
         source: ca.cert_path,
-        destination: options.ca_container_path ? normalizePathLike(options.ca_container_path, 'ca_container_path') : '/tmp/proxy-mcp-ca.pem',
+        destination: options.ca_container_path ? normalizePathLike(options.ca_container_path, 'ca_container_path') : '/tmp/proxy-mate-ca.pem',
         read_source: false,
       })] : []),
       step('client-trust', 'manual', {

@@ -34,7 +34,7 @@ async function choose(ask, write, title, choices, defaultIndex = 0) {
 }
 
 export async function runCaptureSetup({ ask, write, call }) {
-  write('Proxy MCP setup\nApp-only capture is the default. Broader capture requires your selection.\n');
+  write('Proxy Mate setup\nApp-only capture is the default. Broader capture requires your selection.\n');
   const scope = await choose(ask, write, 'What would you like to capture?', [
     { label: 'One simulator app (recommended)', value: 'app' },
     { label: 'Selected API domains across apps', value: 'domains' },
@@ -74,7 +74,7 @@ export async function runCaptureSetup({ ask, write, call }) {
   write(scope === 'app'
     ? 'Only identified app connections will be inspected. Mac Keychain trust is not requested. The local gateway forwards other and unidentified connections without capture; background helpers may not be attributable. Mac proxy routing will change for this session.\n'
     : 'This mode can inspect matching traffic from other apps and requires Mac certificate trust. The native explanation will appear before new trust is requested.\n');
-  write('Starting replaces any current Proxy MCP capture. Other proxy settings are preserved.\n');
+  write('Starting replaces any current Proxy Mate capture. Other proxy settings are preserved.\n');
   if (!/^(y|yes)$/i.test((await ask('Start capture? [y/N]: ')).trim())) return { status: 'cancelled' };
   const status = await call('get_proxy_status', {});
   const port = status.port ?? 8080;

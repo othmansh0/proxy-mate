@@ -1,3 +1,4 @@
+import { readEnvironment } from './environment.mjs';
 const DEFAULT_HEADER_PATTERNS = Object.freeze([
   'authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key', 'api-key',
 ]);
@@ -7,9 +8,9 @@ const DEFAULT_FIELD_PATTERNS = Object.freeze([
   'secret', 'session', 'token',
 ]);
 const ENV_KEYS = Object.freeze({
-  headers: 'PROXY_MCP_REDACT_HEADERS',
-  query: 'PROXY_MCP_REDACT_QUERY_FIELDS',
-  body: 'PROXY_MCP_REDACT_BODY_FIELDS',
+  headers: 'PROXY_MATE_REDACT_HEADERS',
+  query: 'PROXY_MATE_REDACT_QUERY_FIELDS',
+  body: 'PROXY_MATE_REDACT_BODY_FIELDS',
 });
 const MAX_EXTRA_PATTERNS = 64;
 const MAX_PATTERN_LENGTH = 80;
@@ -29,9 +30,9 @@ export function createRedactionConfig({
   bodyFieldPatterns = [],
   env = process.env,
 } = {}) {
-  const headers = mergePatterns(DEFAULT_HEADER_PATTERNS, env?.[ENV_KEYS.headers], headerPatterns, 'headerPatterns');
-  const query = mergePatterns(DEFAULT_FIELD_PATTERNS, env?.[ENV_KEYS.query], queryPatterns, 'queryPatterns');
-  const body = mergePatterns(DEFAULT_FIELD_PATTERNS, env?.[ENV_KEYS.body], bodyFieldPatterns, 'bodyFieldPatterns');
+  const headers = mergePatterns(DEFAULT_HEADER_PATTERNS, readEnvironment(ENV_KEYS.headers, env), headerPatterns, 'headerPatterns');
+  const query = mergePatterns(DEFAULT_FIELD_PATTERNS, readEnvironment(ENV_KEYS.query, env), queryPatterns, 'queryPatterns');
+  const body = mergePatterns(DEFAULT_FIELD_PATTERNS, readEnvironment(ENV_KEYS.body, env), bodyFieldPatterns, 'bodyFieldPatterns');
   return Object.freeze({
     headers: Object.freeze(headers),
     query: Object.freeze(query),
@@ -79,7 +80,7 @@ export function redactUrl(value, redactedFields = [], config = createRedactionCo
   if (!value) return value;
   try {
     const absolute = /^[A-Za-z][A-Za-z\d+.-]*:/.test(String(value));
-    const url = absolute ? new URL(value) : new URL(value, 'http://proxy-mcp.invalid');
+    const url = absolute ? new URL(value) : new URL(value, 'http://proxy-mate.invalid');
     if (url.username) {
       url.username = '[REDACTED]';
       redactedFields.push('url:username');

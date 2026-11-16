@@ -10,6 +10,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { STATE_DIR } from './config.mjs';
+import { serviceEnvironment } from './environment.mjs';
 import { readHandshake, atomicWriteFile } from './state.mjs';
 import { probeDaemon } from './control.mjs';
 import { stageDaemonRuntime, pruneDaemonRuntimes, publishDaemonRuntime } from './runtime-install.mjs';
@@ -19,12 +20,16 @@ import { activateServiceFiles } from './service-install.mjs';
 const execFileP = promisify(execFile);
 const LAUNCHCTL_OPTIONS = { timeout: 30_000, maxBuffer: 1024 * 1024 };
 
-const LABEL = 'dev.proxy-mcp.daemon';
-const LEGACY_LABEL = 'com.almosafer.proxy-mcp';
-const GUARDIAN_LABEL = 'dev.proxy-mcp.guardian';
+const LABEL = 'dev.proxy-mate.daemon';
+const GUARDIAN_LABEL = 'dev.proxy-mate.guardian';
+export const LEGACY_SERVICE_LABELS = Object.freeze([
+  'dev.proxy-mcp.daemon', 'dev.proxy-mcp.guardian', 'com.almosafer.proxy-mcp',
+]);
 const PLIST_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents');
 const PLIST_PATH = path.join(PLIST_DIR, `${LABEL}.plist`);
-const LEGACY_PLIST_PATH = path.join(PLIST_DIR, `${LEGACY_LABEL}.plist`);
+function legacyServices() {
+  return LEGACY_SERVICE_LABELS.map((label) => ({ label, plistPath: path.join(PLIST_DIR, `${label}.plist`) }));
+}
 const GUARDIAN_PLIST_PATH = path.join(PLIST_DIR, `${GUARDIAN_LABEL}.plist`);
 const LOG_DIR = path.join(STATE_DIR, 'logs');
 
@@ -35,7 +40,7 @@ export function plistXml({ programArgs, environment = {}, label = LABEL, logPref
   const env = {
     PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     ...environment,
-    PROXY_MCP_HOME: STATE_DIR,
+    PROXY_MATE_HOME: STATE_DIR,
   };
   const envXml = Object.entries(env).map(([key, value]) => `    <key>${escapeXml(key)}</key><string>${escapeXml(value)}</string>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -103,10 +108,10 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
   if (domainsFile) programArgs.push('--domains-file', path.resolve(domainsFile));
   for (const a of extraArgs) programArgs.push(a);
 
-  const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PROXY_MCP_') || key === 'DEVELOPER_DIR'));
+  const environment = serviceEnvironment();
   // Retain the previous CWD authorization boundary for explicit fixture reads.
   // Files under protected folders may still require macOS user permission.
-  environment.PROXY_MCP_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXY_MCP_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);
+  environment.PROXY_MATE_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXY_MATE_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);
   const previousHandshake = await readHandshake();
   const guardianArgs = [programArgs[0], path.join(runtime.directory, 'src/guardian.mjs')];
   let mcpServerPath;
@@ -116,7 +121,7 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
       { label: GUARDIAN_LABEL, plistPath: GUARDIAN_PLIST_PATH,
         xml: plistXml({ programArgs: guardianArgs, environment, label: GUARDIAN_LABEL, logPrefix: 'guardian' }) },
     ],
-    retired: existsSync(LEGACY_PLIST_PATH) ? [{ label: LEGACY_LABEL, plistPath: LEGACY_PLIST_PATH }] : [],
+    retired: legacyServices().filter((service) => existsSync(service.plistPath)),
     domain: `gui/${process.getuid()}`,
     run: (args) => execFileP('launchctl', args, LAUNCHCTL_OPTIONS),
     ready: () => waitForDaemonReady({ previousToken: previousHandshake?.token, timeoutMs: readinessTimeoutMs }),
@@ -127,7 +132,7 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
     if (error.details?.rollback_restored) await fs.rm(runtime.directory, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  await pruneDaemonRuntimes(runtime.directory).catch((error) => process.stderr.write(`[proxy-mcp] old runtime cleanup failed: ${error.message}\n`));
+  await pruneDaemonRuntimes(runtime.directory).catch((error) => process.stderr.write(`[proxy-mate] old runtime cleanup failed: ${error.message}\n`));
   return { plistPath: PLIST_PATH, label: LABEL, programArgs, runtime_directory: runtime.directory,
     mcp_server_path: mcpServerPath, mcp_client_path: path.join(path.dirname(mcpServerPath), 'client.mjs'),
     guardian: { label: GUARDIAN_LABEL, plistPath: GUARDIAN_PLIST_PATH }, ready: true };
@@ -150,12 +155,12 @@ export async function waitForDaemonReady({ previousToken, timeoutMs = 90_000,
     if (handshake && handshake.token !== previousToken && await probe(handshake.controlUrl, handshake.token)) return true;
     await new Promise((resolve) => setTimeout(resolve, Math.min(250, Math.max(1, deadline - Date.now()))));
   }
-  throw Object.assign(new Error(`LaunchAgent was loaded but did not become ready. Check ${path.join(LOG_DIR, 'daemon.err.log')} and run proxy-mcp status.`), { code: 'DAEMON_STARTUP_TIMEOUT' });
+  throw Object.assign(new Error(`LaunchAgent was loaded but did not become ready. Check ${path.join(LOG_DIR, 'daemon.err.log')} and run proxy-mate status.`), { code: 'DAEMON_STARTUP_TIMEOUT' });
 }
 
 export async function uninstallLaunchAgent() {
   const removed = [];
-  for (const plistPath of [GUARDIAN_PLIST_PATH, PLIST_PATH, LEGACY_PLIST_PATH]) {
+  for (const plistPath of [GUARDIAN_PLIST_PATH, PLIST_PATH, ...legacyServices().reverse().map((service) => service.plistPath)]) {
     if (!existsSync(plistPath)) continue;
     try { await execFileP('launchctl', ['bootout', `gui/${process.getuid()}`, plistPath], LAUNCHCTL_OPTIONS); } catch { /* may not be loaded */ }
     try { await fs.unlink(plistPath); removed.push(plistPath); } catch { /* ignore */ }
@@ -164,13 +169,14 @@ export async function uninstallLaunchAgent() {
 }
 
 export async function launchAgentStatus() {
-  const activePath = existsSync(PLIST_PATH) ? PLIST_PATH : (existsSync(LEGACY_PLIST_PATH) ? LEGACY_PLIST_PATH : null);
-  const activeLabel = activePath === LEGACY_PLIST_PATH ? LEGACY_LABEL : LABEL;
-  if (!activePath) return { installed: false };
+  const active = [{ label: LABEL, plistPath: PLIST_PATH }, ...legacyServices().filter((service) => !service.label.endsWith('.guardian'))]
+    .find((service) => existsSync(service.plistPath));
+  if (!active) return { installed: false };
+  const { label: activeLabel, plistPath: activePath } = active;
   try {
     const { stdout } = await execFileP('launchctl', ['print', `gui/${process.getuid()}/${activeLabel}`], LAUNCHCTL_OPTIONS);
-    return { installed: true, plistPath: activePath, label: activeLabel, legacy: activeLabel === LEGACY_LABEL, launchctl_state: stdout.slice(0, 400) };
+    return { installed: true, plistPath: activePath, label: activeLabel, legacy: activeLabel !== LABEL, launchctl_state: stdout.slice(0, 400) };
   } catch (e) {
-    return { installed: true, plistPath: activePath, label: activeLabel, legacy: activeLabel === LEGACY_LABEL, launchctl_state: `not loaded (${e?.message ?? e})` };
+    return { installed: true, plistPath: activePath, label: activeLabel, legacy: activeLabel !== LABEL, launchctl_state: `not loaded (${e?.message ?? e})` };
   }
 }

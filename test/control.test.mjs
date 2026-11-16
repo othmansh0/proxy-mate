@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-control-'));
+process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-control-'));
 const { ControlServer, probeDaemon, callDaemon } = await import('../src/lib/control.mjs');
 const { readHandshake } = await import('../src/lib/state.mjs');
 const { SERVER_VERSION } = await import('../src/lib/config.mjs');
@@ -29,6 +29,11 @@ test('control health and RPC require the private bearer token', async (t) => {
   const handshake = await readHandshake();
   assert.equal(await probeDaemon(handshake.controlUrl, 'wrong-token'), false);
   assert.equal(await probeDaemon(handshake.controlUrl, handshake.token), true);
+  for (const [headers, service] of [[{}, 'proxy-mcp'], [{ 'x-proxy-mate-client': '1' }, 'proxy-mate']]) {
+    const response = await rawControlRequest({ port: control.port,
+      headers: { authorization: `Bearer ${handshake.token}`, ...headers } });
+    assert.equal(JSON.parse(response.body).service, service);
+  }
   assert.deepEqual(await callDaemon({ ...handshake, tool: 'echo', args: { ok: 1 } }), { ok: 1 });
 });
 

@@ -106,12 +106,12 @@ export async function clearHandshake(expectedToken) {
 
 // Crash recovery must only undo the exact automatic proxy setting that this
 // process recorded. Disabling every proxy type on every network service can
-// destroy VPN/corporate/user configuration unrelated to proxy-mcp.
+// destroy VPN/corporate/user configuration unrelated to proxy-mate.
 export async function defensiveNetworkResetAllServices() {
   const state = await readState();
   const service = state?.network_service;
   if (!service || !state?.routing_active) {
-    return { reset: [], skipped: 'no recorded proxy-mcp routing mutation' };
+    return { reset: [], skipped: 'no recorded proxy-mate routing mutation' };
   }
   try {
     const { clearPacRouting } = await import('./pac.mjs');

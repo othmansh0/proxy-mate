@@ -1,6 +1,7 @@
+import { readEnvironment } from './environment.mjs';
 // Daemon control plane — local HTTP server that lets a separate MCP-server
 // process forward tool calls into a long-running daemon. Token-authenticated
-// via ~/.proxy-mcp/handshake.json (0600).
+// via ~/.proxy-mate/handshake.json (0600).
 //
 // Endpoint shape: POST /rpc with body { tool: "name", args: {...} }
 // Returns: { ok: true, result: ... } or { ok: false, error: "..." }
@@ -52,7 +53,7 @@ export class ControlServer {
   constructor({
     port = DEFAULT_CONTROL_PORT,
     tools,
-    scopes = ['observe', 'control', ...(process.env.PROXY_MCP_ALLOW_SENSITIVE === '1' ? ['sensitive'] : [])],
+    scopes = ['observe', 'control', ...(readEnvironment('PROXY_MATE_ALLOW_SENSITIVE') === '1' ? ['sensitive'] : [])],
     maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS,
     rateLimit = DEFAULT_RATE_LIMIT,
     rateWindowMs = DEFAULT_RATE_WINDOW_MS,
@@ -152,7 +153,9 @@ export class ControlServer {
     }
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      res.end(JSON.stringify({ ok: true, service: 'proxy-mcp', pid: process.pid }));
+      // Headerless pre-rename bridges require the old service marker. New
+      // clients identify themselves and accept either generation of daemon.
+      res.end(JSON.stringify({ ok: true, service: req.headers['x-proxy-mate-client'] === '1' ? 'proxy-mate' : 'proxy-mcp', name: 'proxy-mate', pid: process.pid }));
       return;
     }
     if (req.method !== 'POST' || req.url !== '/rpc') {
@@ -442,7 +445,7 @@ export async function probeDaemon(controlUrl, token, timeoutMs = 1500) {
       host: url.hostname,
       port: url.port || 80,
       path: url.pathname,
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'x-proxy-mate-client': '1' },
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
@@ -453,7 +456,7 @@ export async function probeDaemon(controlUrl, token, timeoutMs = 1500) {
       res.on('end', () => {
         try {
           const p = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          finish(res.statusCode === 200 && p?.ok === true && p.service === 'proxy-mcp');
+          finish(res.statusCode === 200 && p?.ok === true && ['proxy-mate', 'proxy-mcp'].includes(p.service));
         } catch { finish(false); }
       });
     });

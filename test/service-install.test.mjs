@@ -39,6 +39,23 @@ test('failed first install leaves no service files or jobs behind', async (t) =>
   for (const s of deps.services) await assert.rejects(fs.access(s.plistPath), { code: 'ENOENT' });
 });
 
+test('rename retires both old services and restores them on failed activation', async (t) => {
+  const deps = await fixture(t);
+  const root = path.dirname(deps.services[0].plistPath);
+  const retired = ['dev.proxy-mcp.daemon', 'dev.proxy-mcp.guardian'].map((label) => ({ label, plistPath: path.join(root, `${label}.plist`) }));
+  for (const service of retired) {
+    await fs.writeFile(service.plistPath, `old-${service.label}`);
+    deps.jobs.add(service.label);
+  }
+  await assert.rejects(activateServiceFiles({ ...deps, retired,
+    ready: async () => { throw new Error('failed rename'); }, publish: async () => {} }), (error) => error.details.rollback_restored);
+  for (const service of retired) assert.equal(await fs.readFile(service.plistPath, 'utf8'), `old-${service.label}`);
+  assert.deepEqual([...deps.jobs].sort(), retired.map((service) => service.label).sort());
+  await activateServiceFiles({ ...deps, retired, ready: async () => {}, publish: async () => {} });
+  for (const service of retired) await assert.rejects(fs.access(service.plistPath), { code: 'ENOENT' });
+  assert.deepEqual([...deps.jobs].sort(), ['daemon', 'guardian']);
+});
+
 test('publication happens after daemon readiness and guardian activation', async (t) => {
   const deps = await fixture(t); let ready = false;
   const result = await activateServiceFiles({ ...deps, ready: async () => { ready = true; assert.equal(deps.jobs.has('guardian'), false); },

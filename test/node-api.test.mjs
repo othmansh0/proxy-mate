@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-node-api-'));
-process.env.PROXY_MCP_HOME = directory;
+process.env.PROXY_MATE_HOME = directory;
 const { createProxyClient } = await import('../src/index.mjs');
 const { ControlServer } = await import('../src/lib/control.mjs');
 test.after(() => fs.rm(directory, { recursive: true, force: true }));

@@ -18,7 +18,7 @@ export function createProxyClient({ home = STATE_DIR, readyTimeoutMs = 15_000 } 
   };
   const dispatch = rememberCaptureLease(async (tool, args, { signal, timeoutMs } = {}) => {
     const handshake = await waitForReadyDaemon({ timeoutMs: readyTimeoutMs, signal, read });
-    if (!handshake) throw Object.assign(new Error('Proxy MCP is unavailable. Run proxy-mcp init, then retry after the daemon is ready.'), {
+    if (!handshake) throw Object.assign(new Error('Proxy Mate is unavailable. Run proxy-mate init, then retry after the daemon is ready.'), {
       code: 'DAEMON_UNAVAILABLE', retryable: true,
     });
     // The handshake is refreshed before every call. A submitted mutation is

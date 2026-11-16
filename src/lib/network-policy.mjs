@@ -1,10 +1,11 @@
+import { readEnvironment } from './environment.mjs';
 import { getDefaultAutoSelectFamilyAttemptTimeout, setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
 
 export function connectionAttemptTimeout(env = process.env) {
-  const raw = env.PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS;
+  const raw = readEnvironment('PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS', env);
   if (raw === undefined) return 2000;
   if (typeof raw !== 'string' || !/^\d+$/.test(raw) || Number(raw) < 10 || Number(raw) > 10000) {
-    throw Object.assign(new Error('PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS must be a whole number from 10 to 10000.'), {
+    throw Object.assign(new Error('PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS must be a whole number from 10 to 10000.'), {
       code: 'INVALID_CONNECT_ATTEMPT_TIMEOUT',
     });
   }

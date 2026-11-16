@@ -82,7 +82,7 @@ export class TransformSandbox {
       context = runtime.newContext();
       const result = context.evalCode(
         buildProgram(source, inputText, this.limits),
-        'proxy-mcp-transform.js',
+        'proxy-mate-transform.js',
         { type: 'global', strict: true },
       );
 
@@ -219,30 +219,30 @@ function buildProgram(source, inputText, limits) {
     Object.defineProperty(globalThis, __name, { value: undefined, writable: false, configurable: false });
   }
   const __transform = (${source}\n);
-  if (typeof __transform !== "function") throw new TypeError("__PROXY_MCP_NOT_FUNCTION__");
+  if (typeof __transform !== "function") throw new TypeError("__PROXY_MATE_NOT_FUNCTION__");
   const __output = __transform(JSON.parse(${JSON.stringify(inputText)}));
   const __seen = new Set();
   const __pending = [[__output, 0]];
   let __nodes = 0;
   while (__pending.length) {
     const [__value, __depth] = __pending.pop();
-    if (++__nodes > ${limits.maxJsonNodes} || __depth > ${limits.maxJsonDepth}) throw new TypeError("__PROXY_MCP_INVALID_RESULT__:complexity");
+    if (++__nodes > ${limits.maxJsonNodes} || __depth > ${limits.maxJsonDepth}) throw new TypeError("__PROXY_MATE_INVALID_RESULT__:complexity");
     if (__value === null || typeof __value === "string" || typeof __value === "boolean") continue;
     if (typeof __value === "number" && Number.isFinite(__value)) continue;
-    if (!__value || typeof __value !== "object") throw new TypeError("__PROXY_MCP_INVALID_RESULT__:type");
-    if (__seen.has(__value)) throw new TypeError("__PROXY_MCP_INVALID_RESULT__:cycle");
+    if (!__value || typeof __value !== "object") throw new TypeError("__PROXY_MATE_INVALID_RESULT__:type");
+    if (__seen.has(__value)) throw new TypeError("__PROXY_MATE_INVALID_RESULT__:cycle");
     __seen.add(__value);
     const __prototype = __getPrototypeOf(__value);
     if (Array.isArray(__value)) {
-      if (__prototype !== __arrayPrototype || Object.keys(__value).length !== __value.length) throw new TypeError("__PROXY_MCP_INVALID_RESULT__:array");
+      if (__prototype !== __arrayPrototype || Object.keys(__value).length !== __value.length) throw new TypeError("__PROXY_MATE_INVALID_RESULT__:array");
     } else if (__prototype !== __objectPrototype && __prototype !== null) {
-      throw new TypeError("__PROXY_MCP_INVALID_RESULT__:object");
+      throw new TypeError("__PROXY_MATE_INVALID_RESULT__:object");
     }
     for (const __key of __ownKeys(__value)) {
-      if (typeof __key !== "string") throw new TypeError("__PROXY_MCP_INVALID_RESULT__:symbol");
+      if (typeof __key !== "string") throw new TypeError("__PROXY_MATE_INVALID_RESULT__:symbol");
       const __descriptor = __getOwnPropertyDescriptor(__value, __key);
       if (!__descriptor || !__descriptor.enumerable) continue;
-      if (!("value" in __descriptor)) throw new TypeError("__PROXY_MCP_INVALID_RESULT__:accessor");
+      if (!("value" in __descriptor)) throw new TypeError("__PROXY_MATE_INVALID_RESULT__:accessor");
       __pending.push([__descriptor.value, __depth + 1]);
     }
   }
@@ -263,7 +263,7 @@ function classifyGuestError(error, deadlineReached) {
   if (/stack overflow|stack limit/i.test(message)) {
     return new TransformSandboxError('TRANSFORM_STACK_LIMIT', 'Transform exceeded its stack limit');
   }
-  if (/__PROXY_MCP_(?:INVALID_RESULT|NOT_FUNCTION)__/.test(message)) {
+  if (/__PROXY_MATE_(?:INVALID_RESULT|NOT_FUNCTION)__/.test(message)) {
     return new TransformSandboxError('TRANSFORM_INVALID_RESULT', 'Transform must be a function that returns a synchronous JSON value');
   }
   return new TransformSandboxError('TRANSFORM_EXECUTION_FAILED', 'Transform execution failed', { guest_error_name: name });

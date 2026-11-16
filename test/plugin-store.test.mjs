@@ -10,7 +10,7 @@ function hasCode(code) {
 }
 
 test('persists private atomic manifests and source across restart with redacted list metadata', async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'proxy-mcp-plugins-'));
+  const directory = await mkdtemp(path.join(tmpdir(), 'proxy-mate-plugins-'));
   const clock = () => new Date('2026-08-17T10:00:00.000Z');
   const first = new PluginStore({ directory, clock });
   const saved = await first.upsert({
@@ -47,7 +47,7 @@ test('persists private atomic manifests and source across restart with redacted 
 });
 
 test('enforces safe ids, declared stages, and enablement', async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'proxy-mcp-plugin-stage-'));
+  const directory = await mkdtemp(path.join(tmpdir(), 'proxy-mate-plugin-stage-'));
   const store = new PluginStore({ directory });
   await assert.rejects(store.upsert({ id: '../escape', stage: 'request', source: '(value) => value' }), hasCode('PLUGIN_INVALID_ID'));
   await assert.rejects(store.upsert({ id: 'wrong-stage', stage: 'live_websocket', source: '(value) => value' }), hasCode('PLUGIN_INVALID_STAGE'));
@@ -61,7 +61,7 @@ test('enforces safe ids, declared stages, and enablement', async () => {
 });
 
 test('upserts content-addressed source, removes plugins, and verifies stored integrity', async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'proxy-mcp-plugin-update-'));
+  const directory = await mkdtemp(path.join(tmpdir(), 'proxy-mate-plugin-update-'));
   const store = new PluginStore({ directory });
   const first = await store.upsert({ id: 'mutable', stage: 'websocket_offline', enabled: true, source: '(value) => ({ ...value, version: 1 })' });
   const second = await store.upsert({ id: 'mutable', stage: 'websocket_offline', enabled: true, source: '(value) => ({ ...value, version: 2 })' });
