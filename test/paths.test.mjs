@@ -9,18 +9,18 @@ test('path authorization allows workspace files and rejects unrelated paths', as
   const local = path.join(process.cwd(), 'package.json');
   assert.equal(await authorizeReadPath(local), await fs.realpath(local));
   assert.equal(await authorizeWritePath(path.join(process.cwd(), '.tmp', 'result.har')), path.join(process.cwd(), '.tmp', 'result.har'));
-  const outside = path.join(os.tmpdir(), `proxy-mcp-outside-${process.pid}`, 'file');
+  const outside = path.join(os.tmpdir(), `proxy-mate-outside-${process.pid}`, 'file');
   await assert.rejects(authorizeWritePath(outside), (error) => error.code === 'PATH_NOT_AUTHORIZED');
 });
 
 test('sensitive access requires an explicit server-level grant', async () => {
-  const prior = process.env.PROXY_MCP_ALLOW_SENSITIVE;
-  delete process.env.PROXY_MCP_ALLOW_SENSITIVE;
+  const prior = process.env.PROXY_MATE_ALLOW_SENSITIVE;
+  delete process.env.PROXY_MATE_ALLOW_SENSITIVE;
   const { requireSensitiveAccess } = await import('../src/lib/paths.mjs');
   assert.equal(requireSensitiveAccess(false), false);
   assert.throws(() => requireSensitiveAccess(true), (error) => error.code === 'SENSITIVE_ACCESS_DISABLED');
-  process.env.PROXY_MCP_ALLOW_SENSITIVE = '1';
+  process.env.PROXY_MATE_ALLOW_SENSITIVE = '1';
   assert.equal(requireSensitiveAccess(true), true);
-  if (prior == null) delete process.env.PROXY_MCP_ALLOW_SENSITIVE;
-  else process.env.PROXY_MCP_ALLOW_SENSITIVE = prior;
+  if (prior == null) delete process.env.PROXY_MATE_ALLOW_SENSITIVE;
+  else process.env.PROXY_MATE_ALLOW_SENSITIVE = prior;
 });

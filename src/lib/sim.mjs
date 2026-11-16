@@ -1,6 +1,7 @@
+import { readEnvironment } from './environment.mjs';
 // Production-safe Xcode Simulator certificate automation. All commands are
 // spawned without a shell, never with sudo, and use a per-process
-// DEVELOPER_DIR so proxy-mcp does not modify the user's global Xcode selection.
+// DEVELOPER_DIR so proxy-mate does not modify the user's global Xcode selection.
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -133,7 +134,7 @@ export async function listSimulators({ scope = 'booted', device_ids, developer_d
 export async function discoverXcodePreviewDeviceSets({ preview_device_set } = {}) {
   const candidates = [
     preview_device_set,
-    process.env.PROXY_MCP_PREVIEW_DEVICE_SET,
+    readEnvironment('PROXY_MATE_PREVIEW_DEVICE_SET'),
     path.join(os.homedir(), 'Library', 'Developer', 'Xcode', 'UserData', 'Previews', 'Simulator Devices'),
   ].filter(Boolean).map((value) => path.resolve(value));
   const available = [];
@@ -272,7 +273,7 @@ export async function setupSimulatorCertificates({
           certificate_imported: true,
           system_tls_verified: false,
           manual_trust_may_be_required: true,
-          recovery: 'The CA already exists. If HTTPS still fails, enable proxy-mcp CA under Simulator Settings > General > About > Certificate Trust Settings.',
+          recovery: 'The CA already exists. If HTTPS still fails, enable proxy-mate CA under Simulator Settings > General > About > Certificate Trust Settings.',
         });
       } else {
         results.push({ ...sim, status: 'failed', error: classifySimctlError(error) });

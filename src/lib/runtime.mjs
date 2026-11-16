@@ -1,3 +1,4 @@
+import { readEnvironment } from './environment.mjs';
 import lockfile from 'proper-lockfile';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
@@ -16,7 +17,7 @@ export async function acquireRuntime({ directory = STATE_DIR, wait = true } = {}
     });
   } catch (cause) {
     if (cause.code !== 'ELOCKED') throw cause;
-    throw Object.assign(new Error('Another proxy-mcp process owns this state directory. Use the shared daemon or a separate PROXY_MCP_HOME.'), {
+    throw Object.assign(new Error('Another proxy-mate process owns this state directory. Use the shared daemon or a separate PROXY_MATE_HOME.'), {
       code: 'RUNTIME_BUSY', retryable: true,
     });
   }
@@ -24,9 +25,9 @@ export async function acquireRuntime({ directory = STATE_DIR, wait = true } = {}
 
 export async function reconcileRuntime() {
   const state = await readState();
-  // Includes pre-lock releases of proxy-mcp: never take over their live state.
+  // Includes pre-lock releases of proxy-mate: never take over their live state.
   if (state?.pid && state.pid !== process.pid && !await isStateStale()) {
-    throw Object.assign(new Error('A live proxy-mcp process owns the recorded state. Stop that process before starting a new runtime.'), {
+    throw Object.assign(new Error('A live proxy-mate process owns the recorded state. Stop that process before starting a new runtime.'), {
       code: 'RUNTIME_BUSY', retryable: true,
     });
   }
@@ -46,12 +47,12 @@ export async function reconcileRuntime() {
 export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 18_000 } = {}) {
   let stopping = null;
   let pressureSamples = 0;
-  const configuredRss = Number(process.env.PROXY_MCP_MAX_RSS_MB ?? 1024);
+  const configuredRss = Number(readEnvironment('PROXY_MATE_MAX_RSS_MB') ?? 1024);
   const maxRss = Number.isFinite(configuredRss) && configuredRss >= 128 ? configuredRss * 1024 * 1024 : 1024 * 1024 * 1024;
   const memoryTimer = setInterval(() => {
     pressureSamples = process.memoryUsage().rss > maxRss ? pressureSamples + 1 : 0;
     if (pressureSamples >= 3) {
-      process.stderr.write('[proxy-mcp] sustained memory pressure: draining and restoring routing before exit; launchd will restart the daemon\n');
+      process.stderr.write('[proxy-mate] sustained memory pressure: draining and restoring routing before exit; launchd will restart the daemon\n');
       void shutdown(1, 'memory_pressure');
     }
   }, 2000);
@@ -60,13 +61,13 @@ export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 18
     if (stopping) return stopping;
     clearInterval(memoryTimer);
     const timer = setTimeout(() => {
-      process.stderr.write('[proxy-mcp] shutdown deadline exceeded; recovery state retained\n');
+      process.stderr.write('[proxy-mate] shutdown deadline exceeded; recovery state retained\n');
       process.exit(1);
     }, timeoutMs);
     stopping = recordRuntimeEvent('stopping', { reason, code }).catch(() => {}).then(cleanup).then(
       () => { clearTimeout(timer); process.exit(code); },
       (error) => {
-        process.stderr.write(`[proxy-mcp] cleanup failed: ${error?.message ?? error}\n`);
+        process.stderr.write(`[proxy-mate] cleanup failed: ${error?.message ?? error}\n`);
         clearTimeout(timer); process.exit(1);
       },
     );
@@ -75,7 +76,7 @@ export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 18
   process.once('SIGTERM', () => void shutdown());
   process.once('SIGINT', () => void shutdown());
   const fatal = (error) => {
-    process.stderr.write(`[proxy-mcp] fatal: ${error?.message ?? error}\n`);
+    process.stderr.write(`[proxy-mate] fatal: ${error?.message ?? error}\n`);
     void shutdown(1, 'fatal_error');
   };
   process.once('uncaughtException', fatal);

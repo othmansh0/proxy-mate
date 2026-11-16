@@ -13,7 +13,7 @@ test('thin bridge initializes and explains recovery offline without taking captu
   const client = new Client({ name: 'offline-agent', version: '1' });
   t.after(async () => { await client.close(); await fs.rm(directory, { recursive: true, force: true }); });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: ['src/client.mjs'],
-    cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXY_MCP_HOME: directory }, stderr: 'pipe' }));
+    cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXY_MATE_HOME: directory }, stderr: 'pipe' }));
   assert.match(client.getInstructions(), /get_started/);
   const start = Date.now();
   const help = await client.callTool({ name: 'get_started', arguments: {} });

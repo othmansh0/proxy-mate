@@ -16,18 +16,18 @@ This starts the shared service and guardian without system routing or automatic 
 
 Service selection follows the primary IPv4/IPv6 service in macOS SystemConfiguration. If that cannot be identified, setup requires an explicit `--network-service` instead of guessing Wi-Fi. Proxy, PAC and authenticated control ports default to 8080, 8081 and 8082; choose different ports when another tool owns them.
 
-The installer copies executable sources, Simulator probe scripts, and installed dependencies into a private `~/.proxy-mcp/runtime/build-*` snapshot, then waits for the new daemon's authenticated health response after setup and rule replay. The background service runs from that snapshot, not your checkout. It keeps the current and one previous completed snapshot; older managed snapshots are removed only after successful startup. This avoids launchd trying to read a checkout in macOS-protected Documents/Desktop/Downloads folders, which can fail with `EPERM` even when Terminal can read it. No Full Disk Access grant is required for the default runtime location.
+The installer copies executable sources, Simulator probe scripts, and installed dependencies into a private `~/.proxy-mate/runtime/build-*` snapshot, then waits for the new daemon's authenticated health response after setup and rule replay. The background service runs from that snapshot, not your checkout. It keeps the current and one previous completed snapshot; older managed snapshots are removed only after successful startup. This avoids launchd trying to read a checkout in macOS-protected Documents/Desktop/Downloads folders, which can fail with `EPERM` even when Terminal can read it. No Full Disk Access grant is required for the default runtime location.
 
-It preserves `PROXY_MCP_*` environment settings and uses a stable Homebrew Node path when available. Run install again after **any code/dependency upgrade**, changing options, or switching Node installations to refresh the snapshot. Keep custom `PROXY_MCP_HOME`, Node installations, custom CA/domain files, and daemon-readable fixtures outside protected folders unless you have explicitly granted the relevant macOS access. The original checkout remains an authorized fixture root, but authorization does not override macOS privacy permissions. Do not run a second foreground daemon with the same state directory.
+It preserves `PROXY_MATE_*` environment settings and uses a stable Homebrew Node path when available. Run install again after **any code/dependency upgrade**, changing options, or switching Node installations to refresh the snapshot. Keep custom `PROXY_MATE_HOME`, Node installations, custom CA/domain files, and daemon-readable fixtures outside protected folders unless you have explicitly granted the relevant macOS access. The original checkout remains an authorized fixture root, but authorization does not override macOS privacy permissions. Do not run a second foreground daemon with the same state directory.
 
 After installation, point every MCP client at the stable runtime entry point reported as `mcp_client_path` (expand the home directory to an absolute path):
 
 ```json
 {
   "mcpServers": {
-    "proxy-mcp": {
+    "proxy-mate": {
       "command": "/absolute/path/to/node",
-      "args": ["/Users/YOUR_USER/.proxy-mcp/runtime/current/src/client.mjs"]
+      "args": ["/Users/YOUR_USER/.proxy-mate/runtime/current/src/client.mjs"]
     }
   }
 }
@@ -41,7 +41,7 @@ For first-time setup, prefer `node src/server.mjs setup` or the `set-up-capture`
 
 App attribution uses the socket owner, executable bundle path, and selected Simulator's app process identity. Other and unknown clients are forwarded without inspection or capture. The Mac network service still routes proxy-aware traffic through the local gateway; an app display filter alone is not used as isolation. App extensions/background helpers that cannot be attributed, clients bypassing HTTP proxy settings, and pinned TLS connections may not be inspectable. Use reverse proxy capture for localhost APIs. The gateway is loopback-only and uses a separate port from the normal proxy; after a daemon restart, app capture stays off until explicitly selected again.
 
-Before requesting new macOS certificate trust, Proxy MCP displays a native explanation with Cancel and Continue. It describes the purpose, persistent trust scope, local storage, and access by connected MCP clients. Passwords are entered only in the subsequent macOS authentication dialog. Cancel, inactivity, or an unavailable GUI prevents certificate installation. An already-trusted certificate skips both dialogs. Simulator certificate import is a separate operation and does not grant access to saved Mac Keychain passwords.
+Before requesting new macOS certificate trust, Proxy Mate displays a native explanation with Cancel and Continue. It describes the purpose, persistent trust scope, local storage, and access by connected MCP clients. Passwords are entered only in the subsequent macOS authentication dialog. Cancel, inactivity, or an unavailable GUI prevents certificate installation. An already-trusted certificate skips both dialogs. Simulator certificate import is a separate operation and does not grant access to saved Mac Keychain passwords.
 
 Use the installed thin `client.mjs` entry. It initializes without capture ownership and serves built-in onboarding/recovery guidance even while the daemon is down. Legacy `server.mjs` now uses the same bridge by default; only `--in-process` enables the old single-client behavior. Restart/reconnect existing MCP registrations once when migrating from the old source process.
 
@@ -65,11 +65,11 @@ The standalone trust check is useful without an MCP client:
 npm run verify:simulator -- DEVICE_UDID
 ```
 
-Add `--install` to explicitly import the default CA into that one device before testing. This command uses the CA in `PROXY_MCP_HOME` (default `~/.proxy-mcp`); use the MCP verifier for a daemon configured with a custom CA pair. The first check compiles a small Swift probe with your selected Xcode; subsequent checks use a private cached binary. It requires no third-party simulator driver.
+Add `--install` to explicitly import the default CA into that one device before testing. This command uses the CA in `PROXY_MATE_HOME` (default `~/.proxy-mate`); use the MCP verifier for a daemon configured with a custom CA pair. The first check compiles a small Swift probe with your selected Xcode; subsequent checks use a private cached binary. It requires no third-party simulator driver.
 
 ## What matches Proxyman, and what differs
 
-| Step | proxy-mcp behavior |
+| Step | proxy-mate behavior |
 |---|---|
 | Local signing CA | Reuses and validates a machine-local pair, keeps the private key private, and requires explicit rotation. A private durable journal recovers interrupted managed writes to the intended identity; a partial pair without a valid journal is never replaced silently. |
 | Simulator trust | Uses Apple's `simctl keychain <udid> add-root-cert`, as described in Proxyman's documented automatic Simulator setup. A manually installed profile may instead need the Full Trust toggle in Settings. |
@@ -84,7 +84,7 @@ Apple documents Simulator root-certificate import in [What's new in Simulator](h
 
 | Symptom | Check / action |
 |---|---|
-| MCP unavailable after upgrading | Restart the MCP client connection once; run CLI `status`. Read `~/.proxy-mcp/logs/daemon.err.log` for startup errors. |
+| MCP unavailable after upgrading | Restart the MCP client connection once; run CLI `status`. Read `~/.proxy-mate/logs/daemon.err.log` for startup errors. |
 | Repeated `EPERM ... Documents/.../server.mjs` before startup | Re-run `node src/server.mjs install` from this release. Verify LaunchAgent ProgramArguments and WorkingDirectory point at the private runtime snapshot, not the protected checkout. Do not work around it by resetting TCC or granting every tool Full Disk Access. |
 | `RUNTIME_BUSY` | Another process owns this state directory. Use the existing daemon. After a hard crash, stale-lock recovery takes roughly 10–12 seconds. Do not delete a live lock. |
 | Certificate imported but native TLS fails | Verify the correct device and active CA. Retry targeted setup and the native probe. Check expiry; manual profile installation may require Full Trust. |
@@ -96,7 +96,7 @@ Apple documents Simulator root-certificate import in [What's new in Simulator](h
 | Response body omitted | Default body capture is capped at 5 MiB; decoded gzip/deflate/Brotli bodies have the same cap. Binary/metadata-only bodies may intentionally be omitted. `capture_to_mock` refuses omitted bodies. |
 | Breakpoint timed out | Use narrow rules, inspect `list_pending_breakpoints`, and resolve promptly. Atomic rule edits preserve existing pauses; removing a rule stops new pauses but an existing pause still needs resolution or timeout. Disable overlapping mocks when testing a breakpoint. |
 | VPN/another proxy stopped capture | `diagnose_ios_capture` reports `ROUTING_CHANGED_EXTERNALLY` when the recorded service's PAC no longer matches. Inspect the active service and explicitly reapply routing if appropriate; the daemon will not fight other tools. |
-| Memory-pressure restart | Inspect `get_diagnostics` and stderr. The default 1 GiB sustained-RSS guard drains the proxy and restores routing before exit; launchd restarts it. `PROXY_MCP_MAX_RSS_MB` accepts a threshold of at least 128 MiB. Narrow domains and body capture before increasing it. |
+| Memory-pressure restart | Inspect `get_diagnostics` and stderr. The default 1 GiB sustained-RSS guard drains the proxy and restores routing before exit; launchd restarts it. `PROXY_MATE_MAX_RSS_MB` accepts a threshold of at least 128 MiB. Narrow domains and body capture before increasing it. |
 | Historical logs disappeared from the active file | Retention keeps up to three 5 MiB archives (`daemon.err.log.1`–`.3`, likewise stdout), checked every 30 seconds. This is diagnostic retention, not an audit-log archive. |
 
 `stop_proxy` is an intentional pause inside the running daemon; it does not disable launchd. `uninstall --keep-ca` removes the daemon/routing while preserving CA trust. Omit `--keep-ca` only when you intend to remove the managed trust too. CA rotation changes trust and must be coordinated with devices; it is not a routine restart step.

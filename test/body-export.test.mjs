@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-safe-export-'));
-process.env.PROXY_MCP_HOME = directory;
+process.env.PROXY_MATE_HOME = directory;
 const { bodyForExport } = await import('../src/lib/body-export.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
 test.after(() => fs.rm(directory, { recursive: true, force: true }));

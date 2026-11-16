@@ -1,9 +1,10 @@
 {
-  "name": "@othmansh0/proxy-mcp",
+  "name": "@othmansh0/proxy-mate",
   "version": "0.9.0",
   "description": "Give coding agents access to Simulator HTTP traffic, API mocks, breakpoints and durable QA evidence.",
   "type": "module",
   "bin": {
+    "proxy-mate": "src/server.mjs",
     "proxy-mcp": "src/server.mjs"
   },
   "files": [
@@ -85,11 +86,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/othmansh0/proxy-mcp.git"
+    "url": "git+https://github.com/othmansh0/proxy-mate.git"
   },
-  "homepage": "https://github.com/othmansh0/proxy-mcp#readme",
+  "homepage": "https://github.com/othmansh0/proxy-mate#readme",
   "bugs": {
-    "url": "https://github.com/othmansh0/proxy-mcp/issues"
+    "url": "https://github.com/othmansh0/proxy-mate/issues"
   },
   "bundleDependencies": [
     "@modelcontextprotocol/sdk",

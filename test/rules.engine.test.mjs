@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-rules-'));
+process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-rules-'));
 const { ProxyEngine, compileSafeRegex } = await import('../src/lib/proxy.mjs');
 const { saveRules, loadRules, exportRulesTo, importRulesFrom } = await import('../src/lib/rules.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
@@ -189,7 +189,7 @@ test('fault rules can close a matching connection after a deterministic delay', 
 });
 
 test('Map Local directory serves safe files, falls through misses, and supports delay', async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-map-directory-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-map-directory-'));
   await fs.writeFile(path.join(root, 'fixture.txt'), 'directory fixture');
   const upstream = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -451,7 +451,7 @@ test('dry-run URL matching mirrors mockttp on default ports and method-specific 
 });
 
 test('rule persistence version 2 keeps lifecycle metadata and portable directories', async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-rules-assets-'));
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-rules-assets-'));
   await fs.writeFile(path.join(directory, 'one.json'), '{"one":true}');
   const rules = [{
     rule_id: 'portable-dir', type: 'map_local', url_pattern: 'example', method: 'ANY',
@@ -459,7 +459,7 @@ test('rule persistence version 2 keeps lifecycle metadata and portable directori
   }];
   await saveRules(rules);
   assert.deepEqual(await loadRules(), rules);
-  const exportPath = path.join(process.env.PROXY_MCP_HOME, 'rules-portable.json');
+  const exportPath = path.join(process.env.PROXY_MATE_HOME, 'rules-portable.json');
   await exportRulesTo(rules, exportPath);
   const imported = await importRulesFrom(exportPath);
   assert.equal(imported[0].enabled, false);
@@ -563,10 +563,10 @@ test("a '__proto__' match_query survives the real MCP schema and constrains the 
 
   // The real registry, the real schemas, the real SDK parse — a unit test on
   // the schema object alone would not prove the key reaches the handler.
-  const server = new McpServer({ name: 'proxy-mcp-test', version: '0.0.0' });
+  const server = new McpServer({ name: 'proxy-mate-test', version: '0.0.0' });
   registerMcpTools(server, async (name, args) => tools[name](args));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'proxy-mcp-test-client', version: '0.0.0' });
+  const client = new Client({ name: 'proxy-mate-test-client', version: '0.0.0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   t.after(() => client.close());
 
@@ -637,10 +637,10 @@ test('an empty or prototype-shaped match_headers is refused or kept, never widen
   const tools = makeTools({ engine, pacServer: {}, mode: 'test' });
   const origin = `http://127.0.0.1:${upstreamPort}`;
 
-  const server = new McpServer({ name: 'proxy-mcp-test', version: '0.0.0' });
+  const server = new McpServer({ name: 'proxy-mate-test', version: '0.0.0' });
   registerMcpTools(server, async (name, args) => tools[name](args));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'proxy-mcp-test-client', version: '0.0.0' });
+  const client = new Client({ name: 'proxy-mate-test-client', version: '0.0.0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   t.after(() => client.close());
 
@@ -964,10 +964,10 @@ test('an empty or prototype-shaped match_json_body_including is refused or kept,
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
   });
 
-  const server = new McpServer({ name: 'proxy-mcp-test', version: '0.0.0' });
+  const server = new McpServer({ name: 'proxy-mate-test', version: '0.0.0' });
   registerMcpTools(server, async (name, args) => tools[name](args));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'proxy-mcp-test-client', version: '0.0.0' });
+  const client = new Client({ name: 'proxy-mate-test-client', version: '0.0.0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   t.after(() => client.close());
 

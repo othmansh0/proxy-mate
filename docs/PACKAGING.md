@@ -1,9 +1,9 @@
 # Public releases and versioning
 
-Package: **`@othmansh0/proxy-mcp`** on **npm**, with source and release assets at `othmansh0/proxy-mcp`. GitHub Packages is no longer required. People install a published version with:
+Package: **`@othmansh0/proxy-mate`** on **npm**, with source and release assets at `othmansh0/proxy-mate`. GitHub Packages is no longer required. People install a published version with:
 
 ```bash
-npx --yes @othmansh0/proxy-mcp@latest init --client claude
+npx --yes @othmansh0/proxy-mate@latest init --client claude
 ```
 
 The first public release candidate in this checkout is **0.9.0**. It is pre-1.0 software; keep the documented platform and capture limits visible. Preparing this checkout does not itself publish anything, change repository visibility or push a release tag.
@@ -39,7 +39,7 @@ npm trusted publishing is configured on an existing package, so first publish th
 npm ci
 npm run release:pack
 npm run release:smoke
-npm publish ./artifacts/release/othmansh0-proxy-mcp-0.9.0.tgz --registry=https://registry.npmjs.org --access=public --tag=latest
+npm publish ./artifacts/release/othmansh0-proxy-mate-0.9.0.tgz --registry=https://registry.npmjs.org --access=public --tag=latest
 ```
 
 This is the first public upload. Review `manifest.json`, `SHA256SUMS` and the tarball before publishing. The prepack hook removes regenerable node-gyp output containing absolute build paths; registry-provided Darwin prebuilds remain and are tested in the installed consumer. Do not upload capture files, local CA material, configuration backups or credentials. `release:pack` excludes those paths and bundles the audited runtime dependencies. A checked and already-built artifact may be published directly instead of rebuilding it.
@@ -48,12 +48,12 @@ The manual bootstrap does not claim CI provenance. Subsequent OIDC publications 
 
 ### 4. Configure tokenless npm trusted publishing
 
-In npm: **Packages → @othmansh0/proxy-mcp → Settings → Trusted publishing → GitHub Actions**. Set:
+In npm: **Packages → @othmansh0/proxy-mate → Settings → Trusted publishing → GitHub Actions**. Set:
 
 | Field | Value |
 | --- | --- |
 | Organization or user | `othmansh0` |
-| Repository | `proxy-mcp` |
+| Repository | `proxy-mate` |
 | Workflow filename | `release.yml` |
 | Environment | `npm` |
 | Allowed actions | Allow direct `npm publish` |
@@ -98,7 +98,7 @@ npm version prerelease --preid=rc -m "Release %s"
 git push origin HEAD --follow-tags
 ```
 
-Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh0/proxy-mcp@next init --client claude`.
+Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh0/proxy-mate@next init --client claude`.
 
 ## What is automated, and what is not
 

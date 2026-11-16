@@ -178,14 +178,14 @@ export class WebSocketStore {
   /** A portable, JSON-serializable snapshot. It retains ring cursors exactly. */
   exportSnapshot({ includeSensitive = true } = {}) {
     return {
-      format: 'proxy-mcp.websocket-store/v1', exported_at: nowIso(this.clock),
+      format: 'proxy-mate.websocket-store/v1', exported_at: nowIso(this.clock),
       connections: this.connectionOrder.map((id) => this.connections.get(id)).filter(Boolean).map((connection) => serializeConnection(connection, includeSensitive)),
     };
   }
 
   importSnapshot(snapshot, { replace = true } = {}) {
-    if (!snapshot || snapshot.format !== 'proxy-mcp.websocket-store/v1' || !Array.isArray(snapshot.connections)) {
-      throw new WebSocketStoreError('INVALID_SNAPSHOT', 'snapshot must be a proxy-mcp.websocket-store/v1 export');
+    if (!snapshot || !['proxy-mate.websocket-store/v1', 'proxy-mcp.websocket-store/v1'].includes(snapshot.format) || !Array.isArray(snapshot.connections)) {
+      throw new WebSocketStoreError('INVALID_SNAPSHOT', 'snapshot must be a proxy-mate.websocket-store/v1 export');
     }
     if (replace) { this.connections.clear(); this.connectionOrder.length = 0; }
     for (const raw of snapshot.connections) this.#importConnection(raw);
@@ -198,11 +198,11 @@ export class WebSocketStore {
   exportTranscript({ connectionId, includeSensitive = true } = {}) {
     const connection = this.connections.get(normalizeConnectionId(connectionId));
     if (!connection) throw new WebSocketStoreError('WEBSOCKET_NOT_FOUND', `WebSocket connection was not found: ${connectionId}`);
-    return { format: 'proxy-mcp.websocket-transcript/v1', exported_at: nowIso(this.clock), connection: serializeConnection(connection, includeSensitive) };
+    return { format: 'proxy-mate.websocket-transcript/v1', exported_at: nowIso(this.clock), connection: serializeConnection(connection, includeSensitive) };
   }
 
   importTranscript(transcript, { replace = false } = {}) {
-    if (!transcript || transcript.format !== 'proxy-mcp.websocket-transcript/v1' || !transcript.connection) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxy-mcp.websocket-transcript/v1 export');
+    if (!transcript || !['proxy-mate.websocket-transcript/v1', 'proxy-mcp.websocket-transcript/v1'].includes(transcript.format) || !transcript.connection) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxy-mate.websocket-transcript/v1 export');
     if (replace) this.connections.delete(normalizeConnectionId(transcript.connection.id));
     this.#importConnection(transcript.connection);
     this.#enforceConnectionRetention(); this.#recountAndLimitBytes(); this.#persist();
@@ -350,10 +350,10 @@ export class JsonlWebSocketStoreBackend {
 
 /** Produce replay data only; this proxy intentionally cannot inject frames into a live socket. */
 export function buildWebSocketReplayPlan(transcript, { mutations = [] } = {}) {
-  if (!transcript || transcript.format !== 'proxy-mcp.websocket-transcript/v1') throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxy-mcp.websocket-transcript/v1 export');
+  if (!transcript || !['proxy-mate.websocket-transcript/v1', 'proxy-mcp.websocket-transcript/v1'].includes(transcript.format)) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxy-mate.websocket-transcript/v1 export');
   const connection = structuredClone(transcript.connection);
   for (const mutation of mutations) applyFrameMutation(connection.messages, mutation);
-  return { format: 'proxy-mcp.websocket-replay-plan/v1', live_injection_supported: false, reason: 'Captured WebSocket frames are export/replay data; live frame injection is not supported.', connection_id: connection.id, frames: connection.messages.map((message) => ({ sequence: message.sequence, direction: message.direction, timestamp: message.timestamp, data: message.data })) };
+  return { format: 'proxy-mate.websocket-replay-plan/v1', live_injection_supported: false, reason: 'Captured WebSocket frames are export/replay data; live frame injection is not supported.', connection_id: connection.id, frames: connection.messages.map((message) => ({ sequence: message.sequence, direction: message.direction, timestamp: message.timestamp, data: message.data })) };
 }
 
 function applyFrameMutation(messages, mutation = {}) {

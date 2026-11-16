@@ -7,7 +7,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MCP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-app-gateway-'));
+process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-app-gateway-'));
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { AppProxyGateway } = await import('../src/lib/app-gateway.mjs');
 

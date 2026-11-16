@@ -1,3 +1,4 @@
+import { readEnvironment } from './environment.mjs';
 // Proxy engine wrapper: thin layer over mockttp that adds our flow capture,
 // large-body spillover, mock-rule registration with file-backed bodies,
 // rich matchers, and diagnostic events.
@@ -30,7 +31,7 @@ import {
 const CA_DIR = path.join(STATE_DIR, 'ca');
 const CA_KEY = path.join(CA_DIR, 'key.pem');
 const CA_CERT = path.join(CA_DIR, 'cert.pem');
-const configuredMaxFlows = Number.parseInt(process.env.PROXY_MCP_MAX_FLOWS || '500', 10);
+const configuredMaxFlows = Number.parseInt(readEnvironment('PROXY_MATE_MAX_FLOWS') || '500', 10);
 const MAX_FLOWS = Number.isInteger(configuredMaxFlows) && configuredMaxFlows > 0
   ? Math.min(configuredMaxFlows, 10_000)
   : 500;
@@ -54,7 +55,7 @@ export async function ensureCA() {
     }
     if (!existsSync(CA_KEY)) {
       const { key, cert } = await mockttp.generateCACertificate({
-        subject: { commonName: 'proxy-mcp CA', organizationName: 'proxy-mcp' },
+        subject: { commonName: 'proxy-mate CA', organizationName: 'proxy-mate' },
       });
       await commitCaPair(CA_DIR, { key, cert });
     }
@@ -106,7 +107,7 @@ export async function rotateCA({ archivePrivateKey = false } = {}) {
     let previousFingerprint = null;
     try { previousFingerprint = new crypto.X509Certificate(oldCert).fingerprint256.replaceAll(':', '').toLowerCase(); } catch { /* explicit repair of an incomplete/corrupt CA */ }
     // Generate before touching the working pair, under the same lock as ensureCA.
-    const { key, cert } = await mockttp.generateCACertificate({ subject: { commonName: 'proxy-mcp CA', organizationName: 'proxy-mcp' } });
+    const { key, cert } = await mockttp.generateCACertificate({ subject: { commonName: 'proxy-mate CA', organizationName: 'proxy-mate' } });
     const archive = oldKey || oldCert ? path.join(CA_DIR, 'archive', `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`) : null;
     if (archive) {
       await fs.mkdir(archive, { recursive: true, mode: 0o700 });
@@ -138,11 +139,11 @@ export class ProxyEngine {
     sessionId = 'default',
     webSocketStore,
     breakpointManager = new BreakpointManager({
-      allowSensitive: process.env.PROXY_MCP_ALLOW_SENSITIVE === '1',
+      allowSensitive: readEnvironment('PROXY_MATE_ALLOW_SENSITIVE') === '1',
     }),
-    storeSensitiveData = process.env.PROXY_MCP_STORE_SENSITIVE === '1',
+    storeSensitiveData = readEnvironment('PROXY_MATE_STORE_SENSITIVE') === '1',
     maxPendingPersistence = 2_000,
-    failClosedOnPersistenceError = process.env.PROXY_MCP_PERSISTENCE_FAIL_CLOSED === '1',
+    failClosedOnPersistenceError = readEnvironment('PROXY_MATE_PERSISTENCE_FAIL_CLOSED') === '1',
     pluginStore = new PluginStore(),
   } = {}) {
     this.server = null;
@@ -235,7 +236,7 @@ export class ProxyEngine {
       throw codedEngineError('INVALID_CAPTURE_BODY_MODE', 'capture_body_mode must be metadata_only, text, or all.');
     }
     if (captureBodyMode === 'all' && !this.storeSensitiveData) {
-      throw codedEngineError('SENSITIVE_STORAGE_NOT_GRANTED', 'capture_body_mode=all requires PROXY_MCP_STORE_SENSITIVE=1.');
+      throw codedEngineError('SENSITIVE_STORAGE_NOT_GRANTED', 'capture_body_mode=all requires PROXY_MATE_STORE_SENSITIVE=1.');
     }
     this.captureBodyMode = captureBodyMode;
     await this.pluginStore.init();
@@ -287,7 +288,7 @@ export class ProxyEngine {
       this.server = null;
       this.port = null;
       if (e?.code === 'EADDRINUSE') {
-        const wrapped = new Error(`proxy port :${port} is busy — another process is listening (try \`proxy-mcp doctor\` to inspect and clear orphans).`);
+        const wrapped = new Error(`proxy port :${port} is busy — another process is listening (try \`proxy-mate doctor\` to inspect and clear orphans).`);
         wrapped.code = 'PROXY_PORT_BUSY';
         wrapped.cause = e;
         throw wrapped;
@@ -738,7 +739,7 @@ export class ProxyEngine {
       // grant: a websocket_offline plugin is never a valid live rule stage,
       // grant or no grant, so that diagnosis must win over the grant error.
       // Only a plugin that could otherwise run live (request/response) is
-      // gated behind PROXY_MCP_ENABLE_TRANSFORM_PLUGINS.
+      // gated behind PROXY_MATE_ENABLE_TRANSFORM_PLUGINS.
       const plugin = await this.pluginStore.get(rule.plugin_id);
       if (!plugin) throw codedEngineError('PLUGIN_NOT_FOUND', `Plugin was not found: ${rule.plugin_id}`);
       if (!plugin.enabled) throw codedEngineError('PLUGIN_DISABLED', `Plugin is disabled: ${rule.plugin_id}`);
@@ -984,7 +985,7 @@ export class ProxyEngine {
           };
         });
       }
-      return builder.thenReply(rule.status, rule.body_inline ?? rule.body ?? 'Blocked by proxy-mcp', {
+      return builder.thenReply(rule.status, rule.body_inline ?? rule.body ?? 'Blocked by proxy-mate', {
         'content-type': rule.content_type ?? 'text/plain; charset=utf-8',
         ...rule.headers,
       });
@@ -1162,7 +1163,7 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
       content_type: input.content_type ?? (type === 'blacklist' ? 'text/plain; charset=utf-8' : 'application/json'),
       headers: input.headers ? { ...input.headers } : {},
       body_inline: type === 'blacklist'
-        ? (input.body_inline ?? input.body ?? 'Blocked by proxy-mcp')
+        ? (input.body_inline ?? input.body ?? 'Blocked by proxy-mate')
         : null,
       body_file: bodyFile,
       directory,

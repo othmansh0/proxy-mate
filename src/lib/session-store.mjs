@@ -11,7 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { STATE_DIR } from './config.mjs';
 
-const FORMAT = 'proxy-mcp.session/v1';
+const FORMAT = 'proxy-mate.session/v1';
 const SCHEMA_VERSION = 1;
 const DATABASE_SCHEMA_VERSION = 2;
 const DATABASE_FILE = 'sessions.sqlite3';
@@ -830,7 +830,7 @@ function sanitizeForExport(session) {
 }
 
 function validateImport(document) {
-  if (!document || typeof document !== 'object' || document.format !== FORMAT || !document.session || typeof document.session !== 'object') {
+  if (!document || typeof document !== 'object' || ![FORMAT, 'proxy-mcp.session/v1'].includes(document.format) || !document.session || typeof document.session !== 'object') {
     throw new SessionStoreError('INVALID_IMPORT', `Expected ${FORMAT} document`);
   }
   return document.session;

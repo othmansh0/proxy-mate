@@ -9,7 +9,7 @@ import { SessionStore } from '../src/lib/session-store.mjs';
 
 const requested = Number.parseInt(process.argv[2] ?? '10000', 10);
 const flowCount = Number.isInteger(requested) && requested > 0 ? Math.min(requested, 100_000) : 10_000;
-const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-storage-benchmark-'));
+const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-storage-benchmark-'));
 const store = new SessionStore({
   rootDir,
   retention: { max_flows: flowCount + 1, max_bytes: 2 * 1024 * 1024 * 1024, max_age_ms: 86_400_000 },

@@ -8,13 +8,13 @@ import { connectionAttemptTimeout, configureConnectionAttempts } from '../src/li
 test('connection attempt configuration rejects invalid values without changing the process policy', () => {
   const before = net.getDefaultAutoSelectFamilyAttemptTimeout();
   for (const value of ['', 'bad', '0', '-1', '9', '10001', '2.5', 'Infinity', '2000 trailing']) {
-    assert.throws(() => configureConnectionAttempts({ PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS: value }), {
+    assert.throws(() => configureConnectionAttempts({ PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS: value }), {
       code: 'INVALID_CONNECT_ATTEMPT_TIMEOUT',
     });
     assert.equal(net.getDefaultAutoSelectFamilyAttemptTimeout(), before);
   }
   assert.equal(connectionAttemptTimeout({}), 2000);
-  assert.equal(connectionAttemptTimeout({ PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS: '1500' }), 1500);
+  assert.equal(connectionAttemptTimeout({ PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS: '1500' }), 1500);
 });
 
 test('a slow viable connection survives the default policy with both address families enabled', { timeout: 15000 }, async (t) => {
@@ -55,7 +55,7 @@ test('a slow viable connection survives the default policy with both address fam
         if (!connected) { saturated = true; break; }
       }
       assert.equal(saturated, true, 'The fixture must delay TCP connections before testing the policy.');
-      configureConnectionAttempts(timeout === undefined ? {} : { PROXY_MCP_CONNECT_ATTEMPT_TIMEOUT_MS: String(timeout) });
+      configureConnectionAttempts(timeout === undefined ? {} : { PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS: String(timeout) });
       assert.equal(net.getDefaultAutoSelectFamily(), true);
       resume = setTimeout(() => child.kill('SIGCONT'), 600);
       const socket = new net.Socket();

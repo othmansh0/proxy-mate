@@ -25,7 +25,7 @@ test('registration preserves unrelated settings, private backups, symlinks and r
   const next = JSON.parse(await fs.readFile(target, 'utf8'));
   assert.equal(next.theme, 'dark');
   assert.deepEqual(next.mcpServers.another, { command: 'another' });
-  assert.deepEqual(next.mcpServers['proxy-mcp'], plan.entry);
+  assert.deepEqual(next.mcpServers['proxy-mate'], plan.entry);
   assert.equal((await fs.lstat(plan.config_path)).isSymbolicLink(), true);
   assert.equal(await fs.readFile(result.backup_path, 'utf8'), original);
   assert.equal((await fs.stat(result.backup_path)).mode & 0o777, 0o600);
@@ -85,7 +85,7 @@ test('custom Claude directory and all JSON clients get stable absolute entries',
     if (client === 'claude') assert.equal(plan.config_path, path.join(home, 'custom/.claude.json'));
     assert.equal(path.isAbsolute(plan.entry.command), true);
     assert.equal(path.isAbsolute(plan.entry.args[0]), true);
-    assert.equal(plan.entry.env.PROXY_MCP_HOME, path.join(home, 'state'));
+    assert.equal(plan.entry.env.PROXY_MATE_HOME, path.join(home, 'state'));
     await validateClientRegistration(plan);
     assert.ok(['registered', 'manual'].includes((await registerClient(plan)).status));
   }
@@ -114,7 +114,7 @@ test('real CLI previews setup without creating daemon state and rejects restrict
   const run = promisify(execFile);
   const root = path.resolve(import.meta.dirname, '..');
   const result = await run(process.execPath, ['src/server.mjs', 'init', '--client', 'json', '--dry-run'], {
-    cwd: root, env: { ...process.env, PROXY_MCP_HOME: state },
+    cwd: root, env: { ...process.env, PROXY_MATE_HOME: state },
   });
   assert.equal(JSON.parse(result.stdout).status, 'preview');
   await assert.rejects(fs.access(state), { code: 'ENOENT' });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { releaseVersion, checkManifest, notesForVersion, promoteUnreleased, publishedArtifactMatches } from '../scripts/lib/release-policy.mjs';
 
 function manifests(version = '0.9.0') {
-  const pkg = { name: '@othmansh0/proxy-mcp', version, publishConfig: { registry: 'https://registry.npmjs.org', access: 'public' },
+  const pkg = { name: '@othmansh0/proxy-mate', version, publishConfig: { registry: 'https://registry.npmjs.org', access: 'public' },
     dependencies: { required: '1.0.0' }, optionalDependencies: { optional: '1.0.0' }, bundleDependencies: ['required', 'optional'] };
   const lock = { name: pkg.name, version, packages: { '': { version } } };
   return { pkg, lock };
@@ -41,7 +41,7 @@ test('version hooks promote committed Unreleased notes and preserve historical e
 });
 
 test('retrying a release accepts only the identical already-published npm artifact', () => {
-  const manifest = { name: '@othmansh0/proxy-mcp', version: '0.9.0', integrity: 'sha512-fixture' };
+  const manifest = { name: '@othmansh0/proxy-mate', version: '0.9.0', integrity: 'sha512-fixture' };
   assert.equal(publishedArtifactMatches({ ...manifest, dist: { integrity: manifest.integrity } }, manifest), true);
   assert.throws(() => publishedArtifactMatches({ ...manifest, dist: { integrity: 'sha512-different' } }, manifest), /different artifact/);
 });

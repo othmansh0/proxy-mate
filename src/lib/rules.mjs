@@ -1,5 +1,5 @@
 // Mock rule persistence: serialize/deserialize the rule registry to
-// ~/.proxy-mcp/rules.json so rules survive daemon restarts and can be
+// ~/.proxy-mate/rules.json so rules survive daemon restarts and can be
 // shared across sessions.
 //
 // Rule schema (one object per rule):

@@ -82,7 +82,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   const onboardingPortal = new DeviceOnboardingPortal();
   const operatorUi = new OperatorUiServer({
     providers: {
-      health: async () => ({ ok: true, service: 'proxy-mcp' }),
+      health: async () => ({ ok: true, service: 'proxy-mate' }),
       status: async () => {
         const status = await get_proxy_status();
         return {
@@ -739,7 +739,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function get_version() {
-    return { name: 'proxy-mcp', version: SERVER_VERSION, node: process.version, mode };
+    return { name: 'proxy-mate', version: SERVER_VERSION, node: process.version, mode };
   }
 
   async function get_started(args = {}) { return gettingStarted(args, await get_proxy_status()); }
@@ -885,7 +885,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     document.redacted = !includeSensitive;
     const out = args.path
       ? await authorizeWritePath(args.path)
-      : path.join(HAR_EXPORT_DIR, `${sessionId}-${Date.now()}.proxy-mcp-session.json`);
+      : path.join(HAR_EXPORT_DIR, `${sessionId}-${Date.now()}.proxy-mate-session.json`);
     await fs.mkdir(path.dirname(out), { recursive: true, mode: 0o700 });
     await fs.writeFile(out, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
     return { path: out, session_id: sessionId, flow_count: document.session.flows.length,
@@ -1055,7 +1055,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     if (liveTransformGrantEnabled()) return;
     const error = new Error(`Live transform plugins require ${TRANSFORM_PLUGIN_GRANT_ENV}=1 on the server.`);
     error.code = 'TRANSFORM_PLUGINS_NOT_ENABLED';
-    error.recovery = [`Set ${TRANSFORM_PLUGIN_GRANT_ENV}=1 only for a trusted local proxy-mcp deployment, then restart the server.`];
+    error.recovery = [`Set ${TRANSFORM_PLUGIN_GRANT_ENV}=1 only for a trusted local proxy-mate deployment, then restart the server.`];
     throw error;
   }
 
@@ -1914,7 +1914,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return protocolCapabilities();
   }
 
-  // Flow bodies may have been spilled to proxy-mcp's private state directory.
+  // Flow bodies may have been spilled to proxy-mate's private state directory.
   // Read at most the explicit validation cap; the validator receives metadata
   // for larger bodies and reports that schema validation was skipped.
   async function hydrateOpenApiFlowBodies(flow, maxBodyBytes) {
@@ -2113,7 +2113,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
           postData: f.request?.body_size || f.request?.body_inline || f.request?.body_path || f.request?.body_base64 ? {
             mimeType: f.request?.headers?.['content-type'] ?? 'application/octet-stream',
             text: requestBody?.omitted ? '' : requestBody.text ?? requestBody.buffer.toString('base64'),
-            ...(requestBody?.omitted ? { _proxy_mcp_omitted: true, _proxy_mcp_omission_reason: requestBody.reason } : {}),
+            ...(requestBody?.omitted ? { _proxy_mate_omitted: true, _proxy_mate_omission_reason: requestBody.reason } : {}),
             ...(includeSensitive && !requestBody?.omitted && requestBody.text === undefined ? { _encoding: 'base64' } : {}),
           } : undefined,
           headersSize: -1,
@@ -2131,7 +2131,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
             text: responseBody.omitted ? '' : responseBody.text ?? responseBody.buffer.toString('base64'),
             encoding: !responseBody.omitted && responseBody.text === undefined ? 'base64' : undefined,
             ...(responseBody.omitted
-              ? { _proxy_mcp_omitted: true, _proxy_mcp_omission_reason: responseBody.reason }
+              ? { _proxy_mate_omitted: true, _proxy_mate_omission_reason: responseBody.reason }
               : {}),
           },
           redirectURL: includeSensitive ? f.response.headers?.location ?? '' : redactUrl(f.response.headers?.location ?? ''),
@@ -2149,7 +2149,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const har = {
       log: {
         version: '1.2',
-        creator: { name: 'proxy-mcp', version: SERVER_VERSION },
+        creator: { name: 'proxy-mate', version: SERVER_VERSION },
         entries,
       },
     };

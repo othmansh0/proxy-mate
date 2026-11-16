@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readEnvironment } from './lib/environment.mjs';
 // A thin stdio bridge: no proxy engine, system routing or runtime ownership.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -28,7 +29,7 @@ const dispatch = rememberCaptureLease(async (tool, args, context = {}) => {
     return gettingStarted(args, status, { daemonReachable: Boolean(handshake) });
   }
   if (!handshake) throw Object.assign(new Error('The shared daemon is unavailable. This MCP bridge remains connected; use get_started or search_docs for recovery.'), {
-    code: 'DAEMON_UNAVAILABLE', retryable: true, recovery: ['Run proxy-mcp status and inspect its daemon log.', 'Retry after recovery; no MCP restart is needed.'],
+    code: 'DAEMON_UNAVAILABLE', retryable: true, recovery: ['Run proxy-mate status and inspect its daemon log.', 'Retry after recovery; no MCP restart is needed.'],
   });
   const result = await callDaemon({ ...handshake, tool, args, signal: context.signal });
   if (!/^get_|^list_|^search_|^wait_/.test(tool)) void subscriptions.notifyStatus().catch(() => {});
@@ -36,7 +37,7 @@ const dispatch = rememberCaptureLease(async (tool, args, context = {}) => {
   if (flowId && /flow|request|curl/.test(tool)) void subscriptions.notifyLiveFlow(flowId).catch(() => {});
   return result;
 });
-registerMcpTools(mcp, dispatch, { legacyAliases: process.env.PROXY_MCP_LEGACY_OUTPUT === '1' });
+registerMcpTools(mcp, dispatch, { legacyAliases: readEnvironment('PROXY_MATE_LEGACY_OUTPUT') === '1' });
 registerMcpResources(mcp, dispatch);
 registerMcpPrompts(mcp);
 
@@ -52,7 +53,7 @@ process.once('SIGINT', () => void close());
 process.stdin.once('end', () => void close());
 process.stdin.once('close', () => void close());
 process.stdout.on('error', (error) => {
-  if (error.code !== 'EPIPE') process.stderr.write(`[proxy-mcp client] output failed: ${error.message}\n`);
+  if (error.code !== 'EPIPE') process.stderr.write(`[proxy-mate client] output failed: ${error.message}\n`);
   void close(error.code === 'EPIPE' ? 0 : 1);
 });
 await mcp.connect(new StdioServerTransport());

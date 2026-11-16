@@ -15,7 +15,7 @@ export async function clientRegistrationPlan({ client = 'claude', home = os.home
   nodeBin = process.execPath, env = process.env } = {}) {
   if (!SETUP_CLIENTS.includes(client)) throw new Error(`Choose --client ${SETUP_CLIENTS.join('|')}.`);
   const entry = { command: await stableNodePath(nodeBin), args: [path.join(stateDir, 'runtime/current/src/client.mjs')],
-    env: { PROXY_MCP_HOME: stateDir } };
+    env: { PROXY_MATE_HOME: stateDir } };
   const files = {
     claude: path.join(env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : home, '.claude.json'),
     cursor: path.join(home, '.cursor/mcp.json'),
@@ -24,7 +24,7 @@ export async function clientRegistrationPlan({ client = 'claude', home = os.home
   };
   return { client, config_path: files[client] ?? null, backup_dir: path.join(stateDir, 'setup-backups'), entry,
     ...(client === 'codex' ? { executable: await findExecutable('codex', env),
-      arguments: ['mcp', 'add', SERVER_NAME, '--env', `PROXY_MCP_HOME=${stateDir}`, '--', entry.command, ...entry.args] } : {}) };
+      arguments: ['mcp', 'add', SERVER_NAME, '--env', `PROXY_MATE_HOME=${stateDir}`, '--', entry.command, ...entry.args] } : {}) };
 }
 
 export async function validateClientRegistration(plan) {
@@ -36,20 +36,34 @@ export async function registerClient(plan, { run = execute } = {}) {
   if (plan.client === 'json') return { status: 'manual', config: { mcpServers: { [SERVER_NAME]: plan.entry } } };
   const target = await resolveConfigPath(plan.config_path);
   await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  const release = await lockfile.lock(`${target}.proxy-mcp-registration`, { realpath: false, retries: 0 });
+  const release = await lockfile.lock(`${target}.proxy-mate-registration`, { realpath: false, retries: 0 });
   try {
     const original = await readOptional(target);
     if (plan.client === 'codex') {
+      const options = { timeout: 30_000, maxBuffer: 1024 * 1024,
+        env: { ...process.env, CODEX_HOME: path.dirname(plan.config_path) } };
+      let legacy;
+      try {
+        const { stdout } = await run(plan.executable, ['mcp', 'get', 'proxy-mcp', '--json'], options);
+        legacy = JSON.parse(stdout).transport;
+      } catch (error) {
+        if (!/No MCP server named/.test(error.stderr ?? error.message)) throw error;
+      }
       const backup = await backupConfig(plan, original);
-      try { await run(plan.executable, plan.arguments, { timeout: 30_000, maxBuffer: 1024 * 1024 }); }
+      try {
+        await run(plan.executable, plan.arguments, options);
+        if (isManagedLegacyEntry(legacy, plan.entry)) await run(plan.executable, ['mcp', 'remove', 'proxy-mcp'], options);
+      }
       catch { throw new Error(`Codex registration failed. The service is installed; retry init --client codex. Configuration backup: ${backup ?? 'no previous file'}.`); }
       return { status: 'registered', config_path: target, backup_path: backup };
     }
     const config = parseJsonConfig(original, target);
-    if (JSON.stringify(config.mcpServers?.[SERVER_NAME]) === JSON.stringify(plan.entry)) {
+    const migrateLegacy = isManagedLegacyEntry(config.mcpServers?.['proxy-mcp'], plan.entry);
+    if (!migrateLegacy && JSON.stringify(config.mcpServers?.[SERVER_NAME]) === JSON.stringify(plan.entry)) {
       return { status: 'unchanged', config_path: target, backup_path: null };
     }
     const next = { ...config, mcpServers: { ...config.mcpServers, [SERVER_NAME]: plan.entry } };
+    if (migrateLegacy) delete next.mcpServers['proxy-mcp'];
     const backup = await backupConfig(plan, original);
     const temporary = `${target}.${randomUUID()}.tmp`;
     try {
@@ -59,6 +73,14 @@ export async function registerClient(plan, { run = execute } = {}) {
     } finally { await fs.rm(temporary, { force: true }); }
     return { status: 'registered', config_path: target, backup_path: backup };
   } finally { await release(); }
+}
+
+function isManagedLegacyEntry(entry, replacement) {
+  // Only retire our own stable bridge, never an unrelated custom server that
+  // happens to use the former name. Installations keep their existing root.
+  return Boolean(entry && entry.command === replacement.command
+    && Array.isArray(entry.args) && entry.args.length === 1
+    && entry.args[0] === replacement.args[0]);
 }
 
 async function readOptional(file) {

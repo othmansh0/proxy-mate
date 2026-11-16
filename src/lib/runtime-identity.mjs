@@ -9,7 +9,7 @@ export async function runtimeIdentity() {
   let marker = null;
   try { marker = JSON.parse(await fs.readFile(path.join(root, '.proxy-runtime.json'), 'utf8')); } catch { /* checkout */ }
   return { version: SERVER_VERSION, node: process.version, node_executable: process.execPath,
-    entry_root: root, installed: marker?.managed_by === 'proxy-mcp',
+    entry_root: root, installed: ['proxy-mate', 'proxy-mcp'].includes(marker?.managed_by),
     content_sha256: marker?.content_sha256 ?? null, dependency_lock_sha256: marker?.dependency_lock_sha256 ?? null,
     staged_at: marker?.staged_at ?? null };
 }

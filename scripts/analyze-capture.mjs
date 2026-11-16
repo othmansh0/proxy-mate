@@ -8,10 +8,10 @@ if (!args.input) usage('Missing --input <capture.json|har>.');
 
 try {
   const document = JSON.parse(await fs.readFile(args.input, 'utf8'));
-  const flows = document?.format === 'proxy-mcp.session/v1'
+  const flows = ['proxy-mate.session/v1', 'proxy-mcp.session/v1'].includes(document?.format)
     ? document.session?.flows
     : document?.log?.entries?.map(fromHarEntry);
-  if (!Array.isArray(flows)) usage('Input must be a proxy-mcp capture-session export or HAR document.');
+  if (!Array.isArray(flows)) usage('Input must be a proxy-mate capture-session export or HAR document.');
   const analysis = analyzeFlows(flows, { slow_limit: args.slowLimit, group_limit: args.groupLimit });
   let assertions = null;
   if (args.assertions) assertions = evaluateCaptureAssertions(
@@ -21,7 +21,7 @@ try {
   process.stdout.write(`${JSON.stringify({ analysis, assertions }, null, 2)}\n`);
   if (assertions && !assertions.passed) process.exitCode = 1;
 } catch (error) {
-  process.stderr.write(`proxy-mcp analyze failed [${error.code ?? 'ERROR'}]: ${error.message}\n`);
+  process.stderr.write(`proxy-mate analyze failed [${error.code ?? 'ERROR'}]: ${error.message}\n`);
   process.exitCode = 2;
 }
 

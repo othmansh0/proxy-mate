@@ -6,7 +6,7 @@ import path from 'node:path';
 import { SessionStore, SessionStoreError } from '../src/lib/session-store.mjs';
 
 async function makeStore(options = {}) {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-sessions-'));
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-sessions-'));
   return { rootDir, store: new SessionStore({ rootDir, ...options }) };
 }
 
@@ -69,7 +69,7 @@ test('session settings can be renamed, tagged, and retention-updated atomically'
 });
 
 test('legacy JSON snapshots migrate once into SQLite without losing trusted body paths', async () => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-legacy-sessions-'));
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-legacy-sessions-'));
   const legacy = {
     schema_version: 1,
     id: 'legacy',
@@ -109,7 +109,7 @@ test('concurrent appends are serialized without lost rows or duplicate sequences
 });
 
 test('corrupt legacy JSON stays recoverable and is reported without blocking valid sessions', async () => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-corrupt-legacy-'));
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-corrupt-legacy-'));
   await fs.writeFile(path.join(rootDir, 'damaged.json'), '{not valid json', { mode: 0o600 });
   const store = new SessionStore({ rootDir });
   await store.createSession({ id: 'healthy', name: 'Healthy' });
@@ -120,7 +120,7 @@ test('corrupt legacy JSON stays recoverable and is reported without blocking val
 });
 
 test('a non-SQLite database fails with a machine-actionable corruption error', async () => {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mcp-corrupt-db-'));
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-corrupt-db-'));
   await fs.writeFile(path.join(rootDir, 'sessions.sqlite3'), 'not a sqlite database', { mode: 0o600 });
   const store = new SessionStore({ rootDir });
   await assert.rejects(
@@ -158,7 +158,7 @@ test('purge and portable import/export remove unsafe local body paths', async ()
     id: 'captured', request: { body_path: '/private/tmp/request.bin' }, response: { body_path: '/private/tmp/response.bin' },
   } });
   const portable = await store.exportSession('source');
-  assert.equal(portable.format, 'proxy-mcp.session/v1');
+  assert.equal(portable.format, 'proxy-mate.session/v1');
   assert.equal(portable.session.flows[0].request.body_path, undefined);
   assert.equal(portable.session.flows[0].response.body_path, undefined);
 

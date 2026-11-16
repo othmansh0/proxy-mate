@@ -7,10 +7,10 @@ export function releaseVersion(version) {
 }
 
 export function checkManifest(pkg, lock, { access, registry, tag } = {}) {
-  if (pkg.name !== '@othmansh0/proxy-mcp' || pkg.publishConfig?.registry !== 'https://registry.npmjs.org'
+  if (pkg.name !== '@othmansh0/proxy-mate' || pkg.publishConfig?.registry !== 'https://registry.npmjs.org'
     || pkg.publishConfig?.access !== 'public' || pkg.private
     || access && access !== 'public' || registry && registry.replace(/\/$/, '') !== 'https://registry.npmjs.org') {
-    throw new Error('Publish @othmansh0/proxy-mcp only to public npm with --access public.');
+    throw new Error('Publish @othmansh0/proxy-mate only to public npm with --access public.');
   }
   const release = releaseVersion(pkg.version);
   if (release.prerelease && (tag ?? pkg.publishConfig.tag ?? 'latest') === 'latest') {
