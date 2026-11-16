@@ -46,10 +46,10 @@ Automatic upgrades preserve proxy/control ports, textual capture policy and TLS 
 
 For the former package name, first read [Migrate from proxy-mcp](#migrate-from-proxy-mcp).
 
-If you previously mapped this scope to GitHub Packages, point it at npm once:
+The public package uses `@othmansh01`, separate from the former private `@othmansh0` scope. If you previously mapped `@othmansh01` to GitHub Packages, point it at npm once:
 
 ```bash
-npm config set @othmansh0:registry https://registry.npmjs.org --location=user
+npm config set @othmansh01:registry https://registry.npmjs.org --location=user
 ```
 
 Then run the README init command. A GitHub Packages token is not needed for public releases.

@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { checkManifest, releaseVersion, notesForVersion, promoteUnreleased, publishedArtifactMatches } from './lib/release-policy.mjs';
+import { checkManifest, checkReleaseToolchain, releaseVersion, notesForVersion, promoteUnreleased, publishedArtifactMatches } from './lib/release-policy.mjs';
 
 const execute = promisify(execFile);
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -49,10 +49,11 @@ async function validate() {
 }
 
 async function pack() {
-  if (process.versions.node !== '24.22.2' || (await npm(['--version'])).stdout.trim() !== '11.19.1') {
-    throw new Error('Reproducible release builds require Node 24.22.2 and npm 11.19.1. Consumer installs still support Node 22+.');
-  }
+  checkReleaseToolchain(process.versions, (await npm(['--version'])).stdout.trim());
   await validate();
+  // Arborist's hidden-lock cache omits dependency `files` lists. Always read
+  // their real manifests so warm and cold installs bundle the same files.
+  await fs.rm(path.join(root, 'node_modules/.package-lock.json'), { force: true });
   await fs.mkdir(output, { recursive: true });
   const packed = JSON.parse((await npm(['pack', '--json', '--pack-destination', output])).stdout)[0];
   if (path.basename(packed.filename) !== packed.filename) throw new Error('Unexpected tarball filename.');

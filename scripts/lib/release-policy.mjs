@@ -6,6 +6,12 @@ export function releaseVersion(version) {
   return { version, gitTag: `v${version}`, npmTag: match[4] ? 'next' : 'latest', prerelease: Boolean(match[4]) };
 }
 
+export function checkReleaseToolchain(versions, npmVersion) {
+  if (versions.node !== '24.22.2' || versions.zlib !== '1.3.2.1-motley-285e94b' || npmVersion !== '11.19.1') {
+    throw new Error('Reproducible release builds require official Node 24.22.2 (zlib 1.3.2.1-motley-285e94b) and npm 11.19.1, matching GitHub Actions. Consumer installs still support Node 22+.');
+  }
+}
+
 export function checkManifest(pkg, lock, { access, registry, tag } = {}) {
   if (pkg.name !== '@othmansh01/proxy-mate' || pkg.publishConfig?.registry !== 'https://registry.npmjs.org'
     || pkg.publishConfig?.access !== 'public' || pkg.private

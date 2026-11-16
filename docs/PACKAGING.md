@@ -33,7 +33,7 @@ npm config set @othmansh01:registry https://registry.npmjs.org --location=user
 
 ### 3. Bootstrap the npm package once
 
-npm trusted publishing is configured on an existing package, so first publish the tested **0.9.0** artifact manually using your npm login and interactive npm verification. Use a clean checkout with a physical node_modules directory (not npm-linked dependencies) of the merged release-preparation commit and Node 24.22.2 with npm 11.19.1, matching the pinned release publisher. The package builder checks those versions; consumer installs continue to support Node 22+.
+npm trusted publishing is configured on an existing package, so first publish the tested **0.9.0** artifact manually using your npm login and interactive npm verification. Use a clean checkout with a physical node_modules directory (not npm-linked dependencies) of the merged release-preparation commit and the **official Node 24.22.2 distribution** with npm 11.19.1, matching the pinned release publisher. Homebrew builds can ship a different compression library despite the same Node version. The builder also checks the publisher's zlib version and discards npm's regenerable hidden dependency-metadata cache so warm and cold installs include the same dependency files. Consumer installs continue to support Node 22+.
 
 ```bash
 npm ci

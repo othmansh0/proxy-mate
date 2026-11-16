@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { releaseVersion, checkManifest, notesForVersion, promoteUnreleased, publishedArtifactMatches } from '../scripts/lib/release-policy.mjs';
+import { releaseVersion, checkManifest, checkReleaseToolchain, notesForVersion, promoteUnreleased, publishedArtifactMatches } from '../scripts/lib/release-policy.mjs';
+
+test('release builds require the publisher compression toolchain as well as matching version numbers', () => {
+  const official = { node: '24.22.2', zlib: '1.3.2.1-motley-285e94b' };
+  assert.doesNotThrow(() => checkReleaseToolchain(official, '11.19.1'));
+  for (const [versions, npm] of [
+    [{ ...official, node: '22.23.4' }, '11.19.1'],
+    [{ ...official, zlib: '1.2.12' }, '11.19.1'],
+    [{ node: official.node }, '11.19.1'],
+    [official, '11.19.0'],
+  ]) assert.throws(() => checkReleaseToolchain(versions, npm), /official Node 24.22.2/);
+});
 
 function manifests(version = '0.9.0') {
   const pkg = { name: '@othmansh01/proxy-mate', version, publishConfig: { registry: 'https://registry.npmjs.org', access: 'public' },
