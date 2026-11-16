@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Wait for npm's publish-time scanning and registry availability before completing a release. Keep verification bounded and reject integrity mismatches or registry errors without retrying the upload.
+
 ## 0.9.0 — 2026-11-12
 
 - Rename the project to Proxy Mate, the npm package to @othmansh01/proxy-mate, the CLI to proxy-mate and the GitHub repository to othmansh0/proxy-mate.

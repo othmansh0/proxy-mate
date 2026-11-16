@@ -55,3 +55,21 @@ export function publishedArtifactMatches(metadata, manifest) {
   }
   return true;
 }
+
+export async function waitForPublishedArtifact(readVersion, manifest, {
+  timeoutMs = 15 * 60_000, intervalMs = 10_000, now = Date.now,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), onPending = () => {},
+} = {}) {
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    const metadata = await readVersion();
+    if (metadata) {
+      publishedArtifactMatches(metadata, manifest);
+      return metadata;
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) throw new Error(`npm accepted the upload but ${manifest.name}@${manifest.version} is not visible by the verification deadline. Rerun this tagged workflow after the version becomes available; never overwrite an uploaded version.`);
+    onPending();
+    await wait(Math.min(intervalMs, remaining));
+  }
+}

@@ -6,19 +6,19 @@ Package: **`@othmansh01/proxy-mate`** on **npm**, with source and release assets
 npx --yes @othmansh01/proxy-mate@latest init --client claude
 ```
 
-The first public release candidate in this checkout is **0.9.0**. It is pre-1.0 software; keep the documented platform and capture limits visible. Preparing this checkout does not itself publish anything, change repository visibility or push a release tag.
+The first public release is **0.9.0**, published on 16 November 2026. It is pre-1.0 software; keep the documented platform and capture limits visible. Building a checkout does not publish it; new releases use the version-tagged workflow below.
 
 ## One-time owner setup
 
 ### 1. Make the source repository public
 
-In GitHub, open this repository's **Settings → General → Danger Zone → Change repository visibility → Public**. This exposes Git history and Actions history/logs as well as the current files. Review those before confirming. The local readiness audit found no credentials with Gitleaks 8.30.1 across available Git history; that is a scanner result, not a guarantee about all past external logs or artifacts.
+The repository is public, including Git history and Actions history/logs. The local readiness audit found no detected credentials across available Git history; that is a scanner result, not a guarantee about all past external logs or artifacts.
 
-Enable private vulnerability reporting and review the existing [security policy](../SECURITY.md). Resolve or retest the account's Actions billing/spending restriction: hosted jobs previously could not start. The default branch is currently `develop`; a branch rename or promotion to `main` is not required for version-tagged releases.
+Private vulnerability reporting is enabled; see the [security policy](../SECURITY.md). Hosted Actions now run successfully after the earlier account restriction. The default branch is `develop`; promotion to `main` is not required for version-tagged releases.
 
 ### 2. Own the matching npm scope
 
-Sign into the verified npm account **othmansh01**. The npm scope is `@othmansh01`; the GitHub repository owner remains `othmansh0`. Two-factor authentication was deferred by the owner on 16 November 2026. Complete any email or security verification npm requires for login or publication.
+Sign into the verified npm account **othmansh01**. The npm scope is `@othmansh01`; the GitHub repository owner remains `othmansh0`. Two-factor authentication is enabled for authentication and writes. Complete npm's passkey/security-key approval for owner operations when requested.
 
 ```bash
 npm login --registry=https://registry.npmjs.org
@@ -33,18 +33,19 @@ npm config set @othmansh01:registry https://registry.npmjs.org --location=user
 
 ### 3. Bootstrap the npm package once
 
-npm trusted publishing is configured on an existing package, so first publish the tested **0.9.0** artifact manually using your npm login and interactive npm verification. Use a clean checkout with a physical node_modules directory (not npm-linked dependencies) of the merged release-preparation commit and the **official Node 24.22.2 distribution** with npm 11.19.1, matching the pinned release publisher. Homebrew builds can ship a different compression library despite the same Node version. The builder also checks the publisher's zlib version and discards npm's regenerable hidden dependency-metadata cache so warm and cold installs include the same dependency files. Consumer installs continue to support Node 22+.
+The manual **0.9.0** bootstrap is complete. Its registry integrity matches the qualified artifact, and installation from npm without credentials passed. To reproduce a qualified artifact, use a clean checkout with a physical node_modules directory (not npm-linked dependencies) and the **official Node 24.22.2 distribution** with npm 11.19.1, matching the pinned release publisher. Homebrew builds can ship a different compression library despite the same Node version. The builder also checks the publisher's zlib version and discards npm's regenerable hidden dependency-metadata cache so warm and cold installs include the same dependency files. Consumer installs continue to support Node 22+.
 
 ```bash
 npm ci
 npm run release:pack
 npm run release:smoke
-npm publish ./artifacts/release/othmansh01-proxy-mate-0.9.0.tgz --registry=https://registry.npmjs.org --access=public --tag=latest
 ```
 
-This is the first public upload. Review `manifest.json`, `SHA256SUMS` and the tarball before publishing. The prepack hook removes regenerable node-gyp output containing absolute build paths; registry-provided Darwin prebuilds remain and are tested in the installed consumer. Do not upload capture files, local CA material, configuration backups or credentials. `release:pack` excludes those paths and bundles the audited runtime dependencies. A checked and already-built artifact may be published directly instead of rebuilding it.
+Review `manifest.json`, `SHA256SUMS` and the tarball before releasing. The prepack hook removes regenerable node-gyp output containing absolute build paths; registry-provided Darwin prebuilds remain and are tested in the installed consumer. Do not upload capture files, local CA material, configuration backups or credentials. `release:pack` excludes those paths and bundles the audited runtime dependencies.
 
 The manual bootstrap does not claim CI provenance. Subsequent OIDC publications generate provenance from the public repository. npm versions are immutable: never replace an uploaded version with different bytes.
+
+npm can accept an upload before the version becomes installable while [publish-time malware scanning](https://github.blog/changelog/2026-07-28-npm-publish-time-malware-scanning-and-dual-use-metadata/) runs. The release publisher waits up to 15 minutes for version metadata and then verifies the exact name, version and integrity. It retries metadata reads only. Registry errors and integrity mismatches fail immediately. Scanning can exceed that deadline; rerun the existing tagged workflow after the version becomes available rather than uploading different bytes.
 
 ### 4. Configure tokenless npm trusted publishing
 
@@ -58,18 +59,19 @@ In npm: **Packages → @othmansh01/proxy-mate → Settings → Trusted publishin
 | Environment | `npm` |
 | Allowed actions | Allow direct `npm publish` |
 
+The same configuration can be created with npm CLI 11.19.1, followed by its interactive 2FA approval:
+
+```bash
+npm trust github @othmansh01/proxy-mate --file=release.yml --repo=othmansh0/proxy-mate --env=npm --allow-publish --yes --registry=https://registry.npmjs.org/
+```
+
 The public repository already has the **npm** GitHub environment and an active `v*` tag ruleset restricting tag creation, updates and deletion to repository administrators (verified 16 November 2026). Private vulnerability reporting is enabled. Add a required environment reviewer if owner approval before uploads is desired. Do not add an `NPM_TOKEN` secret: the workflow uses GitHub OIDC and `id-token: write`.
 
 A new npm trusted-publisher configuration must complete a successful OIDC publish within two days. An identical-version retry that skips npm upload does not test that authentication. Verify it with the next actual version publication before the configuration expires; if it expires, recreate it.
 
 ### 5. Create the first GitHub release
 
-Tag the exact merged commit whose package and changelog are version 0.9.0:
-
-```bash
-git tag -a v0.9.0 -m "Release 0.9.0"
-git push origin v0.9.0
-```
+The annotated `v0.9.0` tag points to the accepted bootstrap commit `aebc999`. Preserve it. Create later version tags with `npm version` as described below.
 
 The `Public release` workflow runs the complete suite on Node 22/24/26 on Apple Silicon plus Node 24 on Intel. It audits dependencies, validates the tag/checkout/version, builds the package and smoke-tests an offline consumer. After qualification and the `npm` environment gate, it publishes via OIDC and creates a GitHub release with the tarball, `SHA256SUMS`, manifest and changelog notes.
 

@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { checkManifest, checkReleaseToolchain, releaseVersion, notesForVersion, promoteUnreleased, publishedArtifactMatches } from './lib/release-policy.mjs';
+import { checkManifest, checkReleaseToolchain, releaseVersion, notesForVersion, promoteUnreleased, publishedArtifactMatches, waitForPublishedArtifact } from './lib/release-policy.mjs';
 
 const execute = promisify(execFile);
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -118,9 +118,9 @@ async function publish() {
     console.log('This exact artifact is already on npm; continuing the interrupted release.');
   } else {
     await npm(['publish', path.join(output, manifest.filename), '--registry=https://registry.npmjs.org', '--access=public', '--tag', release.npmTag, '--provenance'], { timeout: 180_000 });
-    const published = await registryVersion();
-    if (!published) throw new Error('npm publication returned but is not visible yet; retry the workflow to verify it.');
-    publishedArtifactMatches(published, manifest);
+    await waitForPublishedArtifact(registryVersion, manifest, {
+      onPending: () => console.log('npm accepted the upload; waiting for registry visibility while publish-time scanning may still be running.'),
+    });
   }
 }
 
