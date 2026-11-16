@@ -49,7 +49,7 @@ npm can accept an upload before the version becomes installable while [publish-t
 
 ### 4. Configure tokenless npm trusted publishing
 
-In npm: **Packages → @othmansh01/proxy-mate → Settings → Trusted publishing → GitHub Actions**. Set:
+The production trusted publisher is configured and was validated by the 0.9.1 publication. Its settings in **Packages → @othmansh01/proxy-mate → Settings → Trusted publishing → GitHub Actions** are:
 
 | Field | Value |
 | --- | --- |
@@ -59,7 +59,7 @@ In npm: **Packages → @othmansh01/proxy-mate → Settings → Trusted publishin
 | Environment | `npm` |
 | Allowed actions | Allow direct `npm publish` |
 
-The same configuration can be created with npm CLI 11.19.1, followed by its interactive 2FA approval:
+If a new configuration is needed, the same grant can be created with npm CLI 11.19.1, followed by its interactive 2FA approval:
 
 ```bash
 npm trust github @othmansh01/proxy-mate --file=release.yml --repo=othmansh0/proxy-mate --env=npm --allow-publish --yes --registry=https://registry.npmjs.org/
@@ -75,7 +75,7 @@ The annotated `v0.9.0` tag points to the accepted bootstrap commit `aebc999`. Pr
 
 The `Public release` workflow runs the complete suite on Node 22/24/26 on Apple Silicon plus Node 24 on Intel. It audits dependencies, validates the tag/checkout/version, builds the package and smoke-tests an offline consumer. After qualification and the `npm` environment gate, it publishes via OIDC and creates a GitHub release with the tarball, `SHA256SUMS`, manifest and changelog notes.
 
-For the manually bootstrapped 0.9.0 version, it skips npm upload only when the registry's integrity exactly matches the built artifact. A mismatch fails instead of overwriting anything; investigate and release a new version. This initial skip does not validate OIDC. The next new version must be published successfully to validate the trusted publisher.
+For the manually bootstrapped 0.9.0 version, it skipped npm upload only when the registry's integrity exactly matched the built artifact. A mismatch fails instead of overwriting anything; investigate and release a new version. That initial skip did not validate OIDC; version 0.9.1 performed the first successful OIDC publication.
 
 If a later step fails after npm publication, rerun `release.yml` with its existing tag. It accepts only the identical uploaded npm artifact and completes the GitHub release. Published GitHub releases are preserved; draft assets can be completed before publication. GitHub immutable releases may be enabled after this flow is verified.
 
