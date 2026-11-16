@@ -4,9 +4,9 @@
 
 ## 0.9.0 — 2026-11-12
 
-- Rename the project to Proxy Mate, the npm package to @othmansh0/proxy-mate, the CLI to proxy-mate and the GitHub repository to othmansh0/proxy-mate.
+- Rename the project to Proxy Mate, the npm package to @othmansh01/proxy-mate, the CLI to proxy-mate and the GitHub repository to othmansh0/proxy-mate.
 - Reuse existing state and CA certificates in place; accept legacy environment variables, cached resource URIs, runtime markers and exported data. Retire old background service labels transactionally and migrate owned agent registrations with backups. Keep proxy-mcp as a CLI compatibility alias.
-- Prepare the first public npm release of @othmansh0/proxy-mate with a one-command npx setup and no package authentication for users. This is a pre-1.0 release.
+- Prepare the first public npm release of @othmansh01/proxy-mate with a one-command npx setup and no package authentication for users. This is a pre-1.0 release.
 - Add version-tagged GitHub releases, audited package artifacts, checksum files, clean-consumer smoke tests and tokenless npm trusted publishing with provenance. Keep prereleases on the next npm channel.
 - Read the runtime version from package.json and use npm version hooks to update the changelog, package version, lockfile and annotated Git tag together.
 

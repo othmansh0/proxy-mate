@@ -80,11 +80,11 @@ async function smoke() {
   try {
     await fs.writeFile(path.join(temporary, 'package.json'), JSON.stringify({ name: 'proxy-package-smoke', version: '1.0.0', type: 'module', private: true }));
     await npm(['install', '--offline', '--ignore-scripts', '--no-fund', '--no-audit', path.join(output, manifest.filename)], { cwd: temporary });
-    const packageRoot = path.join(temporary, 'node_modules/@othmansh0/proxy-mate');
+    const packageRoot = path.join(temporary, 'node_modules/@othmansh01/proxy-mate');
     const installed = await readJson(path.join(packageRoot, 'package.json'));
     if (installed.version !== manifest.version) throw new Error('Consumer installed a different package version.');
     await fs.access(path.join(packageRoot, 'src/index.d.ts'));
-    const probe = `import assert from 'node:assert/strict'; import {createProxyClient} from '@othmansh0/proxy-mate'; const c=createProxyClient({home:process.env.PROXY_MATE_HOME,readyTimeoutMs:0}); await assert.rejects(c.callTool('get_proxy_status'),{code:'DAEMON_UNAVAILABLE'});`;
+    const probe = `import assert from 'node:assert/strict'; import {createProxyClient} from '@othmansh01/proxy-mate'; const c=createProxyClient({home:process.env.PROXY_MATE_HOME,readyTimeoutMs:0}); await assert.rejects(c.callTool('get_proxy_status'),{code:'DAEMON_UNAVAILABLE'});`;
     const env = { ...process.env, PROXY_MATE_HOME: path.join(temporary, 'unused-state') };
     await run(process.execPath, ['--input-type=module', '-e', probe], { cwd: temporary, env });
     const nativeProbe = `import {createRequire} from 'node:module'; const require=createRequire(process.env.PROXY_PACKAGE_MANIFEST); const Database=require('better-sqlite3'); const db=new Database(':memory:'); if(db.prepare('SELECT 1 AS ok').get().ok!==1)throw new Error('Native binding failed'); db.close();`;

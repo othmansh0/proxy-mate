@@ -1,5 +1,17 @@
 # Reliability and replacement readiness
 
+## 16 November 2026 public release qualification (0.9.0)
+
+The source repository is public at `othmansh0/proxy-mate`. The owner confirmed the npm account `othmansh01` and selected **`@othmansh01/proxy-mate`** for the first publication; the GitHub owner remains `othmansh0`. Package manifests, public installation examples, registry mapping, release guards and clean-consumer checks use that npm identity. Two-factor authentication was explicitly deferred; CLI login and publication still require whatever verification npm requests.
+
+The GitHub `npm` environment exists, private vulnerability reporting is enabled, and an active `v*` tag ruleset restricts tag creation, updates and deletion to repository administrators. A rerun of [the integration workflow](https://github.com/othmansh0/proxy-mate/actions/runs/43830515651) started hosted jobs successfully, so the previous billing restriction is no longer preventing execution. That rerun used the earlier integration commit: Node 22/24 passed and Node 26 failed on sandbox execution deadlines. Integration CI now uses the same single-worker test execution as release qualification, preserving sandbox time/memory limits while avoiding concurrent test-file contention. The earlier rerun does not qualify these changes or establish a green hosted matrix.
+
+Local Apple Silicon qualification: **296 passing tests each** on Node 22.23.4, 24.22.2 and 26.13.0, with zero failures/skips. The TCP policy regression now checks the real first-attempt timeout and successful default-policy connection across a delayed I/O turn; a saturated listen backlog resets connections on this Mac instead of reliably delaying them. Restoring the old 250 ms default fails the regression. Crash recovery explicitly tests an outage exceeding the 15-second readiness budget: the existing bridge returns a retryable `DAEMON_UNAVAILABLE` result, keeps tool discovery available, and reconnects to the recovered daemon without an MCP restart. Both live-owner rejection paths remain checked.
+
+The `@othmansh01` tarball passes offline installation, CLI preview, typed ESM API and native SQLite checks without creating capture state. Forced SQLite fallback passes all nine tests. Production dependency audit reports zero advisories. Initial clean builds from separate physical dependency installations produced identical bytes; final release checksums and integrity are recorded in `artifacts/release/SHA256SUMS` and `manifest.json`.
+
+Remaining publication gates: complete npm CLI verification, bootstrap the package, configure the trusted publisher for GitHub owner `othmansh0` / repository `proxy-mate` / `release.yml` / environment `npm`, and verify the version-tagged hosted Apple Silicon/Intel matrix and release assets. A new OIDC publication within two days is required to validate the trusted publisher. Local qualification does not establish registry availability, hosted Intel qualification or OIDC provenance.
+
 ## 12 November 2026 public release preparation (0.9.0)
 
 Prepared public npm distribution, one-command installation, annotated version tags, changelog hooks, integrity/checksum assets and tokenless trusted publishing. The actual repository is still private until the owner changes visibility; no public version or release tag is created by this preparation. Initial npm scope ownership/bootstrap, trusted-publisher settings and the GitHub npm environment remain owner setup.

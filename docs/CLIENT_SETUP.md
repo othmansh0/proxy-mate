@@ -1,6 +1,6 @@
 # MCP client setup
 
-Start with the [README quick start](../README.md). `npx --yes @othmansh0/proxy-mate@latest init --client CLIENT` installs the shared service and connects a client.
+Start with the [README quick start](../README.md). `npx --yes @othmansh01/proxy-mate@latest init --client CLIENT` installs the shared service and connects a client.
 
 ## Automatic registration
 
@@ -17,7 +17,7 @@ Registration affects future client connections. Reconnect an existing MCP sessio
 ## Preview
 
 ```bash
-npx --yes @othmansh0/proxy-mate@latest init --client claude --dry-run
+npx --yes @othmansh01/proxy-mate@latest init --client claude --dry-run
 ```
 
 Preview reads service/configuration metadata but writes no service, certificate, routing or client files. It shows whether setup would install, reuse or upgrade the service and the exact local command/configuration.
@@ -25,7 +25,7 @@ Preview reads service/configuration metadata but writes no service, certificate,
 ## Manual clients
 
 ```bash
-npx --yes @othmansh0/proxy-mate@latest init --client json
+npx --yes @othmansh01/proxy-mate@latest init --client json
 ```
 
 Copy the returned `client.config.mcpServers` into your client's MCP settings. Both the Node executable and bridge path are absolute. No GitHub token belongs in the MCP configuration: public npm packages need no registry authentication. The installed runtime works independently of the source checkout or npm cache.
@@ -59,7 +59,7 @@ Then run the README init command. A GitHub Packages token is not needed for publ
 After the first Proxy Mate release is published, use the new package name:
 
 ```bash
-npx --yes @othmansh0/proxy-mate@latest init --upgrade --client claude
+npx --yes @othmansh01/proxy-mate@latest init --upgrade --client claude
 ```
 
 Finish active capture before upgrading. Repeat plain `init --client CLIENT` for each additional client, then reconnect it. Setup replaces an owned `proxy-mcp` bridge entry with `proxy-mate` and backs up the original configuration. A custom server using the former key is preserved; remove it manually if it is an obsolete installation. New installs use `~/.proxy-mate`; existing installs reuse `~/.proxy-mcp` in place, preserving the CA, SQLite sessions and absolute captured-body paths. Do not move or copy a live state directory. Backups remain under the selected state directory's `setup-backups`.

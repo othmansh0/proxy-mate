@@ -1,9 +1,9 @@
 # Public releases and versioning
 
-Package: **`@othmansh0/proxy-mate`** on **npm**, with source and release assets at `othmansh0/proxy-mate`. GitHub Packages is no longer required. People install a published version with:
+Package: **`@othmansh01/proxy-mate`** on **npm**, with source and release assets at `othmansh0/proxy-mate`. GitHub Packages is no longer required. People install a published version with:
 
 ```bash
-npx --yes @othmansh0/proxy-mate@latest init --client claude
+npx --yes @othmansh01/proxy-mate@latest init --client claude
 ```
 
 The first public release candidate in this checkout is **0.9.0**. It is pre-1.0 software; keep the documented platform and capture limits visible. Preparing this checkout does not itself publish anything, change repository visibility or push a release tag.
@@ -18,28 +18,28 @@ Enable private vulnerability reporting and review the existing [security policy]
 
 ### 2. Own the matching npm scope
 
-Create or sign into the npm account **othmansh0**, verify the account and enable two-factor authentication. A GitHub username does not automatically reserve the same npm username. If the npm handle is unavailable, choose an npm organization/scope and update the package identity before the first publish.
+Sign into the verified npm account **othmansh01**. The npm scope is `@othmansh01`; the GitHub repository owner remains `othmansh0`. Two-factor authentication was deferred by the owner on 16 November 2026. Complete any email or security verification npm requires for login or publication.
 
 ```bash
 npm login --registry=https://registry.npmjs.org
 npm whoami --registry=https://registry.npmjs.org
 ```
 
-The identity must have publish access to `@othmansh0`. No GitHub package token is needed. If a previous private setup mapped this scope to GitHub, change it once:
+The identity must have publish access to `@othmansh01`. No GitHub package token is needed. If a previous private setup mapped this scope to GitHub, change it once:
 
 ```bash
-npm config set @othmansh0:registry https://registry.npmjs.org --location=user
+npm config set @othmansh01:registry https://registry.npmjs.org --location=user
 ```
 
 ### 3. Bootstrap the npm package once
 
-npm trusted publishing is configured on an existing package, so first publish the tested **0.9.0** artifact manually using your npm login and interactive 2FA. Use a clean checkout with a physical node_modules directory (not npm-linked dependencies) of the merged release-preparation commit and Node 24.22.2 with npm 11.19.1, matching the pinned release publisher. The package builder checks those versions; consumer installs continue to support Node 22+.
+npm trusted publishing is configured on an existing package, so first publish the tested **0.9.0** artifact manually using your npm login and interactive npm verification. Use a clean checkout with a physical node_modules directory (not npm-linked dependencies) of the merged release-preparation commit and Node 24.22.2 with npm 11.19.1, matching the pinned release publisher. The package builder checks those versions; consumer installs continue to support Node 22+.
 
 ```bash
 npm ci
 npm run release:pack
 npm run release:smoke
-npm publish ./artifacts/release/othmansh0-proxy-mate-0.9.0.tgz --registry=https://registry.npmjs.org --access=public --tag=latest
+npm publish ./artifacts/release/othmansh01-proxy-mate-0.9.0.tgz --registry=https://registry.npmjs.org --access=public --tag=latest
 ```
 
 This is the first public upload. Review `manifest.json`, `SHA256SUMS` and the tarball before publishing. The prepack hook removes regenerable node-gyp output containing absolute build paths; registry-provided Darwin prebuilds remain and are tested in the installed consumer. Do not upload capture files, local CA material, configuration backups or credentials. `release:pack` excludes those paths and bundles the audited runtime dependencies. A checked and already-built artifact may be published directly instead of rebuilding it.
@@ -48,7 +48,7 @@ The manual bootstrap does not claim CI provenance. Subsequent OIDC publications 
 
 ### 4. Configure tokenless npm trusted publishing
 
-In npm: **Packages → @othmansh0/proxy-mate → Settings → Trusted publishing → GitHub Actions**. Set:
+In npm: **Packages → @othmansh01/proxy-mate → Settings → Trusted publishing → GitHub Actions**. Set:
 
 | Field | Value |
 | --- | --- |
@@ -58,7 +58,7 @@ In npm: **Packages → @othmansh0/proxy-mate → Settings → Trusted publishing
 | Environment | `npm` |
 | Allowed actions | Allow direct `npm publish` |
 
-In GitHub: **Settings → Environments**, create **npm**. Add a required reviewer if you want an owner approval before public uploads. Protect `v*` tags from unauthorized creation/deletion/updates. Do not add an `NPM_TOKEN` secret: the workflow uses GitHub OIDC and `id-token: write`.
+The public repository already has the **npm** GitHub environment and an active `v*` tag ruleset restricting tag creation, updates and deletion to repository administrators (verified 16 November 2026). Private vulnerability reporting is enabled. Add a required environment reviewer if owner approval before uploads is desired. Do not add an `NPM_TOKEN` secret: the workflow uses GitHub OIDC and `id-token: write`.
 
 A new npm trusted-publisher configuration must complete a successful OIDC publish within two days. An identical-version retry that skips npm upload does not test that authentication. Verify it with the next actual version publication before the configuration expires; if it expires, recreate it.
 
@@ -98,7 +98,7 @@ npm version prerelease --preid=rc -m "Release %s"
 git push origin HEAD --follow-tags
 ```
 
-Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh0/proxy-mate@next init --client claude`.
+Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh01/proxy-mate@next init --client claude`.
 
 ## What is automated, and what is not
 

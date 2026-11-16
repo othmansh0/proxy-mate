@@ -4,7 +4,7 @@
 
 Inspect backend requests, responses and headers from the iOS Simulator. Ask your agent to mock an API, pause a response, reproduce a failure, or check what changed—without adding debugging code to your app.
 
-Works with Claude Code, Codex, Cursor, Claude Desktop, and other local stdio MCP clients. The npm package is **`@othmansh0/proxy-mate`**. Public releases install without a GitHub account or registry login.
+Works with Claude Code, Codex, Cursor, Claude Desktop, and other local stdio MCP clients. The npm package is **`@othmansh01/proxy-mate`**. Public releases install without a GitHub account or registry login.
 
 ## Quick start
 
@@ -15,7 +15,7 @@ Proxy Mate was previously named `proxy-mcp`. Existing users can follow the [rena
 Install the latest published release and connect Claude Code:
 
 ```bash
-npx --yes @othmansh0/proxy-mate@latest init --client claude
+npx --yes @othmansh01/proxy-mate@latest init --client claude
 ```
 
 That's the installation. The command installs the background service, backs up an existing client configuration before updating only its `proxy-mate` entry, and uses a stable local entry point. It reuses a healthy installed service. Your agent does not need npm authentication or another package download every time it connects.
@@ -98,11 +98,11 @@ See [Security](SECURITY.md), [Privacy](PRIVACY.md), and [advanced configuration]
 Add the package to a QA script or developer tool:
 
 ```bash
-npm install @othmansh0/proxy-mate
+npm install @othmansh01/proxy-mate
 ```
 
 ```js
-import { createProxyClient } from '@othmansh0/proxy-mate';
+import { createProxyClient } from '@othmansh01/proxy-mate';
 
 const proxy = createProxyClient();
 const { flows } = await proxy.callTool('get_flows', {
@@ -119,7 +119,7 @@ The library talks to an already installed daemon and returns tool data directly.
 Ask your agent to stop capture and finish its task, then install the latest package into the service:
 
 ```bash
-npx --yes @othmansh0/proxy-mate@latest init --upgrade --client claude
+npx --yes @othmansh01/proxy-mate@latest init --upgrade --client claude
 ```
 
 Updates preserve durable evidence and the local CA. Upgrade refuses to replace a capture using routing, an app gateway, a task lease, pending breakpoints or reverse listeners. Reconnect MCP after updating to load the new tools.
@@ -127,7 +127,7 @@ Updates preserve durable evidence and the local CA. Upgrade refuses to replace a
 To remove the service while keeping the CA:
 
 ```bash
-npx --yes @othmansh0/proxy-mate@latest uninstall --keep-ca
+npx --yes @othmansh01/proxy-mate@latest uninstall --keep-ca
 ```
 
 Remove the `proxy-mate` entry from your client's MCP settings if you no longer want to connect. Uninstall does not delete saved captures. Omitting `--keep-ca` also removes managed CA trust.
@@ -137,7 +137,7 @@ Remove the `proxy-mate` entry from your client's MCP settings if you no longer w
 | Problem | Next step |
 | --- | --- |
 | npm returns `401`, `403` or `404` | Check that the version is published on npm. If you used the earlier private setup, [remove its GitHub registry mapping](docs/CLIENT_SETUP.md#migrate-from-private-github-packages). |
-| MCP is missing after setup | Reconnect the client. Run `npx --yes @othmansh0/proxy-mate@latest status` to inspect the service. |
+| MCP is missing after setup | Reconnect the client. Run `npx --yes @othmansh01/proxy-mate@latest status` to inspect the service. |
 | Setup cannot parse an existing config | Fix that file or use `--client json`. Setup preserves invalid files. |
 | No requests appear | Ask the agent to diagnose capture for the selected app and Simulator. Trigger a new app request. |
 | One endpoint fails HTTPS | Check certificate pinning/custom trust and use an authorized debug build. |
