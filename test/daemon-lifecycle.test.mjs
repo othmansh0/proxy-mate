@@ -13,7 +13,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const root = fileURLToPath(new URL('../', import.meta.url));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKILL', { timeout: 45_000 }, async (t) => {
+test('real daemon owns one runtime and recovers after SIGKILL and an extended outage', { timeout: 60_000 }, async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-daemon-lifecycle-'));
   const children = new Set();
   t.after(async () => {
@@ -82,7 +82,7 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   const concurrent = start();
   const denied = await concurrent.finished;
   assert.notEqual(denied.code, 0);
-  assert.match(concurrent.errors, /owns this state directory/);
+  assert.match(concurrent.errors, /owns (?:this state directory|the recorded state)/);
   assert.equal((await callDaemon({ ...initial, tool: 'get_proxy_status' })).running, true);
   const lease = await callDaemon({ ...initial, tool: 'acquire_capture_lease', args: { task_id: 'survive-restart' } });
   first.kill('SIGTERM');
@@ -98,13 +98,19 @@ test('real daemon owns one runtime, shuts down cleanly, and recovers after SIGKI
   assert.equal((await callDaemon({ ...restarted, tool: 'acquire_capture_lease', args: { task_id: 'survive-restart', capture_lease_id: lease.capture_lease_id } })).status, 'renewed');
   second.kill('SIGKILL');
   await second.finished;
-  const pendingRead = clients[1].callTool({ name: 'get_proxy_status', arguments: {} });
-  await delay(200);
+  // Let the documented readiness budget expire before recovery. The bridge
+  // must return an actionable outage and remain usable without reconnecting.
+  const outage = await clients[1].callTool({ name: 'get_proxy_status', arguments: {} });
+  assert.equal(outage.isError, true);
+  assert.equal(outage.structuredContent.error.code, 'DAEMON_UNAVAILABLE');
+  assert.equal(outage.structuredContent.error.retryable, true);
+  assert.ok(outage.structuredContent.error.recovery.length > 0);
+  assert.ok((await clients[1].listTools()).tools.length > 0);
   const recovered = start();
   const finalHandshake = await ready(recovered, restarted.token);
   assert.notEqual(finalHandshake.token, restarted.token);
-  const resumed = await pendingRead;
-  assert.equal(resumed.isError, undefined);
+  const resumed = await clients[1].callTool({ name: 'get_proxy_status', arguments: {} });
+  assert.equal(resumed.isError, undefined, JSON.stringify(resumed.content));
   assert.equal(resumed.structuredContent.data.daemon_pid, recovered.pid);
   const persisted = JSON.parse(await fs.readFile(path.join(directory, 'state.json'), 'utf8'));
   assert.equal(persisted.pid, recovered.pid);
