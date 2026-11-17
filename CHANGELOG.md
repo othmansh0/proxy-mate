@@ -9,6 +9,7 @@
 - Keep Simulator traffic responsive under build load with Interactive daemon and Standard guardian LaunchAgents; reject unusable custom CA paths before installation with coded diagnostics and recovery hints.
 - Drain proxy and app gateway connections before shutdown; add contextual abort logs, progress/drop metrics, and actionable custom CA errors.
 - Add durable per-client routing claims and a union PAC controller so clearing or expiring one claim preserves other captures; scale network command deadlines with host load.
+- Preserve runtime history in rotating append-only journals, verify daemon process identity, sweep abandoned temp files, and attribute shutdowns and startup failures with phase timings and ports.
 
 ## 0.9.1 — 2026-11-16
 

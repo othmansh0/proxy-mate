@@ -25,7 +25,8 @@ import { startLogMaintenance } from './lib/log-maintenance.mjs';
 import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
 import { SERVER_INSTRUCTIONS } from './lib/guidance.mjs';
-import { recordRuntimeEvent } from './lib/runtime-identity.mjs';
+import { recordRuntimeEvent, recordPreviousExit } from './lib/runtime-identity.mjs';
+import { logLine } from './lib/log-line.mjs';
 import { rememberCaptureLease, INTERNAL_CAPTURE_CONTROL } from './lib/capture-lease.mjs';
 import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/network-policy.mjs';
 
@@ -33,7 +34,7 @@ import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
 import { makeTools } from './lib/tools.mjs';
 import {
-  readState, isStateStale, defensiveNetworkResetAllServices,
+  readState, isStateStale, defensiveNetworkResetAllServices, sweepStaleTempFiles, readProcessIdentity,
   writePidFile, readPidFile, clearPidFile, clearState, patchState, readHandshake,
 } from './lib/state.mjs';
 import { ControlServer, callDaemon, probeDaemon, DEFAULT_CONTROL_PORT, SERIAL_TOOL_NAMES } from './lib/control.mjs';
@@ -158,31 +159,14 @@ async function runStdio({ requireDaemon = false } = {}) {
 
 async function runDaemon(args) {
   configureConnectionAttempts();
-  const releaseRuntime = await acquireRuntime();
-  try { await reconcileRuntime(); }
-  catch (error) { await releaseRuntime(); throw error; }
-  const stopLogMaintenance = startLogMaintenance();
-
-  const engine = new ProxyEngine();
-  const priorState = await readState();
-  if (priorState?.active_session_id) {
-    try { await engine.setActiveSession(priorState.active_session_id, { create: false }); }
-    catch (error) { engine.diagnostics.push({ kind: 'session-restore-failed', code: error.code ?? 'SESSION_RESTORE_FAILED' }); }
-  }
-  const pacServer = new PacServer();
-  const tools = makeTools({ engine, pacServer, mode: 'daemon' });
-
-  const { domains, tls_passthrough } = await loadDomainsConfig(args);
-  if (!args.skipRouting && domains.length) validateRoutingDomains(domains, { allowBroad: args.allowBroadRouting === true });
-
-  const proxyPort = args.proxyPort ?? PROXY_PORT_DEFAULT;
-  const pacPort   = args.pacPort   ?? PAC_PORT_DEFAULT;
-  const controlPort = args.controlPort ?? DEFAULT_CONTROL_PORT;
-
-  if (!args.skipRouting && args.skipHostTrust && domains.includes('*')) {
-    throw new Error('--no-host-trust cannot be combined with broad default routing; supply narrow --domains or use --no-routing');
-  }
-
+  let releaseRuntime = async () => {}, stopLogMaintenance = () => {};
+  let engine, tools, startupResourcesReady = false;
+  const durations = Object.fromEntries(['lock', 'reconcile', 'session_restore', 'ca', 'host_trust', 'engine', 'routing', 'trust', 'rules', 'watcher', 'control'].map(name => [`${name}_ms`, 0]));
+  let phase = 'lock', phaseAt = performance.now();
+  const phaseStart = (next) => {
+    durations[`${phase}_ms`] += Math.round(performance.now() - phaseAt);
+    phase = next; phaseAt = performance.now();
+  };
   let ctrl = null;
   let finishStartup;
   const startupSettled = new Promise((resolve) => { finishStartup = resolve; });
@@ -202,12 +186,46 @@ async function runDaemon(args) {
     }
     await releaseRuntime();
   };
-  const shutdown = installShutdownHandlers(cleanup);
+  const shutdown = installShutdownHandlers(async () => {
+    await startupSettled;
+    if (startupResourcesReady) return cleanup();
+    stopLogMaintenance();
+    await releaseRuntime();
+  });
   try {
+  releaseRuntime = await acquireRuntime({ shutdown });
+  phaseStart('reconcile');
+  await sweepStaleTempFiles(STATE_DIR);
+  await reconcileRuntime();
+  stopLogMaintenance = startLogMaintenance();
+  phaseStart('session_restore');
+  engine = new ProxyEngine();
+  const priorState = await readState();
+  if (priorState?.active_session_id) {
+    try { await engine.setActiveSession(priorState.active_session_id, { create: false }); }
+    catch (error) { engine.diagnostics.push({ kind: 'session-restore-failed', code: error.code ?? 'SESSION_RESTORE_FAILED' }); }
+  }
+  const pacServer = new PacServer();
+  tools = makeTools({ engine, pacServer, mode: 'daemon' });
+
+  const { domains, tls_passthrough } = await loadDomainsConfig(args);
+  if (!args.skipRouting && domains.length) validateRoutingDomains(domains, { allowBroad: args.allowBroadRouting === true });
+
+  const proxyPort = args.proxyPort ?? PROXY_PORT_DEFAULT;
+  const pacPort   = args.pacPort   ?? PAC_PORT_DEFAULT;
+  const controlPort = args.controlPort ?? DEFAULT_CONTROL_PORT;
+
+  if (!args.skipRouting && args.skipHostTrust && domains.includes('*')) {
+    throw new Error('--no-host-trust cannot be combined with broad default routing; supply narrow --domains or use --no-routing');
+  }
+
+  startupResourcesReady = true;
+  phaseStart('ca');
   if ((args.caKeyPath == null) !== (args.caCertPath == null)) {
     throw new Error('--ca-key and --ca-cert must be provided together');
   }
   if (!args.caCertPath) await ensureCA();
+  phaseStart('host_trust');
   const activeCaCert = args.caCertPath ?? CA_CERT;
   if (!args.skipHostTrust) {
     const hostTrust = await setupHostCertificate(activeCaCert);
@@ -217,6 +235,7 @@ async function runDaemon(args) {
       throw error;
     }
   }
+  phaseStart('engine');
   await engine.start({
     port: proxyPort,
     tlsPassthrough: tls_passthrough,
@@ -230,24 +249,34 @@ async function runDaemon(args) {
   });
   process.stderr.write(`[proxy-mate] proxy listening on :${engine.port}\n`);
 
+  phaseStart('routing');
   let routing = null;
   let trust = null;
   if (!args.skipRouting && domains.length > 0) {
-    const applyRouting = () => applyPacRouting({
+    const applyRouting = async () => {
+      phaseStart('routing');
+      const result = await applyPacRouting({
       domains,
       networkService: args.networkService,
       pacPort,
       proxyPort: engine.port,
       pacServer,
       allowBroad: args.allowBroadRouting === true,
-    });
+      });
+      phaseStart('trust');
+      return result;
+    };
     if (args.skipTrust) routing = await applyRouting();
-    else ({ trust, routing } = await setupSimulatorRouting({
-      certPath: activeCaCert, keyPath: engine.caKeyPath, applyRouting,
-    }));
+    else {
+      phaseStart('trust');
+      ({ trust, routing } = await setupSimulatorRouting({
+        certPath: activeCaCert, keyPath: engine.caKeyPath, applyRouting,
+      }));
+    }
     process.stderr.write(`[proxy-mate] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
   }
 
+  phaseStart('trust');
   if (!args.skipTrust) {
     trust ??= await trustCaOnSimulators(activeCaCert);
     if (trust.trusted?.length) {
@@ -255,6 +284,7 @@ async function runDaemon(args) {
     }
   }
 
+  phaseStart('rules');
   // Replay any previously persisted rules.
   try {
     const persisted = await loadRules();
@@ -276,19 +306,28 @@ async function runDaemon(args) {
     process.stderr.write(`[proxy-mate] could not load persisted rules: ${error?.message ?? error}\n`);
   }
 
+  phaseStart('watcher');
   // Start the sim watcher in the daemon (Phase 3.4).
   if (!args.skipTrust) await tools[INTERNAL_CAPTURE_CONTROL].start_sim_watcher({ interval: 5000 });
+  phaseStart('control');
   // Publish readiness only after routing, trust and persisted rules are ready.
   ctrl = new ControlServer({ port: controlPort, tools });
   await writePidFile(process.pid);
-  await patchState({ control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
+  await patchState({ ...await readProcessIdentity(process.pid), control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
   await ctrl.start();
   process.stderr.write(`[proxy-mate] control plane listening on :${ctrl.port}\n`);
-  await recordRuntimeEvent('ready');
+  await recordPreviousExit();
+  phaseStart('ready');
+  const readyDetails = { ...durations, proxy_port: engine.port, pac_port: pacServer.port ?? pacPort, control_port: ctrl.port };
+  await recordRuntimeEvent('ready', { details: readyDetails });
+  logLine('daemon', 'ready', readyDetails);
   } catch (error) {
-    process.stderr.write(`[proxy-mate] daemon startup failed; rolling back: ${error?.message ?? error}\n`);
+    logLine('daemon', 'startup failed; rolling back', { phase, error_code: error?.code ?? null, error_message: error?.message ?? String(error) });
+    await recordRuntimeEvent('startup_failed', { code: 1, reason: 'startup_failed', details: {
+      phase, error_code: error?.code ?? null, error_message: error?.message ?? String(error),
+    } }).catch(() => {});
     finishStartup();
-    await shutdown(1);
+    await shutdown(1, 'startup_failed');
     return;
   }
   finishStartup();
