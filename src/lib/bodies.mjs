@@ -44,13 +44,13 @@ export function safeFilePart(value, label = 'value') {
 
 // Persist a captured body if it's large enough to be worth spilling.
 // Returns { inline: string | null, path: string | null, size: number, sha: string }.
-export async function storeFlowBody(buf, flowId, kind) {
+export async function storeFlowBody(buf, flowId, kind, decoded = {}) {
   if (!buf || buf.length === 0) {
     return { inline: '', path: null, size: 0, sha: null };
   }
   const size = buf.length;
   const sha = sha256(buf);
-  const text = bufToText(buf);
+  const text = Object.hasOwn(decoded, 'text') ? decoded.text : bufToText(buf);
   if (size <= LARGE_BODY_THRESHOLD && text !== null) {
     return { inline: text, path: null, size, sha, encoding: 'utf8' };
   }

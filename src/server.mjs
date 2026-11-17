@@ -25,19 +25,25 @@ import { startLogMaintenance } from './lib/log-maintenance.mjs';
 import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
 import { SERVER_INSTRUCTIONS } from './lib/guidance.mjs';
-import { recordRuntimeEvent } from './lib/runtime-identity.mjs';
+import { recordRuntimeEvent, recordPreviousExit } from './lib/runtime-identity.mjs';
+import { logLine, errorFields } from './lib/log-line.mjs';
 import { rememberCaptureLease, INTERNAL_CAPTURE_CONTROL } from './lib/capture-lease.mjs';
 import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/network-policy.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
-import { PacServer } from './lib/pac.mjs';
-import { makeTools } from './lib/tools.mjs';
+import { PacServer, recordRoutingSuspension, rearmRouting } from './lib/pac.mjs';
+import { createDaemonPacServer } from './lib/pac-host.mjs';
+import { createClientRegistry } from './lib/client-registry.mjs';
+import { makeTools, INTERNAL_PRESENCE_LOST, INTERNAL_ROUTING_CONTROL } from './lib/tools.mjs';
 import {
-  readState, isStateStale, defensiveNetworkResetAllServices,
+  readState, isStateStale, defensiveNetworkResetAllServices, sweepStaleTempFiles, readProcessIdentity,
   writePidFile, readPidFile, clearPidFile, clearState, patchState, readHandshake,
 } from './lib/state.mjs';
+import { startLiveness } from './lib/liveness.mjs';
+import { startEventLoopMetrics } from './lib/event-loop-metrics.mjs';
 import { ControlServer, callDaemon, probeDaemon, DEFAULT_CONTROL_PORT, SERIAL_TOOL_NAMES } from './lib/control.mjs';
 import { doctorSweep, PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT } from './lib/doctor.mjs';
+import { validateCustomCaPaths } from './lib/ca-paths.mjs';
 import { installLaunchAgent, uninstallLaunchAgent, launchAgentStatus } from './lib/launchagent.mjs';
 import { applyPacRouting, clearPacRouting, validateRoutingDomains } from './lib/pac.mjs';
 import { trustCaOnSimulators } from './lib/sim.mjs';
@@ -64,6 +70,10 @@ const STATUS_MUTATION_TOOLS = new Set([
 
 // ---- run modes ----
 async function runStdio({ requireDaemon = false } = {}) {
+  const { createDaemonReadiness } = await import('./lib/daemon-connection.mjs');
+  const { newClientId, normalizeTaskId } = await import('./lib/client-identity.mjs');
+  const client = { client_id: newClientId(), task_id: null };
+  const readiness = createDaemonReadiness({ client });
   let localReady = null, localTools = null, releaseRuntime = null;
   let daemonSeen = false, closing = false;
   let stopResourceMonitor = () => {};
@@ -80,18 +90,23 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (releaseRuntime) await releaseRuntime();
   }, { stdin: true });
   const dispatch = async (tool, args, context = {}) => {
+    if (['get_started', 'acquire_capture_lease', 'finish_capture_task'].includes(tool) && args?.task_id !== undefined) {
+      client.task_id = normalizeTaskId(args.task_id);
+    }
     if (closing) throw new Error('proxy-mate is shutting down.');
     // Resolve the handshake for EVERY call: launchd restarts rotate the token
     // and can change the port. Never retry a mutation after an ambiguous error.
     if (!localReady) {
       const state = await readState();
       const daemonExpected = requireDaemon || daemonSeen || (state?.pid && !await isStateStale());
-      const handshake = await waitForReadyDaemon({
+      const handshake = await readiness.waitForReady({
         timeoutMs: daemonExpected ? 15_000 : 0, signal: context.signal,
       });
       if (handshake) {
         daemonSeen = true;
-        return callDaemon({ ...handshake, tool, args, signal: context.signal });
+        const result = await callDaemon({ ...handshake, client, tool, args, signal: context.signal });
+        readiness.recordSuccess(handshake);
+        return result;
       }
       if (daemonExpected) {
         throw Object.assign(new Error('The shared daemon is unavailable after a bounded readiness wait. This MCP connection remains open.'), {
@@ -148,19 +163,112 @@ async function runStdio({ requireDaemon = false } = {}) {
 
 async function runDaemon(args) {
   configureConnectionAttempts();
-  const releaseRuntime = await acquireRuntime();
-  try { await reconcileRuntime(); }
-  catch (error) { await releaseRuntime(); throw error; }
-  const stopLogMaintenance = startLogMaintenance();
-
-  const engine = new ProxyEngine();
+  let releaseRuntime = async () => {}, stopLogMaintenance = () => {};
+  let engine, tools, startupResourcesReady = false;
+  let presenceTimer;
+  const clientRegistry = createClientRegistry({ onPresenceLost: client => tools[INTERNAL_PRESENCE_LOST](client) });
+  // Liveness answers from a worker thread so the guardian can tell a slow main
+  // loop from a hung process; loop metrics feed /metrics and the liveness body.
+  let liveness = null, loopMetrics = null;
+  const stopObservability = async () => {
+    loopMetrics?.stop(); loopMetrics = null;
+    try { await liveness?.stop(); } catch { /* best effort */ }
+    liveness = null;
+  };
+  const durations = Object.fromEntries(['lock', 'reconcile', 'session_restore', 'ca', 'host_trust', 'engine', 'routing', 'trust', 'rules', 'watcher', 'control'].map(name => [`${name}_ms`, 0]));
+  let phase = 'lock', phaseAt = performance.now();
+  const phaseStart = (next) => {
+    durations[`${phase}_ms`] += Math.round(performance.now() - phaseAt);
+    phase = next; phaseAt = performance.now();
+  };
+  let ctrl = null;
+  let finishStartup;
+  const startupSettled = new Promise((resolve) => { finishStartup = resolve; });
+  const cleanup = async (deadline = performance.now() + 19000) => {
+    // Leave one second for installShutdownHandlers' final event-journal flush.
+    const remaining = () => Math.max(0, deadline - performance.now());
+    const step = async (name, budgetMs, run) => {
+      const started = performance.now();
+      let timer, ok = false;
+      try {
+        const result = await Promise.race([
+          Promise.resolve().then(run),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${name} shutdown budget exhausted`)), Math.max(0, Math.min(budgetMs, remaining()))); }),
+        ]);
+        ok = true;
+        return result;
+      } catch (error) {
+        logLine('daemon', 'shutdown step failed', { step: name, ...errorFields(error) });
+      } finally {
+        clearTimeout(timer);
+        logLine('daemon', 'shutdown step', { step: name, elapsed_ms: Math.round(performance.now() - started), ok });
+      }
+    };
+    stopLogMaintenance();
+    await startupSettled;
+    clearInterval(presenceTimer);
+    const routingDeadline = performance.now() + Math.min(6000, remaining());
+    let routingRestored = false;
+    await step('routing', 6000, async () => {
+      // Stop claim-expiry timers first so no sync re-applies routing mid-shutdown;
+      // claims stay on disk for re-arm after restart.
+      try { await tools[INTERNAL_ROUTING_CONTROL]?.stop?.(); } catch { /* best effort */ }
+      const routingState = await readState();
+      await recordRoutingSuspension({ state: routingState, reason: 'daemon_shutdown', phase: 'pending' });
+      await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, {
+        routingOnly: true, timeoutCapMs: () => Math.max(0, routingDeadline - performance.now()),
+      });
+      routingRestored = true;
+      try { await recordRoutingSuspension({ state: routingState, reason: 'daemon_shutdown' }); }
+      catch (error) { logLine('daemon', 'routing suspension record failed', errorFields(error)); }
+    });
+    await step('control', 3000, async () => {
+      const result = await ctrl?.stop({ queueTimeoutMs: Math.min(3000, remaining()) });
+      if (result?.queue_drained === false) throw new Error('Control queue shutdown budget exhausted');
+    });
+    await step('operator_ui', 1000, () => tools.stop_operator_ui());
+    const configuredDrain = Number(readEnvironment('PROXY_MATE_DRAIN_MS') ?? 8000);
+    const graceMs = Math.max(0, Math.min(Number.isFinite(configuredDrain) && configuredDrain >= 0 ? configuredDrain : 8000, remaining() - 3000));
+    await step('capture', Math.max(0, remaining() - 2000), () => tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, { skipRouting: true, graceMs }));
+    await step('pid', 250, () => clearPidFile());
+    await step('state', 500, async () => {
+      if (!routingRestored) return; // Keep routing breadcrumbs for recovery.
+      const state = await readState();
+      const lease = state?.capture_lease;
+      await clearState();
+      await patchState({ active_session_id: engine.sessionId,
+        routing_suspended: state?.routing_suspended,
+        ...(lease && Date.parse(lease.expires_at) > Date.now() ? { capture_lease: lease } : {}) });
+    });
+    await step('observability', 500, () => stopObservability());
+    await step('lock', remaining(), () => releaseRuntime());
+  };
+  const shutdown = installShutdownHandlers(async () => {
+    const deadline = performance.now() + 19000;
+    await startupSettled;
+    if (startupResourcesReady) return cleanup(deadline);
+    stopLogMaintenance();
+    await stopObservability();
+    await releaseRuntime();
+  });
+  try {
+  releaseRuntime = await acquireRuntime({ shutdown });
+  phaseStart('reconcile');
+  await sweepStaleTempFiles(STATE_DIR);
+  await reconcileRuntime();
+  loopMetrics = startEventLoopMetrics();
+  try { liveness = await startLiveness(); }
+  catch (error) { logLine('daemon', 'liveness unavailable', errorFields(error)); }
+  stopLogMaintenance = startLogMaintenance();
+  phaseStart('session_restore');
+  engine = new ProxyEngine();
   const priorState = await readState();
   if (priorState?.active_session_id) {
     try { await engine.setActiveSession(priorState.active_session_id, { create: false }); }
     catch (error) { engine.diagnostics.push({ kind: 'session-restore-failed', code: error.code ?? 'SESSION_RESTORE_FAILED' }); }
   }
-  const pacServer = new PacServer();
-  const tools = makeTools({ engine, pacServer, mode: 'daemon' });
+  const pacServer = createDaemonPacServer();
+  tools = makeTools({ engine, pacServer, mode: 'daemon', clientRegistry, pacPort: args.pacPort ?? PAC_PORT_DEFAULT, networkService: args.networkService });
 
   const { domains, tls_passthrough } = await loadDomainsConfig(args);
   if (!args.skipRouting && domains.length) validateRoutingDomains(domains, { allowBroad: args.allowBroadRouting === true });
@@ -173,31 +281,13 @@ async function runDaemon(args) {
     throw new Error('--no-host-trust cannot be combined with broad default routing; supply narrow --domains or use --no-routing');
   }
 
-  let ctrl = null;
-  let finishStartup;
-  const startupSettled = new Promise((resolve) => { finishStartup = resolve; });
-  const cleanup = async () => {
-    stopLogMaintenance();
-    await startupSettled;
-    // Cancel control work before draining capture or restoring routing.
-    await ctrl?.stop();
-    await tools.stop_operator_ui();
-    const stopped = await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy();
-    await clearPidFile();
-    if (!stopped.routing_cleanup_error) {
-      const lease = (await readState())?.capture_lease;
-      await clearState();
-      await patchState({ active_session_id: engine.sessionId,
-        ...(lease && Date.parse(lease.expires_at) > Date.now() ? { capture_lease: lease } : {}) });
-    }
-    await releaseRuntime();
-  };
-  const shutdown = installShutdownHandlers(cleanup);
-  try {
+  startupResourcesReady = true;
+  phaseStart('ca');
   if ((args.caKeyPath == null) !== (args.caCertPath == null)) {
     throw new Error('--ca-key and --ca-cert must be provided together');
   }
   if (!args.caCertPath) await ensureCA();
+  phaseStart('host_trust');
   const activeCaCert = args.caCertPath ?? CA_CERT;
   if (!args.skipHostTrust) {
     const hostTrust = await setupHostCertificate(activeCaCert);
@@ -207,6 +297,7 @@ async function runDaemon(args) {
       throw error;
     }
   }
+  phaseStart('engine');
   await engine.start({
     port: proxyPort,
     tlsPassthrough: tls_passthrough,
@@ -220,24 +311,34 @@ async function runDaemon(args) {
   });
   process.stderr.write(`[proxy-mate] proxy listening on :${engine.port}\n`);
 
+  phaseStart('routing');
   let routing = null;
   let trust = null;
   if (!args.skipRouting && domains.length > 0) {
-    const applyRouting = () => applyPacRouting({
+    const applyRouting = async () => {
+      phaseStart('routing');
+      const result = await applyPacRouting({
       domains,
       networkService: args.networkService,
       pacPort,
       proxyPort: engine.port,
       pacServer,
       allowBroad: args.allowBroadRouting === true,
-    });
+      });
+      phaseStart('trust');
+      return result;
+    };
     if (args.skipTrust) routing = await applyRouting();
-    else ({ trust, routing } = await setupSimulatorRouting({
-      certPath: activeCaCert, keyPath: engine.caKeyPath, applyRouting,
-    }));
+    else {
+      phaseStart('trust');
+      ({ trust, routing } = await setupSimulatorRouting({
+        certPath: activeCaCert, keyPath: engine.caKeyPath, applyRouting,
+      }));
+    }
     process.stderr.write(`[proxy-mate] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
   }
 
+  phaseStart('trust');
   if (!args.skipTrust) {
     trust ??= await trustCaOnSimulators(activeCaCert);
     if (trust.trusted?.length) {
@@ -245,6 +346,7 @@ async function runDaemon(args) {
     }
   }
 
+  phaseStart('rules');
   // Replay any previously persisted rules.
   try {
     const persisted = await loadRules();
@@ -266,19 +368,41 @@ async function runDaemon(args) {
     process.stderr.write(`[proxy-mate] could not load persisted rules: ${error?.message ?? error}\n`);
   }
 
+  phaseStart('watcher');
   // Start the sim watcher in the daemon (Phase 3.4).
   if (!args.skipTrust) await tools[INTERNAL_CAPTURE_CONTROL].start_sim_watcher({ interval: 5000 });
+  phaseStart('control');
   // Publish readiness only after routing, trust and persisted rules are ready.
-  ctrl = new ControlServer({ port: controlPort, tools });
+  ctrl = new ControlServer({ port: controlPort, tools, clientRegistry,
+    onHeartbeat: client_id => tools[INTERNAL_ROUTING_CONTROL].renew(client_id, { sync: false }) });
+  presenceTimer = setInterval(() => clientRegistry.sweep().catch(error => {
+    logLine('daemon', 'presence sweep failed', { error_message: error.message });
+  }), 15000);
+  presenceTimer.unref();
   await writePidFile(process.pid);
-  await patchState({ control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
+  await patchState({ ...await readProcessIdentity(process.pid), control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
   await ctrl.start();
   process.stderr.write(`[proxy-mate] control plane listening on :${ctrl.port}\n`);
-  await recordRuntimeEvent('ready');
+  await recordPreviousExit();
+  phaseStart('ready');
+  const readyDetails = { ...durations, proxy_port: engine.port, pac_port: pacServer.port ?? pacPort, control_port: ctrl.port };
+  await recordRuntimeEvent('ready', { details: readyDetails });
+  logLine('daemon', 'ready', readyDetails);
+  // Claims may re-arm even with --no-routing; that flag only controls CLI domains.
+  const routingController = tools[INTERNAL_ROUTING_CONTROL];
+  const rearmAbort = new AbortController();
+  void rearmRouting({ controller: routingController, signal: rearmAbort.signal }).catch(error => {
+    logLine('daemon', 'routing re-arm failed', errorFields(error));
+  });
+  const stopRouting = routingController.stop;
+  routingController.stop = async () => { rearmAbort.abort(); await stopRouting(); };
   } catch (error) {
-    process.stderr.write(`[proxy-mate] daemon startup failed; rolling back: ${error?.message ?? error}\n`);
+    logLine('daemon', 'startup failed; rolling back', { phase, error_code: error?.code ?? null, error_message: error?.message ?? String(error) });
+    await recordRuntimeEvent('startup_failed', { code: 1, reason: 'startup_failed', details: {
+      phase, error_code: error?.code ?? null, error_message: error?.message ?? String(error),
+    } }).catch(() => {});
     finishStartup();
-    await shutdown(1);
+    await shutdown(1, 'startup_failed');
     return;
   }
   finishStartup();
@@ -442,7 +566,15 @@ async function runDoctor() {
   process.stdout.write(JSON.stringify({ ...sweep, state_was_stale: stale, network_reset: networkReset }, null, 2) + '\n');
 }
 
-async function runInstall(args, { quiet = false } = {}) {
+async function runInstall(args, { quiet = false, stat = fs.stat } = {}) {
+  // Fail before generating/trusting a CA, staging a runtime or activating jobs.
+  try {
+    await validateCustomCaPaths({ keyPath: args.caKeyPath, certPath: args.caCertPath, stat });
+  } catch (error) {
+    process.stderr.write(JSON.stringify({ code: error.code, message: error.message,
+      details: error.details, recovery: error.recovery }) + '\n');
+    throw error;
+  }
   connectionAttemptTimeout();
   const serverPath = url.fileURLToPath(import.meta.url);
   const installRouting = await loadDomainsConfig(args);

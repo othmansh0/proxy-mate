@@ -4,7 +4,7 @@ import { readEnvironment } from './lib/environment.mjs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { callDaemon } from './lib/control.mjs';
-import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
+import { createDaemonReadiness } from './lib/daemon-connection.mjs';
 import { readHandshake } from './lib/state.mjs';
 import { rememberCaptureLease } from './lib/capture-lease.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
@@ -13,6 +13,11 @@ import { SERVER_INSTRUCTIONS, gettingStarted, searchHelp, setupWorkflows } from 
 import { registerMcpTools, registerMcpResources, registerMcpPrompts,
   registerMcpResourceSubscriptions } from './lib/mcp-contract.mjs';
 
+import { newClientId, normalizeTaskId } from './lib/client-identity.mjs';
+
+const client = { client_id: newClientId(), task_id: null };
+const readiness = createDaemonReadiness({ client });
+const heartbeat = createBridgeHeartbeat({ client, readiness });
 const mcp = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, {
   capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS,
 });
@@ -20,18 +25,23 @@ let closing = false;
 let stopMonitor = () => {};
 const subscriptions = registerMcpResourceSubscriptions(mcp);
 const dispatch = rememberCaptureLease(async (tool, args, context = {}) => {
+  if (['get_started', 'acquire_capture_lease', 'finish_capture_task'].includes(tool) && args?.task_id !== undefined) {
+    client.task_id = normalizeTaskId(args.task_id);
+  }
   if (tool === 'search_docs') return searchHelp(args.query, args.limit);
   if (tool === 'list_setup_workflows') return setupWorkflows();
-  const handshake = await waitForReadyDaemon({ timeoutMs: tool === 'get_started' ? (await readHandshake() ? 3000 : 0) : 15_000, signal: context.signal });
+  const handshake = await readiness.waitForReady({ timeoutMs: tool === 'get_started' ? (await readHandshake() ? 3000 : 0) : 15_000, signal: context.signal });
+  if (handshake) heartbeat.contact(handshake);
   if (tool === 'get_started') {
     let status = null;
-    if (handshake) try { status = await callDaemon({ ...handshake, tool: 'get_proxy_status', timeoutMs: 5000, signal: context.signal }); } catch { /* actionable recovery help */ }
+    if (handshake) try { status = await callDaemon({ ...handshake, client, tool: 'get_proxy_status', timeoutMs: 5000, signal: context.signal }); heartbeat.contact(handshake); } catch { /* actionable recovery help */ }
     return gettingStarted(args, status, { daemonReachable: Boolean(handshake) });
   }
   if (!handshake) throw Object.assign(new Error('The shared daemon is unavailable. This MCP bridge remains connected; use get_started or search_docs for recovery.'), {
     code: 'DAEMON_UNAVAILABLE', retryable: true, recovery: ['Run proxy-mate status and inspect its daemon log.', 'Retry after recovery; no MCP restart is needed.'],
   });
-  const result = await callDaemon({ ...handshake, tool, args, signal: context.signal });
+  const result = await callDaemon({ ...handshake, client, tool, args, signal: context.signal });
+  heartbeat.contact(handshake);
   if (!/^get_|^list_|^search_|^wait_/.test(tool)) void subscriptions.notifyStatus().catch(() => {});
   const flowId = result?.flow?.id ?? result?.flow_id ?? result?.id;
   if (flowId && /flow|request|curl/.test(tool)) void subscriptions.notifyLiveFlow(flowId).catch(() => {});
@@ -45,6 +55,7 @@ const close = async (code = 0) => {
   if (closing) return;
   closing = true;
   stopMonitor();
+  heartbeat.stop();
   const deadline = setTimeout(() => process.exit(code), 2000);
   try { await mcp.close(); } finally { clearTimeout(deadline); process.exit(code); }
 };
@@ -59,3 +70,57 @@ process.stdout.on('error', (error) => {
 await mcp.connect(new StdioServerTransport());
 
 stopMonitor = startResourceSubscriptionMonitor(dispatch, subscriptions);
+
+// The timer never probes /health or shares a tool call's critical path. Re-read
+// the handshake to pick up daemon restarts, retaining the successful readiness
+// contact as a fallback. Only one heartbeat can be in flight at a time.
+export function createBridgeHeartbeat({ client, readiness, read = readHandshake,
+  stdin = process.stdin, setTimer = setTimeout, clearTimer = clearTimeout,
+  random = Math.random,
+  send = async (handshake, identity) => {
+    const response = await fetch(new URL('/heartbeat', handshake.controlUrl), {
+      method: 'POST', signal: AbortSignal.timeout(5000),
+      headers: { authorization: `Bearer ${handshake.token}`, 'content-type': 'application/json',
+        'x-proxy-mate-client-id': identity.client_id },
+      body: JSON.stringify({ ...identity, bridge_version: SERVER_VERSION }),
+    });
+    if (!response.ok) throw new Error('Heartbeat unavailable');
+    return response.json();
+  },
+}) {
+  // Test-only timing override; keep normal production heartbeat scheduling.
+  const testInterval = (process.env.NODE_TEST_CONTEXT || process.env.PROXY_MATE_ALLOW_FAKE_NETWORKSETUP === '1')
+    ? Number(process.env.PROXY_MATE_TEST_HEARTBEAT_MS) : 0;
+  let timer = null, stopped = false, cached = null, intervalMs = Number.isFinite(testInterval) && testInterval > 0 ? testInterval : 30000, failures = 0, inFlight = false;
+  const arm = () => {
+    if (stopped || inFlight || timer !== null) return;
+    timer = setTimer(async () => {
+      timer = null;
+      inFlight = true;
+      try {
+        const handshake = await read() ?? cached;
+        if (stopped) return;
+        if (handshake) {
+          const result = await send(handshake, client);
+          readiness.recordSuccess(handshake);
+          cached = handshake;
+          if (Number.isFinite(result?.interval_ms) && result.interval_ms >= 1000 && result.interval_ms <= 300000) intervalMs = result.interval_ms;
+        }
+      } catch { failures++; } // Debug counter only; never fail an MCP call.
+      finally { inFlight = false; arm(); }
+    }, intervalMs * (0.9 + random() * 0.2));
+    timer?.unref?.();
+  };
+  const stop = () => {
+    stopped = true;
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+    stdin.removeListener('end', stop); stdin.removeListener('close', stop);
+  };
+  stdin.once('end', stop); stdin.once('close', stop);
+  return {
+    contact(handshake) { readiness.recordSuccess(handshake); cached = handshake; arm(); },
+    stop,
+    get failures() { return failures; },
+  };
+}

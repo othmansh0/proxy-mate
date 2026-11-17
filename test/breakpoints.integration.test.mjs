@@ -134,3 +134,37 @@ test('rule replacement preserves pending breakpoints; proxy stop releases them',
   await secondRequest;
   await new Promise((resolve) => upstream.close(resolve));
 });
+
+test('scoped breakpoint hook uses request-time device identity and preserves owner metadata', async (t) => {
+  const { createRoutingClaimsStore } = await import('../src/lib/routing-claims.mjs');
+  const claims = createRoutingClaimsStore();
+  const owner = { client_id: 'device-a', task_id: 'task-a' };
+  const a = 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA';
+  const b = 'BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB';
+  for (const [client_id, task_id, device] of [[owner.client_id, owner.task_id, a], ['device-b', 'task-b', b]]) {
+    await claims.upsertClaim({ client_id, task_id, device_udids: [device], domains: ['127.0.0.1'], durationSeconds: 60 });
+  }
+  t.after(() => claims.removeAllClaims());
+  let device = a;
+  const engine = new ProxyEngine({ deviceResolver: () => device });
+  await engine.start({ port: 0 });
+  t.after(() => engine.stop());
+  const upstream = http.createServer((_req, res) => res.end('upstream'));
+  const port = await listen(upstream);
+  t.after(() => new Promise(resolve => upstream.close(resolve)));
+  const tools = makeTools({ engine, pacServer: {}, clientRegistry: { isAlive: () => true } });
+  const result = await tools.create_breakpoint({ rule_id: 'scoped-device', url_pattern: '^http://127\\.0\\.0\\.1:', direction: 'request' }, owner);
+  assert.equal(result.rule.scope, 'mine');
+  assert.deepEqual(result.rule.owner, owner);
+  await new Promise(setImmediate);
+  const pendingResponse = requestViaProxy(engine.port, `http://127.0.0.1:${port}/a`);
+  const pending = await waitForPending(engine, 'request');
+  assert.deepEqual(pending.owner, owner);
+  await tools.resolve_breakpoint({ breakpoint_id: pending.id, action: 'continue' });
+  assert.equal((await pendingResponse).body, 'upstream');
+  device = b;
+  assert.equal((await requestViaProxy(engine.port, `http://127.0.0.1:${port}/b`)).body, 'upstream');
+  device = null;
+  assert.equal((await requestViaProxy(engine.port, `http://127.0.0.1:${port}/ambiguous`)).body, 'upstream');
+  assert.equal(engine.breakpoints.getStatus().skipped_out_of_scope, 2);
+});

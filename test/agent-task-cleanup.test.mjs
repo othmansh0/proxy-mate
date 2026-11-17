@@ -74,3 +74,32 @@ test('old bridges receive reconnect guidance without a capture restart', async (
   assert.equal(older.running, true);
   assert.equal((await tools.get_proxy_status({}, { bridge_version: SERVER_VERSION })).client_compatibility, undefined);
 });
+
+test('explicit task_id finishes only the selected task for the caller', async t => {
+  const { tools } = await setup(t);
+  const client = { client_id: 'client-cleanup', task_id: 'second' };
+  const first = await tools.acquire_capture_lease({ task_id: 'first' }, client);
+  await tools.mock_json_response({ capture_lease_id: first.capture_lease_id, rule_id: 'first-only', url: 'http://example.test/first', json: {} }, { ...client, task_id: 'first' });
+  const second = await tools.acquire_capture_lease({ task_id: 'second' }, client);
+  await tools.mock_json_response({ capture_lease_id: second.capture_lease_id, rule_id: 'second-only', url: 'http://example.test/second', json: {} }, client);
+  const result = await tools.finish_capture_task({ task_id: 'first', capture_lease_id: second.capture_lease_id }, client);
+  assert.deepEqual(result.removed.map(r => r.id), ['first-only']);
+  assert.deepEqual((await tools.list_rules()).rules.map(r => r.rule_id), ['second-only']);
+  await assert.rejects(tools.remove_rule({ rule_id: 'second-only' }, { client_id: 'client-other' }), { code: 'RULE_CONFLICT' });
+  await tools.finish_capture_task({ task_id: 'second' }, client);
+});
+
+test('implicit rule IDs isolate owners and reverse listeners enforce resource ownership', async t => {
+  const { tools } = await setup(t);
+  const a = { client_id: 'client-rule-a', task_id: 'a' }, b = { client_id: 'client-rule-b', task_id: 'b' };
+  await tools.acquire_capture_lease({ task_id: 'a' }, a);
+  await tools.acquire_capture_lease({ task_id: 'b' }, b);
+  const args = { url: 'http://example.test/shared-default', json: {} };
+  const results = await Promise.allSettled([tools.mock_json_response(args, a), tools.mock_json_response(args, b)]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 2);
+  assert.notEqual(results[0].value.rule_id, results[1].value.rule_id);
+  await tools.create_reverse_proxy({ id: 'owned-listener', target_url: 'http://127.0.0.1:9' }, a);
+  await assert.rejects(tools.remove_reverse_proxy({ id: 'owned-listener' }, b), { code: 'CAPTURE_OWNED' });
+  await tools.finish_capture_task({}, a);
+  await tools.finish_capture_task({}, b);
+});

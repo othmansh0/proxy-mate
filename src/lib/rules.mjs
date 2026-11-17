@@ -13,6 +13,7 @@
 //     match_body_regex,
 //     enabled, priority, order, hit_count, last_hit,
 //     request_transform, response_transform, delay_ms, fault,
+//     owner, match_scope,                      // absent on pre-ownership legacy rules
 //     created_at, updated_at,
 //   }
 

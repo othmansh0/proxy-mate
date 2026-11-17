@@ -1,6 +1,6 @@
 import { MCP_RESOURCE_URIS } from './mcp-contract.mjs';
 
-export function startResourceSubscriptionMonitor(dispatch, subscriptions, intervalMs = 750) {
+export function startResourceSubscriptionMonitor(dispatch, subscriptions, intervalMs = 3000) {
   const fingerprints = new Map();
   let busy = false;
   const timer = setInterval(async () => {

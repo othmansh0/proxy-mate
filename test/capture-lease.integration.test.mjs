@@ -41,11 +41,15 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
     return result.structuredContent.data;
   };
   const lease = await call(0, 'acquire_capture_lease', { task_id: 'qa-a' });
-  assert.equal((await call(1, 'get_proxy_status')).capture_lease.task_id, 'qa-a');
-  for (const name of ['stop_proxy', 'clear_rules', 'toggle_recording']) {
-    const rejected = await clients[1].callTool({ name, arguments: {} });
-    assert.equal(rejected.structuredContent.error.code, 'CAPTURE_OWNED');
-  }
+  const other = await call(1, 'acquire_capture_lease', { task_id: 'qa-b' });
+  assert.equal(other.lease_status.other_lease_count, 1);
+  await Promise.all([
+    call(0, 'mock_json_response', { rule_id: 'a-own', url: 'http://fixture.invalid/a', json: {} }),
+    call(1, 'mock_json_response', { rule_id: 'b-own', url: 'http://fixture.invalid/b', json: {} }),
+  ]);
+  const rejected = await clients[0].callTool({ name: 'remove_rule', arguments: { rule_id: 'b-own' } });
+  assert.equal(rejected.structuredContent.error.code, 'RULE_CONFLICT');
+  await call(1, 'finish_capture_task');
   const sessionsBefore = (await call(0, 'list_capture_sessions')).sessions.length;
   const failedSwitch = await clients[0].callTool({ name: 'create_capture_session', arguments: { name: 'must-not-be-created', activate: true } });
   assert.equal(failedSwitch.structuredContent.error.code, 'SESSION_SWITCH_REQUIRES_STOPPED_PROXY');
@@ -53,7 +57,7 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
   await call(0, 'update_capture_session', { name: 'QA capture, still running' });
   assert.equal((await call(1, 'get_proxy_status')).running, true);
   const url = 'http://fixture.invalid/leased-breakpoint';
-  await call(0, 'create_breakpoint', { rule_id: 'qa-a-pause', url, direction: 'request', timeout_ms: 5000 });
+  await call(0, 'create_breakpoint', { rule_id: 'qa-a-pause', url, direction: 'request', scope: 'all', timeout_ms: 5000 });
   const request = new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port: engine.port, path: url }, (res) => {
       const chunks = []; res.on('data', (chunk) => chunks.push(chunk));
@@ -67,14 +71,12 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
     if (!pending) await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.ok(pending);
-  const denied = await clients[1].callTool({ name: 'resolve_breakpoint', arguments: { breakpoint_id: pending.id, action: 'continue' } });
-  assert.equal(denied.structuredContent.error.code, 'CAPTURE_OWNED');
-  await call(0, 'resolve_breakpoint', { breakpoint_id: pending.id, action: 'respond', response: { statusCode: 202, json: { edited: true } } });
+  await call(1, 'resolve_breakpoint', { breakpoint_id: pending.id, action: 'respond', response: { statusCode: 202, json: { edited: true } } });
   const received = await request;
   assert.equal(received.status, 202);
   assert.deepEqual(JSON.parse(received.text), { edited: true });
-  const observed = await call(1, 'wait_for_flow', { url_contains: 'leased-breakpoint', include_existing: true, timeout_ms: 1000 });
-  const exported = await call(1, 'save_body_to_file', { flow_id: observed.flow.id });
+  const observed = await call(1, 'wait_for_flow', { scope: 'all', url_contains: 'leased-breakpoint', include_existing: true, timeout_ms: 1000 });
+  const exported = await call(1, 'save_body_to_file', { flow_id: observed.flow.id, scope: 'all' });
   assert.equal(exported.redacted, true);
   await call(0, 'remove_rule', { rule_id: 'qa-a-pause' });
   await call(0, 'mock_json_response', { rule_id: 'qa-a-cleanup', url: 'http://fixture.invalid/cleanup', json: { cleanup: true } });

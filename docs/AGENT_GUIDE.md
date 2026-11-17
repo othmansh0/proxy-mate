@@ -24,6 +24,52 @@ handshake and forward calls. CLI subcommands are `doctor`, `install`,
 
 Use the installed thin `src/client.mjs` for shared production clients; it is also the default for `src/server.mjs`. It removes the in-process fallback and waits up to 15 seconds for daemon readiness before dispatch. [daemon-connection.mjs](../src/lib/daemon-connection.mjs) owns this pre-dispatch wait; submitted mutations are never replayed after a transport failure. The single-client compatibility mode requires --in-process.
 
+## Several agents on one daemon
+
+Each thin bridge generates its own `client_id`. It forwards that identity and an optional `task_id` to the daemon. Set the task with `get_started` or `acquire_capture_lease`; `finish_capture_task` also accepts `task_id`. Task IDs use 1–96 letters, digits, dots, underscores or hyphens. A new bridge process has a new client identity. Client IDs and task IDs coordinate processes of the same macOS user; they are not authentication or a security boundary.
+
+### Routing claims and presence
+
+`set_proxy_routing` replaces the claim for the current client/task. The PAC routes the union of all unexpired claims. Each claim accepts 1–64 host globs; the union is limited to 256. `duration_seconds` defaults to 3600 and accepts 1–86400. `enable_ssl_proxying` adds hosts to the caller's claim without extending an existing unexpired deadline. Clearing or expiring one claim preserves the others. Active routing from a pre-claims runtime is left untouched until explicitly cleared.
+
+After its first daemon contact, the bridge sends quiet heartbeats about every 30 seconds, with ±10% jitter. A heartbeat renews that client's claim deadlines using each claim's requested duration, without changing network settings. Presence expires after three missed heartbeat intervals; the daemon allows 90 seconds of startup grace. Presence loss removes that client's claims. Closing stdio stops heartbeats; it does not finish a task or delete its fixtures.
+
+Pass `device_udid` to `set_proxy_routing` as one Simulator UUID or an array of at most eight UUIDs. Use the devices you actually drive. The store calls this field `device_udids`; that plural name is not the tool argument. Device attribution and owner indexes help scope evidence and breakpoints. A host claim alone cannot distinguish two agents using the same API.
+
+Daemon shutdown suspends routing and retains claims. After restart, unexpired claims re-arm only if the restored PAC settings still match the recorded snapshot. External VPN, user or proxy changes prevent automatic re-arm. Check `get_proxy_status` for claims, union domains and routing loss. Successful daemon tool results can include `routing_warning` when the current task's retained claim is expired or suspended. Inspect it even if the tool itself succeeded. Use `set_proxy_routing` to re-arm your claim explicitly after checking the current network configuration.
+
+`clear_proxy_routing` defaults to your current client/task claim. `scope: "all"` deliberately removes every claim and can clear pre-claims routing. It is a shared operation; do not use it as routine task cleanup. It does not take `confirm_shared`.
+
+### Evidence reads and protected clears
+
+Identified bridges default to `scope: "mine"` on scoped flow reads, waits, analyses, comparisons, HAR/session exports and WebSocket list/message reads. Legacy bridges without identity default to `all`. Explicit `scope: "all"` permits shared inspection. Results report `scope_applied` and `hidden_count`; the latter counts hidden evidence in the query window, not every flow in the daemon. An out-of-scope detail read returns `FLOW_OUT_OF_SCOPE`.
+
+Mine includes flows attributed to the client, flows from devices in its unexpired claims, and unknown or ambiguous flows matching its unexpired claim hosts. Shared-host traffic can therefore be visible to several agents. This is best-effort coordination. Only tools whose schemas expose `scope` support that argument; it is not a universal privacy filter.
+
+`clear_session` and `purge_capture_session` default to scoped deletion for identified clients and report `removed_count` and `kept_other_clients_count`. Shared deletion requires `scope: "all"` and `confirm_shared: true`, or returns `CONFIRM_SHARED_REQUIRED`. Retention changes through `update_capture_session` require the same explicit shared choice when they affect other clients' evidence. Inspect counts before widening a clear.
+
+### Task leases, breakpoints and global controls
+
+Acquire a lease with `acquire_capture_lease`, a unique `task_id`, and optional `ttl_seconds` (default 900; range 30–3600). The bridge remembers `capture_lease_id`; direct RPC callers supply it on applicable mutations. Leases persist in `leases.json`. Presence/heartbeats renew live leases. Conflicts are resource-scoped: `CAPTURE_OWNED` means another live task owns a targeted rule or reverse listener, not that the whole daemon is locked. Independent resources can proceed. Expiry, release or presence loss retains fixtures as visible orphans rather than deleting them. `finish_capture_task` removes only that task's tracked, unchanged resources; `keep_resources: true` retains them.
+
+`resolve_breakpoint` and `cancel_breakpoint` bypass lease enforcement so any client can release a paused request. `create_breakpoint` defaults to `scope: "mine"` for identified clients and `all` for legacy bridges. Mine matches the task's claimed devices, or its claimed hosts when no other live client claims that host. A known foreign device cannot fall back to host matching. A cold claim snapshot safely skips pauses. `scope: "all"` deliberately restores shared matching. Skips appear as `skipped_out_of_scope` in history/status.
+
+Global controls return `OTHER_CLIENTS_ACTIVE` while another live identified client holds an unexpired routing claim, unless `force: true` is supplied. This guards `stop_proxy`, `toggle_recording`, `start_app_capture`, `start_proxy` with `auto_setup`, `restart_sim_apps`, and Simulator certificate setup when app restart is enabled. Coordinate before forcing a change. App restarts use explicit `udid`, otherwise the current task's claimed devices; with no claimed devices they retain the legacy restart selection. Pass a device explicitly when targeting matters.
+
+During restart, the bridge waits up to 15 seconds before dispatch. `DAEMON_UNAVAILABLE` means readiness did not return within that budget; the stdio bridge remains connected and can recover on a later call. It does not mean the MCP process exited. `get_started`, `search_docs` and tool discovery remain available. If a submitted mutation loses its connection, `DAEMON_DISCONNECTED` or `DAEMON_TIMEOUT` can include `details.completion_unknown: true`. Inspect shared state before resubmitting; mutations are never automatically replayed.
+
+Do:
+
+- Use a unique task ID and explicit rule IDs; pass your Simulator UDIDs on routing claims.
+- Check routing warnings, hidden counts and actual app behavior.
+- Resolve pauses promptly and finish only your task's resources.
+
+Don't:
+
+- Treat a shared host or a client ID as proof of exclusive ownership.
+- Force global controls or clear all claims/evidence as routine cleanup.
+- Retry an unknown-outcome mutation without inspecting its result in shared state.
+
 ## Entry points and boundaries
 
 | Area | Source of truth | Responsibility |
@@ -106,6 +152,8 @@ input; only the server process's own environment.
    user-visible surface change.
 
 ## Tests and checks
+
+Run repository tests **without** setting `PROXY_MATE_HOME`. Under `node --test`, each test process gets its own private temporary state directory, so fixtures that replace or remove the state root can never reach an installed daemon's `~/.proxy-mcp` or `~/.proxy-mate`, and parallel test files never share rules, claims, leases or sessions. The real `networksetup` is refused inside test runs. Exporting one `PROXY_MATE_HOME` for the whole suite would make parallel files share state and become flaky.
 
 ```sh
 npm test                                      # full Node test suite

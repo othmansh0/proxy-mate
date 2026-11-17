@@ -126,3 +126,72 @@ test('JSONL backend restores snapshots through private atomic files', async () =
   const restored = new WebSocketStore({ backend }); await restored.restore();
   assert.equal(restored.listMessages({ connectionId: 'disk', includeSensitive: true }).messages[0].data.text, 'persisted');
 });
+
+test('JSONL appends deltas, compacts bounded history, and reloads legacy snapshots', async () => {
+  const { readFile, writeFile } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-append-'));
+  const file = join(directory, 'frames.jsonl');
+  const store = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file), maxMessagesPerConnection: 3 });
+  store.onRequest({ id: 'append', url: 'wss://append.test' });
+  await store.flush();
+  const prefix = await readFile(file, 'utf8');
+  store.onMessageReceived({ id: 'append', data: 'first' });
+  await store.flush();
+  assert.ok((await readFile(file, 'utf8')).startsWith(prefix));
+  for (let i = 0; i < 80; i++) {
+    store.onMessageSent({ id: 'append', data: `frame-${i}` });
+    await store.flush();
+  }
+  const restored = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file), maxMessagesPerConnection: 3 });
+  await restored.restore(); await restored.flush();
+  assert.deepEqual(restored.exportTranscript({ connectionId: 'append' }).connection, store.exportTranscript({ connectionId: 'append' }).connection);
+  assert.ok((await stat(file)).size < 20_000);
+  await writeFile(file, JSON.stringify(store.exportSnapshot()) + '\n');
+  const legacy = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file) });
+  await legacy.restore(); await legacy.flush();
+  assert.equal(legacy.listMessages({ connectionId: 'append' }).messages.length, 3);
+});
+
+test('journal preserves eviction across connections and reused connection ids', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-eviction-'));
+  const backend = new JsonlWebSocketStoreBackend(join(directory, 'frames.jsonl'));
+  const store = new WebSocketStore({ backend, maxConnections: 2, maxTotalMessageBytes: 600 });
+  store.onRequest({ id: 'a' }); store.onMessageSent({ id: 'a', data: 'old' }); await store.flush();
+  store.onRequest({ id: 'b' }); store.onMessageSent({ id: 'b', data: 'b'.repeat(100) }); await store.flush();
+  store.onRequest({ id: 'c' }); store.onMessageSent({ id: 'c', data: 'c'.repeat(100) });
+  store.onRequest({ id: 'a' }); store.onMessageSent({ id: 'a', data: 'reused' }); await store.flush();
+  const restored = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(backend.path), maxConnections: 2, maxTotalMessageBytes: 600 });
+  await restored.restore(); await restored.flush();
+  assert.deepEqual(restored.exportSnapshot().connections, store.exportSnapshot().connections);
+});
+
+test('save-only JSON backends retain coalescing and surface persistence errors', async () => {
+  let snapshot, saves = 0;
+  const store = new WebSocketStore({ backend: { save: async value => { snapshot = value; saves++; } } });
+  store.onRequest({ id: 'json' });
+  for (let i = 0; i < 10; i++) store.onMessageSent({ id: 'json', data: String(i) });
+  await store.flush();
+  assert.equal(saves, 1);
+  assert.equal(snapshot.connections[0].messages.length, 10);
+  store.backend.save = async () => { throw new Error('disk failed'); };
+  store.onClose({ id: 'json' });
+  await assert.rejects(store.flush(), /disk failed/);
+  store.backend.save = async value => { snapshot = value; };
+  store.onRequest({ id: 'recovered' }); await store.flush();
+  assert.equal(snapshot.connections.length, 2);
+});
+
+test('journal recovers a torn final append and remains writable', async () => {
+  const { appendFile } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-torn-'));
+  const file = join(directory, 'frames.jsonl');
+  const store = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file) });
+  store.onRequest({ id: 'torn' }); store.onMessageSent({ id: 'torn', data: 'committed' }); await store.flush();
+  await appendFile(file, '{"op":"batch","records":[');
+  const restored = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file) });
+  await restored.restore(); await restored.flush();
+  restored.onMessageSent({ id: 'torn', data: 'after recovery' }); await restored.flush();
+  const again = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file) });
+  await again.restore(); await again.flush();
+  assert.deepEqual(again.listMessages({ connectionId: 'torn', includeSensitive: true }).messages.map(m => m.data.text), ['committed', 'after recovery']);
+});

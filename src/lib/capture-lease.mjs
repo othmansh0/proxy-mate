@@ -1,12 +1,15 @@
 import crypto from 'node:crypto';
-import { readState, patchState } from './state.mjs';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { readState, atomicWriteJson, STATE_DIR } from './state.mjs';
+import { recordRuntimeEvent } from './runtime-identity.mjs';
 
 export const INTERNAL_CAPTURE_CONTROL = Symbol('trusted capture lifecycle');
 
-// Observation, file exports and request replay remain available to every
-// client. A task can lease shared mutations without taking capture ownership
-// away when its stdio connection closes. This is coordination, not a security
-// boundary between processes running as the same macOS user.
+// This set keeps bridge lease propagation and MCP input compatibility. The
+// tools wrapper checks only explicit resource targets; global-control policy
+// is separate. Breakpoint tools retain their legacy lease input, but bypass
+// enforcement so paused requests remain resolvable by every client.
 export const LEASE_PROTECTED_TOOLS = new Set([
   'finish_capture_task',
   'start_proxy', 'start_app_capture', 'stop_proxy', 'set_proxy_routing', 'clear_proxy_routing',
@@ -25,81 +28,182 @@ export const LEASE_PROTECTED_TOOLS = new Set([
   'create_transform_plugin_rule', 'import_websocket_transcript',
 ]);
 
+const queues = new Map();
+const emptyStore = () => ({ leases: {}, orphaned_resources: [] });
+const key = (client, task) => JSON.stringify([client, task]);
+
 export class CaptureLease {
-  constructor({ read = readState, patch = patchState, clock = Date.now } = {}) {
-    this.read = read;
-    this.patch = patch;
-    this.clock = clock;
-    this.queue = Promise.resolve();
+  constructor({ read = readState, clock = Date.now, directory = STATE_DIR,
+    registry, recordEvent = recordRuntimeEvent } = {}) {
+    Object.assign(this, { read, clock, registry, recordEvent });
+    this.file = path.join(directory, 'leases.json');
+    this.snapshot = emptyStore();
+    // Registries may be partial (presence-only callers and tests); hook only
+    // the methods that exist.
+    if (typeof registry?.touch === 'function') {
+      const touch = registry.touch.bind(registry);
+      registry.touch = (client) => {
+        const result = touch(client), at = this.clock();
+        // Queue immediately: a subsequent mutation observes the renewal first.
+        this.renew(client?.client_id, at).catch(error => console.error('Lease renewal failed:', error.code ?? error.message));
+        return result;
+      };
+    }
+    if (typeof registry?.sweep === 'function') {
+      const sweep = registry.sweep.bind(registry);
+      registry.sweep = async () => { await sweep(); await this.summary(); };
+    }
   }
 
-  current(state) {
-    const lease = state?.capture_lease;
-    return lease && typeof lease.lease_id === 'string' && Date.parse(lease.expires_at) > this.clock() ? lease : null;
+  async load() {
+    try { return JSON.parse(await fs.readFile(this.file, 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const data = emptyStore(), old = (await this.read())?.capture_lease;
+    if (old?.lease_id) {
+      const lease = { ...old, client_id: old.client_id ?? 'legacy',
+        created_at: old.created_at ?? new Date(this.clock()).toISOString(), ttl_seconds: old.ttl_seconds ?? 900 };
+      data.leases[key(lease.client_id, lease.task_id)] = lease;
+    }
+    // The existence of leases.json is the durable one-time migration marker.
+    await atomicWriteJson(this.file, data);
+    return data;
   }
 
-  status(state) {
-    const lease = this.current(state);
-    return lease ? { active: true, task_id: lease.task_id, expires_at: lease.expires_at, owned_resource_count: lease.resources?.length ?? 0 }
-      : { active: false, task_id: null, expires_at: null };
+  alive(lease) {
+    const presence = this.registry?.list().find(c => c.client_id === lease.client_id);
+    return !presence || this.registry.isAlive(lease.client_id);
   }
 
-  async assert(leaseId) {
-    const state = await this.read();
-    const lease = this.current(state);
-    if (leaseId && !lease) throw leaseError('CAPTURE_LEASE_EXPIRED', 'The capture lease is no longer active.', this.status(state));
-    if (lease && lease.lease_id !== leaseId) throw leaseError('CAPTURE_OWNED', 'Another task holds the shared capture controls.', this.status(state));
-    return lease;
+  orphan(data, lease) {
+    for (const resource of lease.resources ?? []) data.orphaned_resources.push({ ...resource,
+      last_owner_client: lease.client_id, last_owner_task: lease.task_id,
+      orphaned_at: new Date(this.clock()).toISOString() });
+    delete data.leases[key(lease.client_id, lease.task_id)];
   }
 
-  acquire({ task_id, capture_lease_id, ttl_seconds = 900 } = {}) {
-    return this.mutate(async () => {
+  async expire(data) {
+    for (const lease of Object.values(data.leases)) {
+      const lost = !this.alive(lease);
+      if (lost || Date.parse(lease.expires_at) <= this.clock()) {
+        this.orphan(data, lease);
+        if (lost) await this.recordEvent('lease_released_presence_lost', { details: { client_id: lease.client_id } });
+      }
+    }
+  }
+
+  mutate(fn, { expire = true } = {}) {
+    const operation = (queues.get(this.file) ?? Promise.resolve()).then(async () => {
+      const data = await this.load();
+      if (expire) await this.expire(data);
+      // Persist expiry even when the requested mutation subsequently fails.
+      await atomicWriteJson(this.file, data);
+      this.snapshot = data;
+      const result = await fn(data);
+      await atomicWriteJson(this.file, data);
+      this.snapshot = data;
+      return result;
+    });
+    queues.set(this.file, operation.catch(() => {}));
+    return operation;
+  }
+
+  find(data, args = {}, context = {}) {
+    const client = context.client_id ?? 'legacy';
+    const task = args.task_id ?? context.task_id;
+    if (task) return data.leases[key(client, task)] ?? null;
+    return Object.values(data.leases).find(l => l.client_id === client && l.lease_id === args.capture_lease_id) ?? null;
+  }
+
+  status(_state, context = {}, data = this.snapshot) {
+    const lease = this.find(data, {}, context);
+    const client = context.client_id ?? 'legacy';
+    return { active: !!lease, task_id: lease?.task_id ?? null, expires_at: lease?.expires_at ?? null,
+      owned_resource_count: lease?.resources.length ?? 0,
+      other_lease_count: Object.values(data.leases).filter(l => l !== lease).length,
+      orphaned_resource_count: data.orphaned_resources.length,
+      orphaned_resources: data.orphaned_resources.filter(r => r.last_owner_client === client) };
+  }
+
+  summary(context = {}) { return this.mutate(data => this.status(null, context, data)); }
+
+  assert(leaseId, context = {}, resources = [], taskId) {
+    return this.mutate(data => {
+      const lease = this.find(data, { capture_lease_id: leaseId, task_id: taskId }, context);
+      if (leaseId && !lease && !taskId) throw leaseError('CAPTURE_LEASE_EXPIRED', 'The task lease expired; acquire a new task lease.', this.status(null, context, data));
+      for (const other of Object.values(data.leases)) {
+        if (other === lease) continue;
+        if (resources.some(r => other.resources.some(o => o.kind === r.kind && o.id === r.id))) {
+          throw leaseError('CAPTURE_OWNED', 'This resource belongs to another live task. Wait for release or presence expiry, or use a different resource ID.', this.status(null, context, data));
+        }
+      }
+      return lease;
+    });
+  }
+
+  acquire({ task_id, ttl_seconds = 900, capture_lease_id } = {}, context = {}) {
+    return this.mutate(data => {
       if (typeof task_id !== 'string' || !/^[A-Za-z0-9._-]{1,96}$/.test(task_id)
         || !Number.isInteger(ttl_seconds) || ttl_seconds < 30 || ttl_seconds > 3600) {
         throw Object.assign(new Error('Use a task_id of 1–96 safe characters and a lease TTL of 30–3600 seconds.'), { code: 'INVALID_CAPTURE_LEASE' });
       }
-      const state = await this.read();
-      const current = this.current(state);
-      if (current && (current.lease_id !== capture_lease_id || current.task_id !== task_id)) {
-        throw leaseError('CAPTURE_OWNED', 'Another task holds the shared capture controls.', this.status(state));
+      const client_id = context.client_id ?? 'legacy', id = key(client_id, task_id);
+      let current = data.leases[id];
+      // A pre-identity bridge may resume its migrated lease with its explicit token.
+      const migrated = data.leases[key('legacy', task_id)];
+      if (!current && migrated?.lease_id === capture_lease_id) {
+        current = migrated; delete data.leases[key('legacy', task_id)];
       }
-      const resumable = !current && capture_lease_id && state?.capture_lease?.lease_id === capture_lease_id
-        && state.capture_lease.task_id === task_id ? state.capture_lease : null;
-      const lease = { lease_id: current?.lease_id ?? crypto.randomUUID(), task_id,
-        resources: current?.resources ?? resumable?.resources ?? [],
-        expires_at: new Date(this.clock() + ttl_seconds * 1000).toISOString() };
-      await this.patch({ capture_lease: lease });
-      return { status: current ? 'renewed' : 'acquired', capture_lease_id: lease.lease_id,
-        task_id, expires_at: lease.expires_at,
-        next_actions: ['Pass capture_lease_id on shared mutations; the thin bridge remembers it for this connection.',
-          'Call finish_capture_task for owned-resource cleanup; keep_resources=true retains QA fixtures. Release alone keeps fixtures.'] };
+      if (!current && Object.keys(data.leases).length >= 256) throw Object.assign(new Error('At most 256 task leases are allowed.'), { code: 'TASK_LEASE_LIMIT' });
+      const lease = { lease_id: current?.lease_id ?? crypto.randomUUID(), client_id, task_id,
+        created_at: current?.created_at ?? new Date(this.clock()).toISOString(), ttl_seconds,
+        expires_at: new Date(this.clock() + ttl_seconds * 1000).toISOString(), resources: current?.resources ?? [] };
+      data.leases[id] = lease;
+      return { status: current ? 'renewed' : 'acquired', capture_lease_id: lease.lease_id, task_id,
+        expires_at: lease.expires_at, lease_status: this.status(null, { client_id, task_id }, data),
+        next_actions: ['Call finish_capture_task to remove unchanged task resources, or release_capture_lease to keep them as orphans.'] };
     });
   }
 
-  release({ capture_lease_id } = {}) {
-    return this.mutate(async () => {
-      const lease = await this.assert(capture_lease_id);
-      if (!lease) return { status: 'not_held' };
-      await this.patch({ capture_lease: null });
-      return { status: 'released', task_id: lease.task_id, capture_continues: true };
+  release(args = {}, context = {}) {
+    return this.mutate(data => {
+      const lease = this.find(data, args, context);
+      if (!lease) return { status: 'not_held', lease_status: this.status(null, context, data) };
+      this.orphan(data, lease);
+      return { status: 'released', task_id: lease.task_id, capture_continues: true, lease_status: this.status(null, context, data) };
     });
+  }
+
+  finish(leaseId, retained, context) {
+    return this.mutate(data => {
+      const lease = this.find(data, { capture_lease_id: leaseId }, { client_id: context.client_id });
+      if (!lease) throw leaseError('CAPTURE_LEASE_EXPIRED', 'Task lease expired during cleanup.', this.status(null, context, data));
+      lease.resources = lease.resources.filter(r => retained.some(k => k.kind === r.kind && k.id === r.id));
+      this.orphan(data, lease);
+      return this.status(null, context, data);
+    });
+  }
+
+  renew(clientId, at) {
+    return this.mutate(data => {
+      for (const lease of Object.values(data.leases)) if (lease.client_id === clientId && Date.parse(lease.expires_at) > at) {
+        lease.expires_at = new Date(at + lease.ttl_seconds * 1000).toISOString();
+      }
+      return this.expire(data);
+    }, { expire: false });
   }
 
   trackResource(leaseId, resource) {
-    return this.mutate(async () => {
-      const state = await this.read();
-      const lease = state?.capture_lease;
-      if (lease?.lease_id !== leaseId) throw leaseError('CAPTURE_OWNED', 'Task resource ownership changed during the operation.', this.status(state));
-      const resources = (lease.resources ?? []).filter((item) => item.kind !== resource.kind || item.id !== resource.id);
-      if (resources.length >= 512) throw Object.assign(new Error('Finish this task before creating more than 512 owned resources.'), { code: 'TASK_RESOURCE_LIMIT' });
-      await this.patch({ capture_lease: { ...lease, resources: [...resources, resource] } });
+    return this.mutate(data => {
+      const lease = Object.values(data.leases).find(l => l.lease_id === leaseId);
+      if (!lease) throw leaseError('CAPTURE_LEASE_EXPIRED', 'Task lease expired during mutation.', {});
+      const resources = lease.resources.filter(r => r.kind !== resource.kind || r.id !== resource.id);
+      const orphans = data.orphaned_resources; // Retain former ownership evidence even after reuse.
+      // Reserve orphan capacity for every live resource: losing all clients
+      // must never overflow the bound or require throwing evidence away.
+      const total = Object.values(data.leases).reduce((n, l) => n + (l === lease ? resources.length : l.resources.length), orphans.length);
+      if (resources.length >= 512 || total >= 1024) throw Object.assign(new Error('Finish task resources before tracking more resources.'), { code: 'TASK_RESOURCE_LIMIT' });
+      lease.resources = [...resources, resource];
     });
-  }
-
-  mutate(fn) {
-    const operation = this.queue.then(fn);
-    this.queue = operation.catch(() => {});
-    return operation;
   }
 }
 
@@ -133,5 +237,5 @@ export function rememberCaptureLease(dispatch) {
 function leaseError(code, message, status) {
   return Object.assign(new Error(message), { code, retryable: false, details: status,
     recovery: ['Read get_proxy_status and inspect existing flows without changing capture.',
-      'Use the current lease ID, or acquire a new lease after its owner releases it or it expires.'] });
+      'Use a different resource ID, or wait for its owning task to finish, expire, or lose presence.'] });
 }

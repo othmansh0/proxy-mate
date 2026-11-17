@@ -1,16 +1,21 @@
+import { fakeHostTrust } from './test-hooks.mjs';
+import { createBreakpointScope } from './breakpoints.mjs';
 // Shared tool implementations. Both the daemon's control HTTP server and the
 // in-process MCP-server route through these functions. Each tool returns
 // JSON-serializable data; the MCP transport layer wraps that into MCP content.
 
 import path from 'node:path';
+import { logLine } from './log-line.mjs';
 import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 
 import { CA_CERT, CA_DIR, ensureCA, rotateCA, removeOwnedMockBody } from './proxy.mjs';
-import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains } from './pac.mjs';
+import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains, createRoutingController, pickActiveNetworkService } from './pac.mjs';
+import { createRoutingClaimsStore, validateDeviceUdids } from './routing-claims.mjs';
+import { LEGACY_CLIENT_ID } from './client-identity.mjs';
 import { gettingStarted, searchHelp, setupWorkflows } from './guidance.mjs';
-import { runtimeIdentity, readRuntimeEvents } from './runtime-identity.mjs';
+import { runtimeIdentity, readRuntimeEvents, recordRuntimeEvent } from './runtime-identity.mjs';
 import { encodeAgentJson, mergeJsonPatch } from './agent-json.mjs';
 import {
   trustCaOnSimulators, restartSimApps, watchSimulators,
@@ -73,8 +78,192 @@ function resourceRevision(config) {
 
 // Factory: builds a tool object given an engine + pac server pair. Optionally
 // owns lifecycle helpers (sim watcher stop fn, etc.).
-export function makeTools({ engine, pacServer, mode = 'in-process' }) {
-  const captureLease = new CaptureLease();
+// Non-enumerable integration hook: tools[INTERNAL_ROUTING_CONTROL] exposes the
+// single lazily constructed controller (after the engine has bound its port).
+export const INTERNAL_PRESENCE_LOST = Symbol('presence-lost');
+export const INTERNAL_ROUTING_CONTROL = Symbol('routing-control');
+export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
+  clientRegistry, restartApps = restartSimApps,
+  pacPort = PAC_PORT_DEFAULT, networkService, now = Date.now, setTimer, clearTimer,
+  hostCertificateStatus = getHostCertificateStatus,
+}) {
+  const fakeTrust = fakeHostTrust(); // Test-only read-only status override, never certificate operations.
+  if (fakeTrust) logLine('daemon', 'test-only fake host trust status active');
+  const claims = createRoutingClaimsStore({ now });
+  let controller;
+  let routingOptions = {};
+  let routingCache = null;
+  const claimDetails = new Map();
+  const routingController = () => controller ??= createRoutingController({ claims, pacServer,
+    networkService, proxyPort: () => engine.port, pacPort: routingOptions.pac_port ?? pacPort,
+    run, select: service => select ? select(routingOptions.network_service ?? service)
+      : pickActiveNetworkService(routingOptions.network_service ?? service),
+    now, setTimer, clearTimer });
+  const owner = context => ({ client_id: context.client_id ?? LEGACY_CLIENT_ID, task_id: context.task_id ?? null });
+  const owned = (claim, context) => claim.client_id === owner(context).client_id && claim.task_id === owner(context).task_id;
+  engine.breakpointScope = createBreakpointScope({ listClaims: () => claims.listClaims(),
+    isAlive: id => id !== LEGACY_CLIENT_ID && Boolean(clientRegistry?.isAlive(id)), now });
+  engine.breakpointScope({});
+  async function guardGlobal(args, context) {
+    if (args.force === true) return;
+    const ids = new Set((await claims.listClaims()).filter(c => c.client_id !== owner(context).client_id
+      && c.client_id !== LEGACY_CLIENT_ID && clientRegistry?.isAlive(c.client_id)).map(c => c.client_id));
+    if (ids.size) throw Object.assign(new Error(`${ids.size} other live client(s) hold routing claims.`), {
+      code: 'OTHER_CLIENTS_ACTIVE', details: { other_clients_active: ids.size }, retryable: false,
+      recovery: ['Use your own routing or rules, or coordinate with other clients before using force: true.'],
+    });
+  }
+  async function claimedDevices(context) {
+    return [...new Set((await claims.listClaims()).filter(c => owned(c, context)).flatMap(c => c.device_udids ?? []))];
+  }
+  async function restartForCaller(args, context) {
+    const devices = args.udid ? [args.udid] : await claimedDevices(context);
+    if (!devices.length) return restartApps({ ...args });
+    const reports = await Promise.all(devices.map(udid => restartApps({ ...args, udid })));
+    return { restarted: reports.flatMap(r => r.restarted ?? []), failed: reports.flatMap(r => r.failed ?? []) };
+  }
+  async function resolveScope(context = {}, requestedScope) {
+    const client_id = context.client_id ?? LEGACY_CLIENT_ID;
+    const mode = requestedScope ?? (client_id === LEGACY_CLIENT_ID ? 'all' : 'mine');
+    if (!['mine', 'all'].includes(mode)) throw new Error('scope must be mine or all');
+    const rows = mode === 'mine' ? (await claims.listClaims()).filter(c => c.client_id === client_id) : [];
+    const devices = [...new Set(rows.flatMap(c => c.device_udids ?? []))];
+    const domains = [...new Set(rows.flatMap(c => c.domains))];
+    const hosts = domains.map(d => new RegExp('^' + d.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.') + '$', 'i'));
+    return { mode, client_id, devices, domains, predicate: flow => mode === 'all' || flow.owner_client === client_id ||
+      devices.includes(flow.device_udid) || ((!flow.attribution || ['unknown', 'ambiguous'].includes(flow.attribution)) && hosts.some(re => re.test(flow.request?.hostname ?? safeHostname(flow.request?.url) ?? ''))) };
+  }
+  const scopeMeta = (scope, hidden_count = 0) => ({ scope_applied: scope.mode, hidden_count });
+  async function scopedPage(args, scope) {
+    if (engine.sessionStore.listScopedFlows) return engine.sessionStore.listScopedFlows({ ...args, sessionId: args.session_id ?? args.sessionId ?? engine.sessionId, scope });
+    const page = await engine.listDurableFlows(args);
+    return { ...page, flows: page.flows.filter(scope.predicate), ...scopeMeta(scope, page.flows.filter(f => !scope.predicate(f)).length) };
+  }
+  async function scopedFlow(id, context, args = {}) {
+    const flow = await engine.getDurableFlow(id, args.session_id);
+    const scope = await resolveScope(context, args.scope);
+    if (flow && !scope.predicate(flow)) throw Object.assign(new Error('Flow belongs to another client; pass scope: all to read it.'), {
+      code: 'FLOW_OUT_OF_SCOPE', recovery: 'pass scope: all' });
+    return flow;
+  }
+  async function scopedConnection(id, context, args = {}) {
+    // Check the stored metadata before redaction or transcript/body access.
+    const connection = engine.webSocketStore.connections.get(String(id ?? '').trim());
+    const scope = await resolveScope(context, args.scope);
+    if (connection && !scope.predicate(connection)) throw Object.assign(new Error('Connection belongs to another client; pass scope: all to read it.'), {
+      code: 'CONNECTION_OUT_OF_SCOPE', recovery: 'pass scope: all' });
+    return connection;
+  }
+  async function guardSessionReplacement(args, context, sessionId) {
+    if (!args.replace) return;
+    // Refuse even while stopped: the engine may still hold cached flow objects.
+    if (sessionId === engine.sessionId) throw Object.assign(new Error('Cannot replace the active session while its evidence is cached.'), {
+      code: 'ACTIVE_SESSION_REPLACE_FORBIDDEN', recovery: 'Select a different active session, or import into a new session ID.' });
+    const mine = await resolveScope(context, 'mine');
+    const count = await engine.sessionStore.countScopedFlows({ sessionId, scope: mine });
+    const scope = await resolveScope(context, args.scope);
+    if (count.hidden) await requireSharedConfirmation({ ...args, confirm_shared: scope.mode === 'all' && args.confirm_shared === true }, context, sessionId);
+  }
+  async function requireSharedConfirmation(args, context, sessionId) {
+    const mine = await resolveScope(context, 'mine');
+    const count = await engine.sessionStore.countScopedFlows({ sessionId, scope: mine });
+    const counts = { removed_count: count.total, kept_other_clients_count: count.hidden };
+    if (args.confirm_shared !== true) throw Object.assign(new Error('Shared evidence requires scope: all and confirm_shared: true.'), {
+      code: 'CONFIRM_SHARED_REQUIRED', details: counts, recovery: 'Pass scope: all with confirm_shared: true.' });
+    return counts;
+  }
+  const invalidateRouting = () => { routingCache = null; };
+  function lossEvent(event) {
+    if (event.event === 'routing_claim_expired') return 'lease_expired';
+    if (['lease_expired', 'daemon_restart', 'external_change', 'guardian_recovery'].includes(event.reason)) return event.reason;
+    if (event.event === 'restored_dead_owner_routing') return 'guardian_recovery';
+    if (event.event === 'routing_cleared' && event.status === 'changed_externally') return 'external_change';
+    if (event.event === 'routing_suspended') return 'daemon_restart';
+    return null;
+  }
+  async function routingStatus() {
+    if (controller) return controller.status();
+    const [rows, state] = await Promise.all([claims.listClaims({ includeExpired: true }), readState()]);
+    const active = Boolean(state?.routing_active && state.pid === process.pid);
+    return { active, network_service: state?.network_service ?? null,
+      union_domains: [...new Set(rows.filter(c => Date.parse(c.expires_at) > now()).flatMap(c => c.domains))].sort(),
+      claims: rows.map(c => ({ claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id,
+        domains: c.domains, expires_at: c.expires_at,
+        state: Date.parse(c.expires_at) <= now() ? 'expired' : active ? 'active' : 'suspended' })), last_change: null };
+  }
+  async function routingSnapshot(fresh = false) {
+    if (!fresh && routingCache && now() - routingCache.at < 1000) return routingCache.value;
+    const [status, events, guardian] = await Promise.all([
+      routingStatus(), readRuntimeEvents(), readRuntimeEvents('guardian'),
+    ]);
+    // Expiry sweeps remove rows. Keep their bounded journal tombstones visible
+    // until a newer set or explicit clear supersedes them.
+    const rows = [...status.claims];
+    for (const c of rows) claimDetails.set(c.claim_id, c);
+    const latest = new Map();
+    for (const e of events) if (e.claim_id && /^routing_claim_/.test(e.event)) latest.set(e.claim_id, e);
+    for (const e of latest.values()) if (e.event === 'routing_claim_expired' && !rows.some(c => owned(c, e))) {
+      rows.push({ claim_id: e.claim_id, client_id: e.client_id, task_id: e.task_id ?? null,
+        domains: claimDetails.get(e.claim_id)?.domains ?? [], expires_at: claimDetails.get(e.claim_id)?.expires_at ?? e.at, state: 'expired' });
+    }
+    for (const id of claimDetails.keys()) if (!rows.some(c => c.claim_id === id)) claimDetails.delete(id);
+    const lost = [...events, ...guardian].filter(e => lossEvent(e)).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+    const value = { ...status, claims: rows, routing_lost_reason: lost ? lossEvent(lost) : null, routing_lost_at: lost?.at ?? null };
+    routingCache = { at: now(), value };
+    return value;
+  }
+  async function routingResult(status, context) {
+    const state = await readState();
+    const claim = status.claims.find(c => owned(c, context)) ?? null;
+    return { claim, routing_union: status.union_domains, routing_status: status,
+      domains: status.union_domains, networkService: status.network_service,
+      pacUrl: state?.pac_url ?? null, expires_at: claim?.expires_at ?? null };
+  }
+  async function applyClaim(args, context, preserveExpiry = false) {
+    validateRoutingDomains(args.domains, { allowBroad: args.allow_broad_routing === true });
+    const device_udids = args.device_udid === undefined ? undefined : validateDeviceUdids(Array.isArray(args.device_udid) ? args.device_udid : [args.device_udid]);
+    const duration = args.duration_seconds ?? 3600;
+    if (!Number.isInteger(duration) || duration < 1 || duration > 86400) throw Object.assign(new Error('Routing duration must be 1-86400 seconds.'), { code: 'ROUTING_LEASE_INVALID' });
+    routingOptions = { network_service: args.network_service, pac_port: args.pac_port };
+    const control = routingController();
+    const before = await control.status();
+    const state = await readState();
+    // A pre-claims runtime remains untouched until explicitly cleared.
+    if (state?.routing_active && !before.claims.length) throw Object.assign(new Error('Clear legacy routing explicitly before creating claims.'), { code: 'ROUTING_OWNED' });
+    if (state?.routing_active) {
+      const actual = await getAutoProxyState(state.network_service, run);
+      if (!actual.enabled || actual.url !== state.pac_url) {
+        if (!args.replace_existing_proxy) throw Object.assign(new Error('System proxy changed externally.'), { code: 'ROUTING_CONFLICT' });
+        await clearPacRouting({ pacServer, run });
+      }
+    }
+    const previous = before.claims.find(c => owned(c, context));
+    const saved = (await claims.listClaims({ includeExpired: true })).find(c => owned(c, context));
+    let status;
+    try {
+      if (preserveExpiry && previous && Date.parse(previous.expires_at) > now()) {
+        // Store upsert accepts an explicit clock; anchoring it at the original
+        // renewal preserves both requested duration and the exact expiry.
+        const stored = (await claims.listClaims()).find(c => c.claim_id === previous.claim_id);
+        await claims.upsertClaim({ ...owner(context), domains: args.domains, device_udids, allowBroad: args.allow_broad_routing === true,
+          durationSeconds: stored.requested_seconds, now: Date.parse(stored.expires_at) - stored.requested_seconds * 1000 });
+        status = await control.sync();
+      } else status = await control.set({ ...owner(context), domains: args.domains, device_udids,
+        durationSeconds: args.duration_seconds ?? 3600, allowBroad: args.allow_broad_routing === true,
+        replaceExisting: args.replace_existing_proxy === true });
+    } catch (error) {
+      if (saved) await claims.upsertClaim({ ...saved, durationSeconds: saved.requested_seconds,
+        allowBroad: true, now: Date.parse(saved.expires_at) - saved.requested_seconds * 1000 });
+      else await claims.removeClaim(owner(context));
+      invalidateRouting();
+      throw error;
+    }
+    for (const c of status.claims) claimDetails.set(c.claim_id, c);
+    invalidateRouting();
+    return routingResult(status, context);
+  }
+
+  const captureLease = new CaptureLease({ registry: clientRegistry, clock: now });
   let simWatchStop = null;
   let appGateway = null;
   let appScope = null;
@@ -156,6 +345,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   function flowSummary(f, { includeSensitive = false, view = 'full' } = {}) {
     const summary = {
       id: f.id,
+      owner_client: f.owner_client ?? null, owner_task: f.owner_task ?? null,
+      device_udid: f.device_udid ?? null, attribution: f.attribution ?? 'unknown',
       method: f.request?.method,
       url: includeSensitive ? f.request?.url : redactUrl(f.request?.url),
       hostname: f.request?.hostname ?? safeHostname(f.request?.url),
@@ -187,6 +378,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const resInline = full ? resRaw : resPreview.text;
     return {
       id: f.id,
+      owner_client: f.owner_client ?? null, owner_task: f.owner_task ?? null,
+      device_udid: f.device_udid ?? null, attribution: f.attribution ?? 'unknown',
       timestamp: f.timestamp,
       request: f.request && {
         method: f.request.method,
@@ -238,7 +431,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   // ---- proxy lifecycle ----
-  async function start_proxy(args = {}) {
+  async function start_proxy(args = {}, context = {}) {
+    if (args.auto_setup) await guardGlobal(args, context);
     if (appGateway) throw Object.assign(new Error('App-only capture is active. Stop it before switching capture modes.'), { code: 'APP_CAPTURE_ACTIVE' });
     const {
       port, auto_setup = false, network_service, pac_port, tls_passthrough, max_body_size,
@@ -294,7 +488,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     }
 
     await patchState({ pid: process.pid, proxy_port: engine.port, started_at: new Date().toISOString() });
-    if (!auto_setup) return { ...started, auto_setup: false };
+    routingController().resume();
+    if (!auto_setup) {
+      if ((await claims.listClaims({ now: now() })).length) await routingController().sync();
+      return { ...started, auto_setup: false };
+    }
 
     const activeCaCert = await activeCaCertificate();
     const hostCertificate = trust_host_ca
@@ -315,25 +513,15 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       ({ trust, routing } = await setupSimulatorRouting({
         certPath: activeCaCert,
         keyPath: engine.caKeyPath,
-        applyRouting: () => applyPacRouting({
-          domains,
-          networkService: network_service,
-          pacPort: pac_port ?? PAC_PORT_DEFAULT,
-          proxyPort: engine.port,
-          pacServer,
-          allowBroad: args.allow_broad_routing === true,
-          replaceExisting: args.replace_existing_proxy === true,
-          durationSeconds: args.duration_seconds ?? 3600,
-        }),
+        applyRouting: () => applyClaim({ ...args, domains }, context),
       }));
     } catch (error) {
-      try { await clearPacRouting({ pacServer }); } catch { /* retain routing breadcrumbs */ }
       if (newlyStarted) await engine.stop();
       await patchState({ proxy_port: engine.port, setup_error: error.message });
       throw error;
     }
     const restartReport = trust.trusted?.length
-      ? await restartSimApps({})
+      ? await restartForCaller(args, context)
       : { restarted: [], skipped: 'certificate was not imported on a booted simulator' };
     const watcher = await start_sim_watcher({ interval: 5000 });
     return { ...started, auto_setup: true, host_certificate: hostCertificate, routing, trust, restart: restartReport, watcher };
@@ -347,7 +535,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return listSimulatorApplications(args);
   }
 
-  async function start_app_capture(args = {}) {
+  async function start_app_capture(args = {}, context = {}) {
+    await guardGlobal(args, context);
     if (engine.isRunning() && appScope?.bundle_id === args.bundle_id && appScope?.device_id === args.udid) {
       const state = await readState();
       let routing = null;
@@ -414,9 +603,31 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     }
   }
 
-  async function stop_proxy() {
+  async function stop_proxy(_args = {}, { routingOnly = false, skipRouting = false, timeoutCapMs, graceMs } = {}) {
+    // Only the symbol-addressed daemon path supplies these internal options.
+    if (routingOnly) {
+      try { return await clearPacRouting({ pacServer, run, timeoutCapMs, verifyRestore: true }); }
+      finally { await patchState({ routing_suspended: { reason: 'daemon_shutdown', at: new Date().toISOString() } }); }
+    }
+    if (skipRouting) {
+      // Drain gateway and engine together; a failed auxiliary stop must not
+      // prevent the proxy from closing or capture persistence from flushing.
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => appGateway?.stop({ graceMs })),
+        Promise.resolve().then(() => engine.stop({ graceMs })),
+        Promise.resolve().then(() => stop_sim_watcher()),
+        Promise.resolve().then(() => onboardingPortal.stop()),
+        Promise.resolve().then(() => reverseProxies.stopAll()),
+      ]);
+      appGateway = null; appScope = null;
+      await patchState({ proxy_port: null, capture_scope: null, stopped_at: new Date().toISOString() });
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
+      return results[1].value;
+    }
+    await routingController().stop();
     let routingCleanupError = null;
-    try { await clearPacRouting({ pacServer }); }
+    try { await clearPacRouting({ pacServer, run }); }
     catch (error) { routingCleanupError = error?.message ?? String(error); }
     await appGateway?.stop();
     appGateway = null;
@@ -436,42 +647,54 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       : out;
   }
 
-  async function set_proxy_routing(args = {}) {
+  async function set_proxy_routing(args = {}, context = {}) {
     await ensureProxyRunning();
     if (appGateway) throw Object.assign(new Error('Stop app-only capture before selecting domain or Mac-wide capture.'), { code: 'APP_CAPTURE_ACTIVE' });
-    const hostTrust = await getHostCertificateStatus(await activeCaCertificate());
+    const hostTrust = fakeTrust ? { trusted: true } : await hostCertificateStatus(await activeCaCertificate());
     if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA with setup_host_certificate before changing Mac routing. No routing settings were changed.'), {
       code: 'HOST_CA_UNTRUSTED', retryable: false, recovery: ['Call setup_host_certificate, then retry the scoped routing request.'],
     });
-    const { domains, network_service, pac_port } = args;
+    const { domains } = args;
     if (!Array.isArray(domains) || domains.length === 0) {
       throw new Error('domains must be a non-empty array.');
     }
-    const routing = await applyPacRouting({
-      domains, networkService: network_service,
-      pacPort: pac_port ?? PAC_PORT_DEFAULT,
-      proxyPort: engine.port, pacServer,
-      allowBroad: args.allow_broad_routing === true,
-      replaceExisting: args.replace_existing_proxy === true,
-      durationSeconds: args.duration_seconds ?? 3600,
-    });
+    const routing = await applyClaim(args, context);
     return { status: 'routing_on', ...routing };
   }
 
-  async function clear_proxy_routing(args = {}) {
-    const out = await clearPacRouting({ pacServer, networkService: args.network_service });
-    return { status: 'routing_off', ...out };
+  async function clear_proxy_routing(args = {}, context = {}) {
+    if (args.scope !== undefined && !['mine', 'all'].includes(args.scope)) throw new Error('scope must be mine or all');
+    const before = await routingSnapshot(true);
+    const removed = before.claims.filter(c => args.scope === 'all' || owned(c, context));
+    const state = await readState();
+    let status = before;
+    // A no-claim clear must not disturb unclaimed legacy/app routing.
+    if (removed.length) status = await routingController().clear({ ...owner(context), all: args.scope === 'all' });
+    else if (state?.routing_active && !before.claims.length && (args.scope === 'all' || owner(context).client_id === LEGACY_CLIENT_ID)) {
+      await clearPacRouting({ pacServer, networkService: args.network_service, run });
+      status = await routingStatus();
+    }
+    for (const c of removed) {
+      claimDetails.delete(c.claim_id);
+      if (c.state === 'expired') await recordRuntimeEvent('routing_claim_cleared', { details: {
+        claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id } });
+    }
+    invalidateRouting();
+    return { status: status.active ? 'routing_on' : 'routing_off', ...await routingResult(status, context),
+      removed_claims: removed, removed_other_claims: removed.filter(c => c.client_id !== owner(context).client_id) };
   }
 
   async function trust_ca_on_simulators_tool() {
     return await trustCaOnSimulators(await activeCaCertificate());
   }
 
-  async function setup_simulator_certificate(args = {}) {
+  async function setup_simulator_certificate(args = {}, context = {}) {
+    if (args.restart_apps !== false) await guardGlobal(args, context);
+    const devices = args.device_ids ?? await claimedDevices(context);
     return setupSimulatorCertificates({
       cert_path: await activeCaCertificate(),
       scope: args.scope ?? 'booted',
-      device_ids: args.device_ids,
+      device_ids: devices.length ? devices : undefined,
       developer_dir: args.developer_dir,
       boot_shutdown: args.boot_shutdown ?? false,
       restart_apps: args.restart_apps ?? true,
@@ -646,16 +869,36 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function restart_sim_apps_tool(args = {}) {
-    return await restartSimApps({ udid: args.udid, bundle_id: args.bundle_id });
+  async function restart_sim_apps_tool(args = {}, context = {}) {
+    await guardGlobal(args, context);
+    return restartForCaller(args, context);
   }
 
+  async function presenceLost(client) {
+    if (client.client_id === LEGACY_CLIENT_ID) return;
+    const rows = (await claims.listClaims({ includeExpired: true })).filter(c => c.client_id === client.client_id);
+    for (const c of rows) {
+      await routingController().clear({ claim_id: c.claim_id });
+      claimDetails.delete(c.claim_id);
+    }
+    invalidateRouting();
+    const details = { client_id: client.client_id, task_id: client.task_id, claims_removed: rows.length };
+    await recordRuntimeEvent('client_presence_lost', { details });
+    logLine('daemon', 'client presence lost', details);
+  }
+  function clientsStatus(context) {
+    const rows = clientRegistry?.list() ?? [];
+    const me = rows.find(c => c.client_id === context.client_id);
+    return { count: rows.length, alive: rows.filter(c => c.alive).length,
+      me: me ? { client_id: me.client_id, task_id: me.task_id, last_seen: me.last_seen } : null };
+  }
   async function get_proxy_status(_args = {}, context = {}) {
-    const [state, pid, storage, runtime, events, guardianEvents] = await Promise.all([
-      readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'),
+    const [state, pid, storage, runtime, events, guardianEvents, routingStatus] = await Promise.all([
+      readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'), routingSnapshot(true),
     ]);
     return {
       running: engine.isRunning(),
+      clients: clientsStatus(context),
       capture_lease: captureLease.status(state),
       active_session_id: engine.sessionId,
       connection_attempt_timeout_ms: activeConnectionAttemptTimeout(),
@@ -678,6 +921,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       mock_rules_count: engine.mockRules.size,
       flows_count: engine.flows.size,
       diagnostics_count: engine.diagnostics.length,
+      ...(fakeTrust ? { fake_host_trust: true } : {}),
       recording: engine.recording,
       routing_active: state?.routing_active ?? false,
       network_service: state?.network_service ?? null,
@@ -687,6 +931,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       domains: state?.domains ?? [],
       routing_expires_at: state?.routing_expires_at ?? null,
       routing_fail_open: true,
+      routing_claims: routingStatus.claims.map(c => ({ ...c, mine: owned(c, context) })),
+      routing_union: routingStatus.union_domains,
+      routing_lost_reason: routingStatus.routing_lost_reason,
+      routing_lost_at: routingStatus.routing_lost_at,
       tls_passthrough: engine.tlsPassthrough,
       simulator_watcher: simWatchStop ? 'running' : 'stopped',
       recent_simulator_events: simWatcherEvents.slice(-10),
@@ -742,7 +990,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { name: 'proxy-mate', version: SERVER_VERSION, node: process.version, mode };
   }
 
-  async function get_started(args = {}) { return gettingStarted(args, await get_proxy_status()); }
+  async function get_started(args = {}, context = {}) { return gettingStarted(args, await get_proxy_status({}, context)); }
   async function search_docs(args = {}) { return searchHelp(args.query, args.limit); }
   async function list_setup_workflows() { return setupWorkflows(); }
 
@@ -768,7 +1016,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { dashboard: operatorUi.status };
   }
 
-  async function toggle_recording(args = {}) {
+  async function toggle_recording(args = {}, context = {}) {
+    await guardGlobal(args, context);
     return engine.setRecording(args.enabled == null ? !engine.recording : args.enabled);
   }
 
@@ -781,25 +1030,44 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function enable_ssl_proxying(args = {}) {
+  async function enable_ssl_proxying(args = {}, context = {}) {
     await ensureProxyRunning();
     if (!args.domain) throw new Error('domain is required');
+    if (appGateway) throw Object.assign(new Error('Stop app-only capture first.'), { code: 'APP_CAPTURE_ACTIVE' });
+    const hostTrust = await hostCertificateStatus(await activeCaCertificate());
+    if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA first.'), { code: 'HOST_CA_UNTRUSTED' });
+    const previous = (await routingController().status()).claims.find(c => owned(c, context));
+    const domains = [...new Set([...(previous?.domains ?? []), args.domain])];
     const state = await readState();
-    const domains = [...new Set([...(state?.domains ?? []), args.domain])];
-    const routing = await set_proxy_routing({ domains, network_service: state?.network_service, pac_port: state?.pac_port ?? PAC_PORT_DEFAULT });
-    return { status: 'enabled', domain: args.domain, de_duplicated: domains.length === (state?.domains?.length ?? 0), routing };
+    const routing = await applyClaim({ domains, network_service: state?.network_service,
+      allow_broad_routing: previous?.domains.includes('*') }, context, true);
+    return { status: 'enabled', domain: args.domain, de_duplicated: domains.length === (previous?.domains.length ?? 0), routing };
   }
 
-  async function clear_session(args = {}) {
-    if (args.session_id && args.session_id !== engine.sessionId) {
-      const flows = await allSessionFlows(args.session_id);
-      const removed = await engine.sessionStore.purgeSession(args.session_id);
-      if (removed) await Promise.all(flows.map((flow) => deleteFlowBodies(flow.id)));
-      return { status: removed ? 'cleared' : 'not_found', session_id: args.session_id };
+  async function removeScopedEvidence(args, context, { clear = false } = {}) {
+    const sessionId = args.session_id ?? engine.sessionId;
+    const scope = await resolveScope(context, args.scope);
+    if (scope.mode === 'all') await requireSharedConfirmation(args, context, sessionId);
+    await Promise.allSettled([...(engine.flowPersistence?.values() ?? [])]);
+    const count = await engine.sessionStore.countScopedFlows({ sessionId, scope });
+    const result = await engine.purgeScopedFlows({ sessionId, scope,
+      before_sequence: args.before_sequence, older_than_ms: args.older_than_ms, all: clear || args.delete_session === true });
+    let websocket_connections_cleared = 0;
+    if (sessionId === engine.sessionId) {
+      const snapshot = engine.webSocketStore.exportSnapshot();
+      const kept = snapshot.connections.filter(c => !scope.predicate(c));
+      websocket_connections_cleared = snapshot.connections.length - kept.length;
+      if (websocket_connections_cleared) engine.webSocketStore.importSnapshot({ ...snapshot, connections: kept });
     }
-    const cleared = await engine.clearFlows();
-    const webSockets = engine.webSocketStore.clear();
-    return { status: 'cleared', flows_count: 0, websocket_connections_cleared: webSockets.cleared, ...cleared };
+    if ((args.delete_session || (clear && sessionId !== engine.sessionId)) && scope.mode === 'all') {
+      await engine.sessionStore.purgeSession(sessionId);
+    }
+    return { status: args.delete_session && scope.mode === 'all' ? 'deleted' : 'cleared', session_id: sessionId,
+      ...result, removed_count: result.purged, kept_other_clients_count: count.hidden, websocket_connections_cleared };
+  }
+
+  async function clear_session(args = {}, context = {}) {
+    return removeScopedEvidence(args, context, { clear: true });
   }
 
   async function create_capture_session(args = {}) {
@@ -828,8 +1096,14 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { status: 'selected', session };
   }
 
-  async function update_capture_session(args = {}) {
+  async function update_capture_session(args = {}, context = {}) {
     const sessionId = args.session_id ?? engine.sessionId;
+    const mine = await resolveScope(context, 'mine');
+    const counts = await engine.sessionStore.countScopedFlows({ sessionId, scope: { ...mine, devices: [], domains: [] } });
+    if (args.retention && counts.hidden > 0) {
+      if (args.scope !== 'all') throw Object.assign(new Error('Shared retention requires scope: all and confirm_shared: true.'), { code: 'CONFIRM_SHARED_REQUIRED', details: { removed_count: counts.total, kept_other_clients_count: counts.hidden }, recovery: 'Pass scope: all and confirm_shared: true.' });
+      await requireSharedConfirmation(args, context, sessionId);
+    } else if (args.retention && args.scope === 'all') await requireSharedConfirmation(args, context, sessionId);
     const result = await engine.sessionStore.updateSession({
       sessionId,
       name: args.name,
@@ -837,14 +1111,19 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       metadata: args.metadata,
       mergeMetadata: args.merge_metadata ?? true,
     });
+    if (sessionId === engine.sessionId) engine.forgetPurgedFlows(result.retention?.removed_flow_ids ?? []);
     await Promise.all((result.retention?.removed_flow_ids ?? []).map((id) => deleteFlowBodies(id)));
-    return { status: 'updated', ...result };
+    return { status: 'updated', ...result, removed_count: result.retention?.removed_flow_ids?.length ?? 0, kept_other_clients_count: args.retention ? (await engine.sessionStore.countScopedFlows({ sessionId, scope: { ...mine, devices: [], domains: [] } })).hidden : counts.hidden };
   }
 
-  async function export_capture_session(args = {}) {
+  async function export_capture_session(args = {}, context = {}) {
     const sessionId = args.session_id ?? engine.sessionId;
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
+    const scope = await resolveScope(context, args.scope);
+    const counts = scope.mode === 'all' ? { hidden: 0 } : await engine.sessionStore.countScopedFlows({ sessionId, scope });
+    const visible = scope.mode === 'all' ? null : new Set((await allSessionFlows(sessionId, scope)).map(f => f.id));
     const document = await engine.sessionStore.exportSession(sessionId);
+    if (visible) document.session.flows = document.session.flows.filter(f => visible.has(f.id));
     let remainingBytes = MAX_EXPORTED_BODY_BYTES;
     let omittedBodies = 0;
     for (const exportedFlow of document.session.flows) {
@@ -888,15 +1167,16 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       : path.join(HAR_EXPORT_DIR, `${sessionId}-${Date.now()}.proxy-mate-session.json`);
     await fs.mkdir(path.dirname(out), { recursive: true, mode: 0o700 });
     await fs.writeFile(out, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
-    return { path: out, session_id: sessionId, flow_count: document.session.flows.length,
+    return { ...scopeMeta(scope, counts.hidden), path: out, session_id: sessionId, flow_count: document.session.flows.length,
       omitted_body_count: omittedBodies, redacted: !includeSensitive };
   }
 
-  async function import_capture_session(args = {}) {
+  async function import_capture_session(args = {}, context = {}) {
     const source = await authorizeReadPath(args.path);
     const stat = await fs.stat(source);
     if (stat.size > 512 * 1024 * 1024) throw new Error('Capture-session import exceeds the 512 MB safety limit.');
     const document = JSON.parse(await fs.readFile(source, 'utf8'));
+    await guardSessionReplacement(args, context, args.session_id ?? document?.session?.id);
     const session = await engine.sessionStore.importSession({
       document,
       sessionId: args.session_id,
@@ -906,32 +1186,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { status: 'imported', session };
   }
 
-  async function purge_capture_session(args = {}) {
-    const sessionId = args.session_id ?? engine.sessionId;
-    const existingFlows = await allSessionFlows(sessionId);
-    if (args.delete_session) {
-      if (sessionId === engine.sessionId && engine.isRunning()) {
-        throw new Error('Stop the proxy before deleting the active session.');
-      }
-      const removed = await engine.sessionStore.purgeSession(sessionId);
-      if (removed) await Promise.all(existingFlows.map((flow) => deleteFlowBodies(flow.id)));
-      return { status: removed ? 'deleted' : 'not_found', session_id: sessionId };
-    }
-    const result = await engine.sessionStore.purgeFlows({
-      sessionId,
-      before_sequence: args.before_sequence,
-      older_than_ms: args.older_than_ms,
-    });
-    await Promise.all((result.purged_flow_ids ?? []).map((id) => deleteFlowBodies(id)));
-    return result;
+  async function purge_capture_session(args = {}, context = {}) {
+    if (args.delete_session && (args.session_id ?? engine.sessionId) === engine.sessionId && engine.isRunning()) throw new Error('Stop the proxy before deleting the active session.');
+    return removeScopedEvidence(args, context);
   }
 
-  async function allSessionFlows(sessionId) {
+  async function allSessionFlows(sessionId, scope = null) {
     if (!await engine.sessionStore.getSession(sessionId)) return [];
     const flows = [];
     let cursor = null;
     do {
-      const page = await engine.sessionStore.listFlows({ sessionId, cursor, limit: 1000 });
+      const page = scope ? await scopedPage({ session_id: sessionId, cursor, limit: 1000 }, scope)
+        : await engine.sessionStore.listFlows({ sessionId, cursor, limit: 1000 });
       flows.push(...page.flows);
       cursor = page.next_cursor;
     } while (cursor);
@@ -939,6 +1205,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function wait_for_flow(args = {}, context = {}) {
+    const scope = await resolveScope(context, args.scope);
+    let hidden = 0;
     const timeoutMs = args.timeout_ms ?? 30_000;
     const deadline = Date.now() + timeoutMs;
     let cursor = args.cursor ?? null;
@@ -946,17 +1214,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     if (!cursor && !sinceFlowId && !args.include_existing) sinceFlowId = engine.flowOrder.at(-1) ?? null;
     do {
       throwIfAborted(context.signal);
-      const page = await engine.listDurableFlows({
+      const page = await scopedPage({
         session_id: args.session_id,
         cursor,
         since_flow_id: cursor ? undefined : sinceFlowId,
         limit: Math.min(args.limit ?? 100, 1000),
         filters: args,
-      });
+      }, scope);
+      hidden = page.hidden_count;
       const flow = page.flows.find((item) =>
         matchHost(item, args) && matchUrl(item, args) && matchMethod(item, args) && matchStatus(item, args));
       if (flow) return {
-        matched: true,
+        ...scopeMeta(scope, hidden), matched: true,
         flow: flowSummary(flow, { includeSensitive: requireSensitiveAccess(args.include_sensitive ?? false) }),
         next_cursor: page.next_cursor,
         snapshot_id: page.snapshot_id,
@@ -971,7 +1240,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       if (Date.now() >= deadline) break;
       await abortableDelay(Math.min(250, Math.max(10, deadline - Date.now())), context.signal);
     } while (Date.now() < deadline);
-    return { matched: false, timed_out: true, timeout_ms: timeoutMs, next_cursor: cursor };
+    return { ...scopeMeta(scope, hidden), matched: false, timed_out: true, timeout_ms: timeoutMs, next_cursor: cursor };
   }
 
   async function get_diagnostics() {
@@ -994,16 +1263,23 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function list_websocket_connections(args = {}) {
-    return engine.webSocketStore.listConnections({
-      state: args.state,
-      url_contains: args.url_contains,
-      limit: args.limit,
-      includeSensitive: requireSensitiveAccess(args.include_sensitive ?? false),
-    });
+  async function list_websocket_connections(args = {}, context = {}) {
+    const scope = await resolveScope(context, args.scope);
+    const store = engine.webSocketStore;
+    const matching = store.connectionOrder.map(id => store.connections.get(id)).filter(Boolean)
+      .filter(c => !args.state || c.state === args.state)
+      .filter(c => !args.url_contains || (c.request?.url ?? '').toLowerCase().includes(args.url_contains.toLowerCase()));
+    const visible = matching.filter(scope.predicate);
+    const limit = args.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+    const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
+    return { ...scopeMeta(scope, matching.length - visible.length), total: visible.length,
+      connections: visible.slice(-Math.min(limit, 1000)).reverse().map(c => store.getConnection({ connectionId: c.id,
+        includeSensitive })) };
   }
 
-  async function get_websocket_connection(args = {}) {
+  async function get_websocket_connection(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const connection = engine.webSocketStore.getConnection({
       connectionId: args.connection_id,
       includeSensitive: requireSensitiveAccess(args.include_sensitive ?? false),
@@ -1012,18 +1288,25 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return connection;
   }
 
-  async function get_websocket_messages(args = {}) {
-    return engine.webSocketStore.listMessages({
+  async function get_websocket_messages(args = {}, context = {}) {
+    const scope = await resolveScope(context, args.scope);
+    try { await scopedConnection(args.connection_id, context, args); }
+    catch (error) {
+      if (error.code !== 'CONNECTION_OUT_OF_SCOPE') throw error;
+      return { ...scopeMeta(scope, 1), messages: [], has_more: false, next_cursor: null };
+    }
+    return { ...scopeMeta(scope), ...engine.webSocketStore.listMessages({
       connectionId: args.connection_id,
       cursor: args.cursor,
       limit: args.limit,
       direction: args.direction,
       contains: args.contains,
       includeSensitive: requireSensitiveAccess(args.include_sensitive ?? false),
-    });
+    }) };
   }
 
-  async function export_websocket_transcript(args = {}) {
+  async function export_websocket_transcript(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const transcript = engine.webSocketStore.exportTranscript({ connectionId: args.connection_id, includeSensitive });
     const out = args.path
@@ -1034,15 +1317,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { path: out, connection_id: args.connection_id, message_count: transcript.connection?.messages?.length ?? 0, redacted: !includeSensitive };
   }
 
-  async function import_websocket_transcript(args = {}) {
+  async function import_websocket_transcript(args = {}, context = {}) {
     const source = await authorizeReadPath(args.path);
     const stat = await fs.stat(source);
     if (stat.size > 64 * 1024 * 1024) throw Object.assign(new Error('WebSocket transcript exceeds 64 MB.'), { code: 'WEBSOCKET_IMPORT_TOO_LARGE' });
     const transcript = JSON.parse(await fs.readFile(source, 'utf8'));
+    // Imports can overwrite an existing ID even when replace is false.
+    await scopedConnection(transcript?.connection?.id, context, args);
     return { status: 'imported', ...engine.webSocketStore.importTranscript(transcript, { replace: args.replace ?? false }) };
   }
 
-  async function plan_websocket_replay(args = {}) {
+  async function plan_websocket_replay(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const transcript = engine.webSocketStore.exportTranscript({ connectionId: args.connection_id, includeSensitive });
     return buildWebSocketReplayPlan(transcript, { mutations: args.mutations ?? [] });
@@ -1162,7 +1448,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { status: 'registered', rule };
   }
 
-  async function transform_websocket_transcript(args = {}) {
+  async function transform_websocket_transcript(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const plugin = await engine.pluginStore.get(args.plugin_id);
     if (!plugin) throw Object.assign(new Error(`Transform plugin not found: ${args.plugin_id}`), { code: 'PLUGIN_NOT_FOUND' });
     if (plugin.stage !== 'websocket_offline') {
@@ -1243,6 +1530,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   async function mock_json_response(args = {}) {
     return create_map_local({ rule_id: args.rule_id, url: args.url, method: args.method ?? 'GET',
       status: args.status ?? 200, priority: args.priority, headers: args.headers,
+      owner: args.owner, match_scope: args.match_scope, match_headers: args.match_headers,
       body: encodeAgentJson(args.json), content_type: 'application/json; charset=utf-8' });
   }
 
@@ -1337,13 +1625,16 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     });
   }
 
-  async function create_breakpoint(args = {}) {
+  async function create_breakpoint(args = {}, context = {}) {
+    const scope = args.scope ?? (owner(context).client_id === LEGACY_CLIENT_ID ? 'all' : 'mine');
+    if (!['mine', 'all'].includes(scope)) throw new Error('scope must be mine or all');
     await ensureProxyRunning();
     const url = args.url ?? args.url_pattern;
     if (!url) throw new Error('url or url_pattern is required');
     const rule = await engine.registerRule({
       ...args,
       type: 'breakpoint',
+      owner: owner(context), scope,
       rule_id: args.rule_id ?? stableRuleId('breakpoint', `${url}:${args.direction ?? 'request'}`),
       ...ruleUrlMatchers(url, args),
     });
@@ -1403,8 +1694,25 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function list_rules() {
-    return { rules: engine.listRuleConfigs() };
+  function publicRule(rule, context) {
+    const mine = !!rule.owner && owned(rule.owner, context);
+    return { ...rule, owner: mine ? rule.owner : rule.owner ? { mine: false } : null, mine };
+  }
+
+  async function assertRuleOwner(rule, args, context) {
+    if (!rule?.owner || owned(rule.owner, context) || args.force === true) return;
+    await captureLease.summary(context);
+    const liveLease = Object.values(captureLease.snapshot.leases).some(l => owned(l, rule.owner));
+    const liveClaim = (await claims.listClaims()).some(c => owned(c, rule.owner));
+    if (liveLease || liveClaim || clientRegistry?.isAlive(rule.owner.client_id)) {
+      throw Object.assign(new Error('Rule belongs to another live owner. Choose another rule_id or wait for its owner to finish.'), {
+        code: 'RULE_CONFLICT', recovery: ['Choose a different rule_id. For an intentional mutation, use force: true.'],
+      });
+    }
+  }
+
+  async function list_rules(args = {}, context = {}) {
+    return { rules: engine.listRuleConfigs().map(r => publicRule(r, context)) };
   }
 
   async function remove_rule(args = {}) {
@@ -1432,7 +1740,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { status: 'reprioritized', rule };
   }
 
-  async function reorder_rules(args = {}) {
+  async function reorder_rules(args = {}, context = {}) {
+    const previous = engine.listRuleConfigs();
+    const requested = args.rule_ids ?? [];
+    const ordered = [...requested.map(id => previous.find(r => r.rule_id === id)), ...previous.filter(r => !requested.includes(r.rule_id))];
+    for (const [order, rule] of ordered.entries()) {
+      if (rule && (rule.order !== order || requested.includes(rule.rule_id))) await assertRuleOwner(rule, args, context);
+    }
     const rules = await engine.reorderRules(args.rule_ids);
     await persistRules();
     return { status: 'reordered', rules };
@@ -1443,28 +1757,40 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return engine.explainRuleMatch(args.request ?? {});
   }
 
-  async function clear_rules_tool() {
-    await engine.clearRules();
+  async function clear_rules_tool(args = {}, context = {}) {
+    const rules = engine.listRuleConfigs();
+    if (args.scope === 'all' && args.confirm_shared !== true) {
+      throw Object.assign(new Error('Clearing all rules requires confirm_shared: true.'), {
+        code: 'CONFIRM_SHARED_REQUIRED', details: { total: rules.length,
+          mine: rules.filter(r => r.owner && owned(r.owner, context)).length,
+          foreign: rules.filter(r => r.owner && !owned(r.owner, context)).length,
+          unowned: rules.filter(r => !r.owner).length },
+      });
+    }
+    if (args.scope === 'all') await engine.clearRules();
+    else for (const r of rules) if (!r.owner || owned(r.owner, context)) await engine.removeRule(r.rule_id);
     await persistRules();
     return { status: 'cleared' };
   }
 
-  async function export_rules(args = {}) {
+  async function export_rules(args = {}, context = {}) {
     const outputPath = args.path ? await authorizeWritePath(args.path) : undefined;
-    const dest = await exportRulesTo(engine.listRuleConfigs(), outputPath);
+    const dest = await exportRulesTo(engine.listRuleConfigs().map(r => publicRule(r, context)), outputPath);
     return { path: dest, count: engine.listRuleConfigs().length };
   }
 
-  async function import_rules(args = {}) {
+  async function import_rules(args = {}, context = {}) {
     await ensureProxyRunning();
     if (!args.path) throw new Error('path is required');
     const sourcePath = await authorizeReadPath(args.path);
     const rules = await importRulesFrom(sourcePath);
-    if (args.replace) await engine.clearRules();
+    // Validate all collisions before removing any existing definitions.
+    for (const r of rules) await assertRuleOwner(engine.listRuleConfigs().find(x => x.rule_id === r.rule_id), {}, context);
+    if (args.replace) await clear_rules_tool(args, context);
     const registered = [];
     const failed = [];
     for (const r of rules) {
-      try { registered.push(await engine.registerRule(await authorizeRulePaths(r))); }
+      try { registered.push(await engine.registerRule(await authorizeRulePaths({ ...r, owner: owner(context), match_scope: args.match_scope ?? r.match_scope ?? 'all' }))); }
       catch (e) { failed.push({ rule_id: r.rule_id, error: e?.message ?? String(e) }); }
     }
     await persistRules();
@@ -1504,23 +1830,24 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return true;
   }
 
-  async function get_flows(args = {}) {
+  async function get_flows(args = {}, context = {}) {
+    const scope = await resolveScope(context, args.scope);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const limit = args.limit ?? 10;
     const offset = args.offset ?? 0;
     if (args.cursor || args.since_flow_id || args.session_id) {
-      const page = await engine.listDurableFlows({
+      const page = await scopedPage({
         session_id: args.session_id,
         cursor: args.cursor,
         since_flow_id: args.since_flow_id,
         limit,
         filters: args,
-      });
+      }, scope);
       const filtered = page.flows
         .filter((flow) => matchHost(flow, args) && matchUrl(flow, args) && matchMethod(flow, args) && matchStatus(flow, args))
         .map((flow) => flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
       return {
-        flows: filtered, view: args.view ?? 'compact',
+        ...scopeMeta(scope, page.hidden_count), flows: filtered, view: args.view ?? 'compact',
         session: page.session,
         next_cursor: page.next_cursor,
         snapshot_id: page.snapshot_id,
@@ -1538,15 +1865,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       if (!matchStatus(f, args)) continue;
       matching.push(f);
     }
-    const items = matching.slice(offset, offset + limit)
+    const hidden = matching.filter(f => !scope.predicate(f)).length;
+    const visible = matching.filter(scope.predicate);
+    const items = visible.slice(offset, offset + limit)
       .map((flow) => flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
-    return { flows: items, view: args.view ?? 'compact', offset, limit, total: matching.length, has_more: matching.length > offset + items.length };
+    return { ...scopeMeta(scope, hidden), flows: items, view: args.view ?? 'compact', offset, limit, total: visible.length, has_more: visible.length > offset + items.length };
   }
 
-  async function get_flow_detail(args = {}) {
+  async function get_flow_detail(args = {}, context = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const f = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const f = await scopedFlow(args.flow_id, context, args);
     if (!f) throw new Error(`flow not found: ${args.flow_id}`);
+    const scope = await resolveScope(context, args.scope);
     const bodyMode = args.body_mode ?? (args.full_body ? 'full' : 'preview');
     const detail = flowDetailForReturn(f, {
       full: bodyMode === 'full', includeSensitive,
@@ -1591,10 +1921,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         delete part.body_omission_reason;
       }
     }
-    return detail;
+    return { ...detail, ...scopeMeta(scope) };
   }
 
-  async function filter_flows(args = {}) {
+  async function filter_flows(args = {}, context = {}) {
+    const scope = await resolveScope(context, args.scope);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const conditions = Array.isArray(args.conditions) ? args.conditions : [];
     const combination = (args.combination ?? 'AND').toUpperCase();
@@ -1603,16 +1934,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     let sourceFlows;
     let page = null;
     if (args.session_id || args.cursor || args.since_flow_id) {
-      page = await engine.listDurableFlows({
+      page = await scopedPage({
         session_id: args.session_id,
         cursor: args.cursor,
         since_flow_id: args.since_flow_id,
         limit: pageSize,
-      });
+      }, scope);
       sourceFlows = page.flows;
     } else {
       sourceFlows = engine.flowOrder.slice().reverse().map((id) => engine.flows.get(id)).filter(Boolean);
     }
+    const hidden = page?.hidden_count ?? sourceFlows.filter(f => !scope.predicate(f)).length;
+    sourceFlows = sourceFlows.filter(scope.predicate);
     const results = [];
     for (const flow of sourceFlows) {
       if (results.length >= pageSize) break;
@@ -1621,7 +1954,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       if (matches) results.push(flowSummary(flow, { includeSensitive, view: args.view ?? 'compact' }));
     }
     return {
-      flows: results, view: args.view ?? 'compact',
+      ...scopeMeta(scope, hidden), flows: results, view: args.view ?? 'compact',
       combination,
       conditions_count: conditions.length,
       ...(page ? {
@@ -1634,9 +1967,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function export_flow_curl(args = {}) {
+  async function export_flow_curl(args = {}, context = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw new Error(`flow not found: ${args.flow_id}`);
     const redactedFields = [];
     const headers = includeSensitive ? flow.request.headers : redactHeaders(flow.request.headers, redactedFields);
@@ -1662,7 +1995,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function repeat_flow(args = {}, context = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     return composeHttpRequest({
@@ -1676,7 +2009,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function edit_and_repeat_flow(args = {}, context = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     return composeHttpRequest({
@@ -1695,20 +2028,21 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     });
   }
 
-  async function compare_flows(args = {}) {
-    const left = await engine.getDurableFlow(args.left_flow_id, args.session_id);
-    const right = await engine.getDurableFlow(args.right_flow_id, args.session_id);
+  async function compare_flows(args = {}, context = {}) {
+    const left = await scopedFlow(args.left_flow_id, context, args);
+    const right = await scopedFlow(args.right_flow_id, context, args);
     if (!left) throw flowNotFound(args.left_flow_id);
     if (!right) throw flowNotFound(args.right_flow_id);
+    const scope = await resolveScope(context, args.scope);
     return {
-      left_flow_id: left.id,
+      ...scopeMeta(scope), left_flow_id: left.id,
       right_flow_id: right.id,
       ...diffFlows(redactedFlowForComparison(left), redactedFlowForComparison(right)),
     };
   }
 
-  async function export_flow_swift(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function export_flow_swift(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const safe = structuredClone(flow);
     if (safe.request) {
@@ -1719,8 +2053,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return generateSwiftUrlSession(safe);
   }
 
-  async function export_flow_code(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function export_flow_code(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     return generateRequestCode(flow, args.language ?? 'javascript');
   }
@@ -1731,11 +2065,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { executed: true, request, result: await composeHttpRequest({ ...request, timeout_ms: args.timeout_ms, signal: context.signal }) };
   }
 
-  async function analyze_capture(args = {}) {
+  async function analyze_capture(args = {}, context = {}) {
     const sessionId = args.session_id ?? engine.sessionId;
-    const flows = await allSessionFlows(sessionId);
+    const scope = await resolveScope(context, args.scope);
+    const counts = await engine.sessionStore.countScopedFlows({ sessionId, scope });
+    const flows = await allSessionFlows(sessionId, scope);
     return {
-      session_id: sessionId,
+      ...scopeMeta(scope, counts.hidden), session_id: sessionId,
       ...analyzeFlows(flows, {
         slow_limit: args.slow_limit,
         group_limit: args.group_limit,
@@ -1744,13 +2080,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function assert_capture(args = {}) {
-    const analysis = await analyze_capture(args);
-    return { analysis, assertions: evaluateCaptureAssertions(analysis, args.assertions ?? {}) };
+  async function assert_capture(args = {}, context = {}) {
+    const analysis = await analyze_capture(args, context);
+    return { scope_applied: analysis.scope_applied, hidden_count: analysis.hidden_count, analysis, assertions: evaluateCaptureAssertions(analysis, args.assertions ?? {}) };
   }
 
-  async function inspect_flow_protocol(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function inspect_flow_protocol(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow) throw flowNotFound(args.flow_id);
     const kind = args.kind ?? 'res';
     const part = kind === 'req' ? flow.request : flow.response;
@@ -1819,7 +2155,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     throw error;
   }
 
-  async function validate_flow_openapi(args = {}) {
+  async function validate_flow_openapi(args = {}, context = {}) {
     const hasDocument = args.document !== undefined;
     const hasDocumentPath = typeof args.document_path === 'string' && args.document_path.trim() !== '';
     if (hasDocument === hasDocumentPath) {
@@ -1845,7 +2181,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       document = await fs.readFile(source, 'utf8');
       documentSource = 'authorized_path';
     }
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const validationFlow = await hydrateOpenApiFlowBodies(flow, maxBodyBytes);
     return {
@@ -1861,7 +2197,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function validate_capture_openapi(args = {}) {
+  async function validate_capture_openapi(args = {}, context = {}) {
     const hasDocument = args.document !== undefined;
     const hasDocumentPath = typeof args.document_path === 'string' && args.document_path.trim() !== '';
     if (hasDocument === hasDocumentPath) {
@@ -1889,7 +2225,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       documentSource = 'authorized_path';
     }
     const sessionId = args.session_id ?? engine.sessionId;
-    const page = await engine.sessionStore.listFlows({ sessionId, limit: maxFlows });
+    const scope = await resolveScope(context, args.scope);
+    const page = scope.mode === 'all'
+      ? await engine.sessionStore.listFlows({ sessionId, limit: maxFlows })
+      : await scopedPage({ session_id: sessionId, limit: maxFlows }, scope);
+    const counts = scope.mode === 'all' ? null : await engine.sessionStore.countScopedFlows({ sessionId, scope });
     const flows = [];
     for (const flow of page.flows) flows.push(await hydrateOpenApiFlowBodies(flow, maxBodyBytes));
     const result = validateOpenApiFlows(document, flows, {
@@ -1899,14 +2239,15 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       externalDocuments: args.external_documents ?? {},
     });
     return {
+      ...scopeMeta(scope, counts?.hidden ?? 0),
       session_id: sessionId,
       document_source: documentSource,
       limits: { max_document_bytes: maxDocumentBytes, max_body_bytes: maxBodyBytes, max_flows: maxFlows },
       ...result,
       // The storage page can be truncated independently of the validator.
       truncated: result.truncated || page.has_more,
-      skipped_count: result.skipped_count + (page.has_more ? Math.max(0, (page.session?.flow_count ?? flows.length) - flows.length) : 0),
-      total: page.session?.flow_count ?? result.total,
+      skipped_count: result.skipped_count + (page.has_more ? Math.max(0, (counts?.visible ?? page.session?.flow_count ?? flows.length) - flows.length) : 0),
+      total: counts?.visible ?? page.session?.flow_count ?? result.total,
     };
   }
 
@@ -1934,10 +2275,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return copy;
   }
 
-  async function save_body_to_file(args = {}) {
+  async function save_body_to_file(args = {}, context = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const { flow_id, kind = 'res', path: destPath } = args;
-    const f = await engine.getDurableFlow(flow_id, args.session_id);
+    const f = await scopedFlow(flow_id, context, args);
     if (!f) throw new Error(`flow not found: ${flow_id}`);
     const part = kind === 'req' ? f.request : f.response;
     if (!part) throw new Error(`flow has no ${kind}`);
@@ -1959,8 +2300,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       captured_size: part.body_size, captured_sha: part.body_sha, redacted: !includeSensitive };
   }
 
-  async function query_flow_json(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function query_flow_json(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow) throw flowNotFound(args.flow_id);
     const part = args.kind === 'req' ? flow.request : flow.response;
     const body = await bodyForExport(part);
@@ -1974,8 +2315,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       ...inspectJson(document, args) };
   }
 
-  async function finish_capture_task(args = {}) {
-    const lease = await captureLease.assert(args.capture_lease_id);
+  async function finish_capture_task(args = {}, context = {}) {
+    const lease = await captureLease.assert(args.capture_lease_id, context, [], args.task_id);
     if (!lease) throw Object.assign(new Error('Acquire the task lease before using task cleanup. Legacy fixtures must be removed by their explicit IDs.'), {
       code: 'TASK_LEASE_REQUIRED', recovery: ['Use acquire_capture_lease for new task resources; never infer ownership from a broad ID prefix.'],
     });
@@ -1997,19 +2338,19 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       else await reverseProxies.remove(resource.id);
       removed.push({ kind: resource.kind, id: resource.id });
     }
-    await captureLease.release(args);
-    return { status: 'finished', task_id: lease.task_id, removed, retained, lease_released: true,
+    const lease_status = await captureLease.finish(lease.lease_id, retained, context);
+    return { kept: retained, orphaned: lease_status.orphaned_resources, lease_status, status: 'finished', task_id: lease.task_id, removed, retained, lease_released: true,
       capture_continues: engine.isRunning(), evidence_preserved: true, stored_rules_updated: storedChanged,
       next_actions: retained.length ? ['Retained resources were explicitly kept or changed since this task owned them. Inspect before removing them.'] : [] };
   }
 
   // Capture-to-mock — the Proxyman killer feature.
-  async function capture_to_mock(args = {}) {
-    await ensureProxyRunning();
+  async function capture_to_mock(args = {}, context = {}) {
     const { flow_id, rule_id, method, url_pattern, status, content_type } = args;
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const f = await engine.getDurableFlow(flow_id, args.session_id);
+    const f = await scopedFlow(flow_id, context, args);
     if (!f) throw new Error(`flow not found: ${flow_id}`);
+    await ensureProxyRunning();
     if (!f.response) throw new Error('flow has no response yet');
     if (f.response.body_omitted) {
       throw Object.assign(new Error(`Cannot create a mock from an omitted response: ${f.response.body_omitted}`), { code: 'BODY_UNAVAILABLE' });
@@ -2031,7 +2372,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     // GET /v1/users also answered http://evil.test/x/v1/users/extra — and when
     // the URL failed to parse it fell back to the whole URL, query included.
     const rule = await engine.registerRule({
-      rule_id: id,
+      rule_id: id, owner: args.owner, match_scope: args.match_scope,
       ...ruleUrlMatchers(f.request?.url ?? '', { ...args, url_pattern }, { normalize: true }),
       method: method ?? f.request?.method ?? 'ANY',
       status: status ?? f.response.statusCode ?? 200,
@@ -2065,7 +2406,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   // ---- HAR export (subset; one flow per entry) ----
-  async function export_har(args = {}) {
+  async function export_har(args = {}, context = {}) {
+    const scope = await resolveScope(context, args.scope);
+    let hidden = 0;
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const limit = args.limit ?? 200;
     let sourceFlows;
@@ -2074,18 +2417,21 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       let cursor = args.cursor ?? null;
       let sinceFlowId = args.since_flow_id ?? null;
       do {
-        const page = await engine.listDurableFlows({
+        const page = await scopedPage({
           session_id: args.session_id,
           cursor,
           since_flow_id: cursor ? undefined : sinceFlowId,
           limit: Math.min(1000, limit - sourceFlows.length),
-        });
+        }, scope);
+        hidden += page.hidden_count;
         sourceFlows.push(...page.flows);
         cursor = page.next_cursor;
         sinceFlowId = null;
       } while (cursor && sourceFlows.length < limit);
     } else {
-      sourceFlows = engine.flowOrder.slice(-limit).map((id) => engine.flows.get(id)).filter(Boolean);
+      const all = engine.flowOrder.map(id => engine.flows.get(id)).filter(Boolean);
+      hidden = all.filter(f => !scope.predicate(f)).length;
+      sourceFlows = all.filter(scope.predicate).slice(-limit);
     }
     const entries = [];
     let remainingBytes = MAX_EXPORTED_BODY_BYTES;
@@ -2154,10 +2500,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       },
     };
     await fs.writeFile(out, JSON.stringify(har, null, 2), { mode: 0o600 });
-    return { path: out, entry_count: entries.length, omitted_body_count: omittedBodies, redacted: !includeSensitive };
+    return { ...scopeMeta(scope, hidden), path: out, entry_count: entries.length, omitted_body_count: omittedBodies, redacted: !includeSensitive };
   }
 
-  async function import_har(args = {}) {
+  async function import_har(args = {}, context = {}) {
     const source = await authorizeReadPath(args.path);
     const stat = await fs.stat(source);
     if (stat.size > 256 * 1024 * 1024) throw new Error('HAR import exceeds the 256 MB safety limit.');
@@ -2165,6 +2511,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     const entries = har?.log?.entries;
     if (!Array.isArray(entries)) throw new Error('Invalid HAR: expected log.entries array.');
     const sessionId = args.session_id ?? `har_${Date.now()}`;
+    await guardSessionReplacement(args, context, sessionId);
     if (args.replace) await engine.sessionStore.purgeSession(sessionId);
     await engine.sessionStore.ensureSession({ id: sessionId, name: args.name ?? path.basename(source) });
     let imported = 0;
@@ -2233,7 +2580,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
 
   const tools = {
     // lifecycle
-    start_proxy, start_app_capture, list_simulator_apps, stop_proxy, set_proxy_routing, clear_proxy_routing,
+    start_proxy, start_app_capture, list_simulator_apps,
+    stop_proxy: async (args = {}, context = {}) => { await guardGlobal(args, context); return stop_proxy(args); }, set_proxy_routing, clear_proxy_routing,
     start_operator_ui, stop_operator_ui, get_operator_ui_status,
     trust_ca_on_simulators: trust_ca_on_simulators_tool,
     setup_simulator_certificate, setup_xcode_preview_certificate,
@@ -2274,18 +2622,81 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     kill_orphan_proxy, reconcile_state, export_har, import_har,
     // sim
     start_sim_watcher, stop_sim_watcher,
-    acquire_capture_lease: (args) => captureLease.acquire(args),
-    release_capture_lease: (args) => captureLease.release(args),
+    acquire_capture_lease: (args, context) => captureLease.acquire(args, context),
+    release_capture_lease: (args, context) => captureLease.release(args, context),
     finish_capture_task,
   };
+  // Also serialize direct/in-process callers, which do not use control.mjs's
+  // mutation queue. SSL read/merge and claim writes must remain one operation.
+  let routingMutation = Promise.resolve();
+  for (const name of ['start_proxy', 'set_proxy_routing', 'clear_proxy_routing', 'enable_ssl_proxying']) {
+    const fn = tools[name];
+    tools[name] = (...args) => {
+      const result = routingMutation.then(() => fn(...args));
+      routingMutation = result.catch(() => {});
+      return result;
+    };
+  }
+  let resourceMutation = Promise.resolve();
   for (const name of LEASE_PROTECTED_TOOLS) {
     const fn = tools[name];
     if (!fn) continue;
-    tools[name] = async (args = {}, context = {}) => {
-      const lease = await captureLease.assert(args.capture_lease_id);
-      const priorRules = lease && RULE_CREATORS.has(name) ? new Set(engine.mockRules.keys()) : null;
+    const mutateResource = async (args = {}, context = {}) => {
+      // Only resource mutations participate; global controls belong to their own policy.
+      if (['finish_capture_task', 'resolve_breakpoint', 'cancel_breakpoint'].includes(name)) return fn(args, context);
+      const defaults = {
+        create_map_local: () => stableRuleId('map-local', args.url_pattern ?? args.url),
+        mock_json_response: () => stableRuleId('map-local', args.url),
+        create_map_remote: () => stableRuleId('map-remote', `${args.from_url ?? args.url}->${args.to_url}`),
+        create_blacklist: () => stableRuleId('blacklist', args.url ?? args.url_pattern),
+        create_network_condition: () => stableRuleId('network', `${args.url ?? '*'}:${args.profile ?? args.delay_ms ?? args.fault}`),
+        create_no_cache_rule: () => stableRuleId('no-cache', args.url ?? '*'),
+        create_breakpoint: () => stableRuleId('breakpoint', `${args.url ?? args.url_pattern}:${args.direction ?? 'request'}`),
+        capture_to_mock: () => `capture-${args.flow_id}`,
+        create_transform_plugin_rule: () => stableRuleId('plugin', `${args.plugin_id}:${args.url ?? args.url_pattern}`),
+      };
+      if (defaults[name] && !args.rule_id) {
+        const namespace = crypto.createHash('sha256').update(JSON.stringify(owner(context))).digest('hex').slice(0, 20);
+        args = { ...args, rule_id: name === 'create_breakpoint' ? defaults[name]() : `${namespace}-${defaults[name]()}` };
+      }
+      const ownedRuleTools = new Set(['create_map_local', 'mock_json_response', 'create_map_remote', 'create_blacklist',
+        'create_network_condition', 'create_no_cache_rule', 'capture_to_mock', 'create_transform_plugin_rule']);
+      const ruleMutations = new Set([...ownedRuleTools, 'patch_mock_json', 'update_rule', 'set_rule_enabled',
+        'set_rule_priority', 'remove_rule', 'reorder_rules']);
+      if (ownedRuleTools.has(name)) {
+        args = { ...args, owner: owner(context), match_scope: args.match_scope ?? 'all' };
+      }
+      if (ruleMutations.has(name)) {
+        for (const id of args.rule_ids ?? [args.rule_id]) {
+          await assertRuleOwner(engine.listRuleConfigs().find(r => r.rule_id === id),
+            ownedRuleTools.has(name) ? {} : args, context);
+        }
+        if (name === 'update_rule' && ('owner' in (args.patch ?? {}))) throw new Error('Rule owner cannot be patched');
+      }
+      const resources = [];
+      if (args.rule_id) resources.push({ kind: 'rule', id: args.rule_id });
+      if (name === 'reorder_rules') for (const id of args.rule_ids ?? []) resources.push({ kind: 'rule', id });
+      if (name === 'import_rules' && args.path) {
+        const imported = await importRulesFrom(await authorizeReadPath(args.path));
+        for (const rule of imported) await assertRuleOwner(engine.listRuleConfigs().find(r => r.rule_id === rule.rule_id), {}, context);
+        if (args.replace) for (const rule of engine.listRuleConfigs()) resources.push({ kind: 'rule', id: rule.rule_id });
+      }
+      if (['create_reverse_proxy', 'remove_reverse_proxy'].includes(name) && args.id) resources.push({ kind: 'reverse_proxy', id: args.id });
+      if (!resources.length && !RULE_CREATORS.has(name) && !['create_reverse_proxy', 'import_rules'].includes(name)) return fn(args, context);
+      const lease = await captureLease.assert(args.capture_lease_id, context, resources.filter(resource => {
+        if (!ruleMutations.has(name) && name !== 'import_rules') return true;
+        const rule = engine.listRuleConfigs().find(r => r.rule_id === resource.id);
+        return !rule?.owner || owned(rule.owner, context);
+      }));
+      const priorRules = lease && (RULE_CREATORS.has(name) || name === 'import_rules') ? new Set(engine.mockRules.keys()) : null;
       const result = await fn(args, context);
       if (lease && name !== 'finish_capture_task') {
+        if (name === 'import_rules') for (const config of engine.listRuleConfigs()) {
+          if (owned(config.owner ?? {}, context) && (!priorRules.has(config.rule_id)
+            || lease.resources?.some(r => r.kind === 'rule' && r.id === config.rule_id))) {
+            await captureLease.trackResource(lease.lease_id, { kind: 'rule', id: config.rule_id, revision: resourceRevision(config) });
+          }
+        }
         const ruleId = result?.rule_id ?? result?.rule?.rule_id ?? args.rule_id;
         const ownedRule = ruleId && lease.resources?.some((resource) => resource.kind === 'rule' && resource.id === ruleId);
         if (ruleId && (priorRules && !priorRules.has(ruleId) || ownedRule)) {
@@ -2295,12 +2706,32 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
         if (name === 'create_reverse_proxy') await captureLease.trackResource(lease.lease_id,
           { kind: 'reverse_proxy', id: result.id, revision: resourceRevision(result) });
       }
+      if (ruleMutations.has(name) && result?.rule) return { ...result, rule: publicRule(result.rule, context) };
+      if (name === 'reorder_rules') return { ...result, rules: result.rules.map(r => publicRule(r, context)) };
+      return result;
+    };
+    tools[name] = (args = {}, context = {}) => {
+      const result = resourceMutation.then(() => mutateResource(args, context));
+      resourceMutation = result.catch(() => {});
       return result;
     };
   }
   // The daemon must still release sockets/routing on SIGTERM while a task
   // holds a lease. Symbols are never addressable through JSON-RPC tool names.
   Object.defineProperty(tools, INTERNAL_CAPTURE_CONTROL, { value: { stop_proxy, start_sim_watcher } });
+  Object.defineProperty(tools, INTERNAL_PRESENCE_LOST, { value: presenceLost });
+  Object.defineProperty(tools, INTERNAL_ROUTING_CONTROL, { get: routingController });
+  if (mode === 'daemon') for (const [name, fn] of Object.entries(tools)) {
+    tools[name] = async (args = {}, context = {}) => {
+      const result = await fn(args, context);
+      const status = await routingSnapshot();
+      const claim = status.claims.find(c => owned(c, context));
+      if (!claim || claim.state === 'active' || !result || typeof result !== 'object') return result;
+      return { ...result, routing_warning: { state: claim.state,
+        reason: claim.state === 'expired' ? 'lease_expired' : status.routing_lost_reason ?? 'daemon_restart',
+        claim_id: claim.claim_id, recovery: 'Re-arm your routing with set_proxy_routing; call clear_proxy_routing when done.' } };
+    };
+  }
   return tools;
 }
 

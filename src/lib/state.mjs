@@ -1,3 +1,4 @@
+import { networksetupBinary } from './test-hooks.mjs';
 // state.json — persisted daemon state for crash recovery.
 //
 // Pattern (per Agent D's research): SIGKILL/OOM never fires user code. The
@@ -14,7 +15,7 @@ import { promisify } from 'node:util';
 import { STATE_DIR } from './config.mjs';
 
 const execFileP = promisify(execFile);
-const NETWORKSETUP = '/usr/sbin/networksetup';
+const NETWORKSETUP = networksetupBinary();
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const PID_FILE = path.join(STATE_DIR, 'daemon.pid');
 const HANDSHAKE_FILE = path.join(STATE_DIR, 'handshake.json');
@@ -50,15 +51,49 @@ export async function clearState() {
   try { await fs.unlink(STATE_FILE); } catch { /* ignore */ }
 }
 
-// True if state.json points at a process that no longer exists or no longer
-// holds either of the recorded ports.
-export async function isStateStale() {
+export async function readBootSession({ run = execFileP } = {}) {
+  try { return (await run('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], commandOptions())).stdout.trim() || null; }
+  catch { return null; }
+}
+
+export async function readStartTime(pid, { run = execFileP } = {}) {
+  try { return (await run('/bin/ps', ['-p', String(pid), '-o', 'lstart='], commandOptions())).stdout.trim() || null; }
+  catch { return null; }
+}
+
+export async function readProcessIdentity(pid, options = {}) {
+  const [boot_session, pid_started_at] = await Promise.all([readBootSession(options), readStartTime(pid, options)]);
+  return { boot_session, pid_started_at };
+}
+
+export async function isRecordedOwnerAlive(state, { isAlive = processAlive,
+  readStartTime: startTime = readStartTime, readBootSession: bootSession = readBootSession } = {}) {
+  if (!state?.pid || !await isAlive(state.pid)) return false;
+  if (state.boot_session && state.boot_session !== await bootSession()) return false;
+  if (state.pid_started_at && state.pid_started_at !== await startTime(state.pid)) return false;
+  return true;
+}
+
+export async function isStateStale(options = {}) {
   const state = await readState();
-  if (!state) return false;
-  if (state.pid) {
-    if (!processAlive(state.pid)) return true;
+  return !!state?.pid && !await isRecordedOwnerAlive(state, options);
+}
+
+export async function sweepStaleTempFiles(directory, { isAlive = processAlive, now = Date.now, minAgeMs = 60000 } = {}) {
+  const removed = [];
+  const timestamp = typeof now === 'function' ? now() : now;
+  for (const name of await fs.readdir(directory)) {
+    const match = name.match(/^\..+\.(\d+)\.[a-f0-9]+\.tmp$/i);
+    if (!match || await isAlive(Number(match[1]))) continue;
+    const file = path.join(directory, name);
+    try {
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || timestamp - stat.mtimeMs < minAgeMs) continue;
+      await fs.unlink(file);
+      removed.push(name);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
-  return false;
+  return removed;
 }
 
 function processAlive(pid) {
@@ -107,7 +142,7 @@ export async function clearHandshake(expectedToken) {
 // Crash recovery must only undo the exact automatic proxy setting that this
 // process recorded. Disabling every proxy type on every network service can
 // destroy VPN/corporate/user configuration unrelated to proxy-mate.
-export async function defensiveNetworkResetAllServices() {
+export async function defensiveNetworkResetAllServices(options = {}) {
   const state = await readState();
   const service = state?.network_service;
   if (!service || !state?.routing_active) {
@@ -115,16 +150,28 @@ export async function defensiveNetworkResetAllServices() {
   }
   try {
     const { clearPacRouting } = await import('./pac.mjs');
-    await clearPacRouting({ recoverStale: true });
+    await clearPacRouting({ ...options, recoverStale: true });
     return { reset: [service] };
   } catch (error) {
     return { reset: [], failed: [{ service, error: error?.message ?? String(error) }] };
   }
 }
 
+// Test runs must never change the developer's real network settings. Node's
+// test runner marks its child processes with NODE_TEST_CONTEXT; a test that
+// genuinely needs the real binary must opt in explicitly.
+export function assertRealNetworkCommandAllowed(env = process.env) {
+  if (env.NODE_TEST_CONTEXT && env.PROXY_MATE_ALLOW_REAL_NETWORKSETUP !== '1') {
+    throw Object.assign(new Error('Refusing to run the real networksetup inside a test run; inject a fake runner.'), {
+      code: 'REAL_NETWORKSETUP_BLOCKED', retryable: false,
+    });
+  }
+}
+
 // Targeted reset: clear only the autoproxy on the service we configured.
 export async function targetedAutoProxyOff(service) {
   if (!service) return false;
+  if (NETWORKSETUP === '/usr/sbin/networksetup') assertRealNetworkCommandAllowed();
   try { await execFileP(NETWORKSETUP, ['-setautoproxystate', service, 'off']); }
   catch { /* ignore */ }
   return true;

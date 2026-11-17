@@ -13,6 +13,9 @@ import { z } from 'zod';
 import { writeHandshake, clearHandshake } from './state.mjs';
 import { MCP_TOOLS } from './mcp-contract.mjs';
 import { SERVER_VERSION } from './config.mjs';
+import { CLIENT_ID_HEADER, normalizeClientId, normalizeTaskId, LEGACY_CLIENT_ID } from './client-identity.mjs';
+import { increment, snapshotMetrics } from './metrics.mjs';
+import { logLine } from './log-line.mjs';
 
 export const DEFAULT_CONTROL_PORT = 8082;
 const MAX_RPC_BYTES = 1024 * 1024;
@@ -53,13 +56,17 @@ export class ControlServer {
   constructor({
     port = DEFAULT_CONTROL_PORT,
     tools,
+    clientRegistry, onHeartbeat = async () => {},
     scopes = ['observe', 'control', ...(readEnvironment('PROXY_MATE_ALLOW_SENSITIVE') === '1' ? ['sensitive'] : [])],
     maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS,
+    maxLongConcurrentRequests = 16,
     rateLimit = DEFAULT_RATE_LIMIT,
     rateWindowMs = DEFAULT_RATE_WINDOW_MS,
   }) {
     this.port = port;
     this.tools = tools;
+    this.clientRegistry = clientRegistry;
+    this.onHeartbeat = onHeartbeat;
     this.server = null;
     this.token = null;
     this.queue = Promise.resolve();
@@ -67,6 +74,9 @@ export class ControlServer {
     this.maxConcurrentRequests = boundedInteger(maxConcurrentRequests, 1, 256, 'maxConcurrentRequests');
     this.rateLimit = boundedInteger(rateLimit, 1, 100_000, 'rateLimit');
     this.rateWindowMs = boundedInteger(rateWindowMs, 1_000, 60 * 60_000, 'rateWindowMs');
+    this.maxLongConcurrentRequests = boundedInteger(maxLongConcurrentRequests, 1, 256, 'maxLongConcurrentRequests');
+    this.activeLongRequests = 0;
+    this.lastRejectionLog = new Map();
     this.activeRequests = 0;
     this.rateBuckets = new Map();
     this.controllers = new Set();
@@ -87,6 +97,7 @@ export class ControlServer {
       srv.maxHeadersCount = 100;
       srv.maxRequestsPerSocket = 100;
       srv.maxConnections = 128;
+      srv.on('drop', () => this.#reject('control.connections_dropped'));
       srv.on('connection', (socket) => {
         this.sockets.add(socket);
         socket.once('close', () => this.sockets.delete(socket));
@@ -103,15 +114,23 @@ export class ControlServer {
     return this.port;
   }
 
-  async stop() {
+  async stop({ queueTimeoutMs = 3000 } = {}) {
     if (!this.server) return;
     const closed = new Promise((resolve) => this.server.close(() => resolve()));
     for (const controller of this.controllers) controller.abort(codedCancellation('Daemon is shutting down.'));
     for (const socket of this.sockets) socket.destroy();
     await closed;
-    await this.queue;
-    this.server = null;
-    await clearHandshake(this.token);
+    let timer, queueDrained = false;
+    try {
+      await Promise.race([this.queue.then(() => { queueDrained = true; }), new Promise((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, queueTimeoutMs));
+      })]);
+    } finally {
+      clearTimeout(timer);
+      this.server = null;
+      await clearHandshake(this.token);
+    }
+    return { queue_drained: queueDrained };
   }
 
   #handle(req, res) {
@@ -125,25 +144,6 @@ export class ControlServer {
       writeControlError(res, 403, 'INVALID_ORIGIN', 'Origin is not permitted for this local control server.');
       return;
     }
-    if (!this.#consumeRate(req.socket.remoteAddress)) {
-      res.setHeader('retry-after', String(Math.max(1, Math.ceil(this.rateWindowMs / 1000))));
-      writeControlError(res, 429, 'RATE_LIMITED', 'Local control request rate limit exceeded.');
-      return;
-    }
-    if (this.activeRequests >= this.maxConcurrentRequests) {
-      writeControlError(res, 503, 'CONTROL_BUSY', 'Local control server concurrency limit reached.');
-      return;
-    }
-    this.activeRequests += 1;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      this.activeRequests = Math.max(0, this.activeRequests - 1);
-    };
-    res.once('finish', release);
-    res.once('close', release);
-
     const auth = req.headers['authorization'] ?? '';
     const expected = `Bearer ${this.token}`;
     if (!constantTimeEqual(auth, expected)) {
@@ -158,7 +158,31 @@ export class ControlServer {
       res.end(JSON.stringify({ ok: true, service: req.headers['x-proxy-mate-client'] === '1' ? 'proxy-mate' : 'proxy-mcp', name: 'proxy-mate', pid: process.pid }));
       return;
     }
-    if (req.method !== 'POST' || req.url !== '/rpc') {
+    const clientId = normalizeClientId(req.headers[CLIENT_ID_HEADER]);
+    if (!this.#consumeRate(clientId
+      ? `client:${clientId}` : `address:${req.socket.remoteAddress}`)) {
+      this.#reject('control.rate_limited');
+      res.setHeader('retry-after', String(Math.max(1, Math.ceil(this.rateWindowMs / 1000))));
+      writeControlError(res, 429, 'RATE_LIMITED', 'Local control request rate limit exceeded.');
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/metrics') {
+      if (!this.scopes.has('observe')) {
+        writeControlError(res, 403, 'FORBIDDEN_SCOPE', 'Control token lacks observe scope.');
+        return;
+      }
+      let body;
+      try { body = JSON.stringify(snapshotMetrics()); } catch { body = null; }
+      if (body == null || Buffer.byteLength(body) > 64 * 1024) {
+        writeControlError(res, 503, 'METRICS_TOO_LARGE', 'Metrics snapshot exceeds its bounded response size.');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(body);
+      return;
+    }
+    const heartbeat = req.method === 'POST' && req.url === '/heartbeat';
+    if (req.method !== 'POST' || (req.url !== '/rpc' && !heartbeat)) {
       res.writeHead(404); res.end(); return;
     }
     const chunks = [];
@@ -167,20 +191,43 @@ export class ControlServer {
     req.on('data', (chunk) => {
       if (tooLarge) return;
       bytes += chunk.length;
-      if (bytes > MAX_RPC_BYTES) {
+      if (bytes > (heartbeat ? 4096 : MAX_RPC_BYTES)) {
         tooLarge = true;
         res.writeHead(413, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: { code: 'PAYLOAD_TOO_LARGE', message: `RPC body exceeds ${MAX_RPC_BYTES} bytes` } }));
+        res.end(JSON.stringify({ ok: false, error: { code: 'PAYLOAD_TOO_LARGE', message: `Control body exceeds ${heartbeat ? 4096 : MAX_RPC_BYTES} bytes` } }));
         req.destroy();
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', async () => {
-      if (tooLarge) return;
+      if (tooLarge || res.destroyed) return;
       let payload;
       try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
       catch { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'bad json' })); return; }
+      if (heartbeat) {
+        const identity = payload?.client ?? payload;
+        const id = identity?.client_id === undefined ? clientId : normalizeClientId(identity.client_id);
+        if (!identity || typeof identity !== 'object' || Array.isArray(identity) || !id || id === LEGACY_CLIENT_ID || (clientId && clientId !== id)) {
+          writeControlError(res, 400, 'INVALID_CLIENT', 'Heartbeat requires a valid matching client id.');
+          return;
+        }
+        // Headerless envelopes are charged to their client too. Header-bearing
+        // bridges already consumed that bucket before body parsing.
+        if (!clientId && !this.#consumeRate(`client:${id}`)) {
+          writeControlError(res, 429, 'RATE_LIMITED', 'Client heartbeat rate exceeded.'); return;
+        }
+        try {
+          this.clientRegistry?.touch({ ...identity, client_id: id });
+          await this.onHeartbeat(id);
+          if (res.destroyed) return;
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, server_time: Date.now(), interval_ms: this.clientRegistry?.intervalMs ?? 30000 }));
+        } catch {
+          if (!res.destroyed) writeControlError(res, 503, 'HEARTBEAT_FAILED', 'Heartbeat renewal failed.');
+        }
+        return;
+      }
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)
         || typeof payload.tool !== 'string'
         || (payload.args != null && (typeof payload.args !== 'object' || Array.isArray(payload.args)))) {
@@ -222,6 +269,23 @@ export class ControlServer {
         }));
         return;
       }
+      const longRunning = tool === 'wait_for_flow' || /request|repeat|curl/.test(tool) || definition?.longRunning;
+      const pool = longRunning ? 'activeLongRequests' : 'activeRequests';
+      const limit = longRunning ? this.maxLongConcurrentRequests : this.maxConcurrentRequests;
+      if (this[pool] >= limit) {
+        this.#reject(longRunning ? 'control.long_busy' : 'control.busy');
+        writeControlError(res, 503, longRunning ? 'CONTROL_LONG_BUSY' : 'CONTROL_BUSY', 'Local control server concurrency limit reached.');
+        return;
+      }
+      this[pool] += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        this[pool] -= 1;
+      };
+      res.once('finish', release);
+      res.once('close', release);
       const controller = new AbortController();
       this.controllers.add(controller);
       const deadline = setTimeout(() => controller.abort(Object.assign(new Error('Tool deadline exceeded.'), { code: 'DAEMON_TIMEOUT' })), rpcTimeoutFor(tool, args ?? {}));
@@ -234,7 +298,10 @@ export class ControlServer {
         });
         const invoke = () => {
           if (controller.signal.aborted) throw controller.signal.reason ?? codedCancellation();
+          this.clientRegistry?.touch({ ...payload.client, client_id: normalizeClientId(payload.client?.client_id) ?? clientId });
           return fn(args ?? {}, { signal: controller.signal,
+            client_id: normalizeClientId(payload.client?.client_id) ?? LEGACY_CLIENT_ID,
+            task_id: normalizeTaskId(payload.client?.task_id),
             bridge_version: typeof payload.client?.bridge_version === 'string' ? payload.client.bridge_version.slice(0, 32) : null });
         };
         const operation = SERIAL_TOOL_NAMES.has(tool)
@@ -249,6 +316,7 @@ export class ControlServer {
         // writeHead lands in the catch below, which would writeHead a second
         // time; that throws ERR_HTTP_HEADERS_SENT inside this async 'end'
         // handler, where nothing can catch it, and takes the daemon down.
+        this.clientRegistry?.touch({ ...payload.client, client_id: normalizeClientId(payload.client?.client_id) ?? clientId });
         const body = JSON.stringify({ ok: true, result });
         if (res.destroyed) return;
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -291,9 +359,21 @@ export class ControlServer {
     } catch { return false; }
   }
 
+  #reject(counter) {
+    increment(counter);
+    const now = Date.now();
+    if (!this.lastRejectionLog.has(counter) || now - this.lastRejectionLog.get(counter) >= 10_000) {
+      this.lastRejectionLog.set(counter, now);
+      logLine('control', 'request rejected', { reason: counter });
+    }
+  }
+
   #consumeRate(remoteAddress) {
     const key = String(remoteAddress ?? 'local');
     const now = Date.now();
+    for (const [bucketKey, bucket] of this.rateBuckets) {
+      if (now - bucket.startedAt >= this.rateWindowMs) this.rateBuckets.delete(bucketKey);
+    }
     const current = this.rateBuckets.get(key);
     if (!current || now - current.startedAt >= this.rateWindowMs) {
       this.rateBuckets.set(key, { startedAt: now, count: 1 });
@@ -306,7 +386,8 @@ export class ControlServer {
 
 function writeControlError(res, status, code, message) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-  res.end(JSON.stringify({ ok: false, error: { code, message } }));
+  res.end(JSON.stringify({ ok: false, error: { code, message, retryable: status === 429 || status === 503,
+    recovery: status === 429 || status === 503 ? ['Wait for control capacity before submitting another call.'] : [] } }));
 }
 
 function boundedInteger(value, minimum, maximum, name) {
@@ -324,9 +405,9 @@ function constantTimeEqual(a, b) {
 }
 
 // Client side: connect to a running daemon, forward an RPC call.
-export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rpcTimeoutFor(tool, args), signal } = {}) {
+export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rpcTimeoutFor(tool, args), signal, client } = {}) {
   const url = new URL('/rpc', controlUrl);
-  const body = JSON.stringify({ tool, args: args ?? {}, client: { bridge_version: SERVER_VERSION } });
+  const body = JSON.stringify({ tool, args: args ?? {}, client: { bridge_version: SERVER_VERSION, client_id: normalizeClientId(client?.client_id), task_id: normalizeTaskId(client?.task_id) } });
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(codedCancellation('Daemon RPC was cancelled before it started.'));
     let settled = false;
@@ -352,6 +433,7 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rp
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(body),
         'authorization': `Bearer ${token}`,
+        ...(normalizeClientId(client?.client_id) ? { [CLIENT_ID_HEADER]: normalizeClientId(client.client_id) } : {}),
       },
       timeout: timeoutMs,
     }, (res) => {
@@ -431,7 +513,7 @@ function codedCancellation(message = 'Request cancelled.') {
 }
 
 // Probe the daemon: GET /health. Returns true if alive.
-export async function probeDaemon(controlUrl, token, timeoutMs = 1500) {
+export async function probeDaemon(controlUrl, token, timeoutMs = 1500, client) {
   if (!token) return false;
   let url;
   try {
@@ -445,7 +527,8 @@ export async function probeDaemon(controlUrl, token, timeoutMs = 1500) {
       host: url.hostname,
       port: url.port || 80,
       path: url.pathname,
-      headers: { authorization: `Bearer ${token}`, 'x-proxy-mate-client': '1' },
+      headers: { authorization: `Bearer ${token}`, 'x-proxy-mate-client': '1',
+        ...(normalizeClientId(client?.client_id) ? { [CLIENT_ID_HEADER]: normalizeClientId(client.client_id) } : {}) },
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];

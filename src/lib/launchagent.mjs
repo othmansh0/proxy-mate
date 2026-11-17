@@ -27,15 +27,15 @@ export const LEGACY_SERVICE_LABELS = Object.freeze([
 ]);
 const PLIST_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents');
 const PLIST_PATH = path.join(PLIST_DIR, `${LABEL}.plist`);
-function legacyServices() {
-  return LEGACY_SERVICE_LABELS.map((label) => ({ label, plistPath: path.join(PLIST_DIR, `${label}.plist`) }));
+function legacyServices(directory = PLIST_DIR) {
+  return LEGACY_SERVICE_LABELS.map((label) => ({ label, plistPath: path.join(directory, `${label}.plist`) }));
 }
 const GUARDIAN_PLIST_PATH = path.join(PLIST_DIR, `${GUARDIAN_LABEL}.plist`);
 const LOG_DIR = path.join(STATE_DIR, 'logs');
 
 export { LABEL, PLIST_PATH, GUARDIAN_LABEL, GUARDIAN_PLIST_PATH };
 
-export function plistXml({ programArgs, environment = {}, label = LABEL, logPrefix = 'daemon' }) {
+export function plistXml({ programArgs, environment = {}, label = LABEL, logPrefix = 'daemon', processType = 'Standard' }) {
   const argsXml = programArgs.map((a) => `    <string>${escapeXml(a)}</string>`).join('\n');
   const env = {
     PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
@@ -62,9 +62,9 @@ ${argsXml}
   <key>WorkingDirectory</key>
   <string>${escapeXml(path.dirname(path.dirname(programArgs[1])))}</string>
   <key>ExitTimeOut</key>
-  <integer>20</integer>
+  <integer>${label === LABEL ? 30 : 20}</integer>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>${escapeXml(processType)}</string>
   <key>StandardOutPath</key>
   <string>${escapeXml(path.join(LOG_DIR, `${logPrefix}.out.log`))}</string>
   <key>StandardErrorPath</key>
@@ -86,17 +86,23 @@ function escapeXml(s) {
     .replace(/"/g, '&quot;');
 }
 
-export async function installLaunchAgent(options) {
+export async function installLaunchAgent(options, dependencies = {}) {
   await fs.mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
   const release = await lockfile.lock(path.join(STATE_DIR, 'install'), { realpath: false, stale: 30_000, update: 5_000 });
-  try { return await installLaunchAgentUnlocked(options); }
+  try { return await installLaunchAgentUnlocked(options, dependencies); }
   finally { await release(); }
 }
 
-async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, proxyPort, pacPort, controlPort, extraArgs = [], readinessTimeoutMs = 90000 }) {
-  await fs.mkdir(PLIST_DIR, { recursive: true });
+async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, proxyPort, pacPort, controlPort, extraArgs = [], readinessTimeoutMs = 90000 }, {
+  plistDir = PLIST_DIR, stage = stageDaemonRuntime, read = readHandshake,
+  run = (args) => execFileP('launchctl', args, LAUNCHCTL_OPTIONS),
+  ready = waitForDaemonReady, publish = publishDaemonRuntime, prune = pruneDaemonRuntimes,
+} = {}) {
+  const plistPath = path.join(plistDir, `${LABEL}.plist`);
+  const guardianPlistPath = path.join(plistDir, `${GUARDIAN_LABEL}.plist`);
+  await fs.mkdir(plistDir, { recursive: true });
   await fs.mkdir(LOG_DIR, { recursive: true });
-  const runtime = await stageDaemonRuntime({ serverPath });
+  const runtime = await stage({ serverPath });
   const programArgs = [
     await stableNodePath(nodeBin || process.execPath),
     runtime.serverPath,
@@ -108,34 +114,36 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
   if (domainsFile) programArgs.push('--domains-file', path.resolve(domainsFile));
   for (const a of extraArgs) programArgs.push(a);
 
-  const environment = serviceEnvironment();
+  const environment = { ...serviceEnvironment(), PROXY_MATE_PAC_HOST: 'guardian', PROXY_MATE_PAC_PORT: String(pacPort ?? 8081) };
   // Retain the previous CWD authorization boundary for explicit fixture reads.
   // Files under protected folders may still require macOS user permission.
   environment.PROXY_MATE_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXY_MATE_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);
-  const previousHandshake = await readHandshake();
+  const previousHandshake = await read();
   const guardianArgs = [programArgs[0], path.join(runtime.directory, 'src/guardian.mjs')];
+  // The daemon serves interactive Simulator traffic: Background throttles it
+  // under build load (see man launchd.plist, ProcessType).
   let mcpServerPath;
   try { mcpServerPath = await activateServiceFiles({
     services: [
-      { label: LABEL, plistPath: PLIST_PATH, xml: plistXml({ programArgs, environment }) },
-      { label: GUARDIAN_LABEL, plistPath: GUARDIAN_PLIST_PATH,
-        xml: plistXml({ programArgs: guardianArgs, environment, label: GUARDIAN_LABEL, logPrefix: 'guardian' }) },
+      { label: LABEL, plistPath, xml: plistXml({ programArgs, environment, processType: 'Interactive' }) },
+      { label: GUARDIAN_LABEL, plistPath: guardianPlistPath,
+        xml: plistXml({ programArgs: guardianArgs, environment, label: GUARDIAN_LABEL, logPrefix: 'guardian', processType: 'Standard' }) },
     ],
-    retired: legacyServices().filter((service) => existsSync(service.plistPath)),
+    retired: legacyServices(plistDir).filter((service) => existsSync(service.plistPath)),
     domain: `gui/${process.getuid()}`,
-    run: (args) => execFileP('launchctl', args, LAUNCHCTL_OPTIONS),
-    ready: () => waitForDaemonReady({ previousToken: previousHandshake?.token, timeoutMs: readinessTimeoutMs }),
-    publish: () => publishDaemonRuntime(runtime.directory),
+    run,
+    ready: () => ready({ previousToken: previousHandshake?.token, timeoutMs: readinessTimeoutMs }),
+    publish: () => publish(runtime.directory),
   }); } catch (error) {
     // A failed build must not displace the previous healthy snapshot in
     // retention. Preserve it only when recovery itself needs investigation.
     if (error.details?.rollback_restored) await fs.rm(runtime.directory, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  await pruneDaemonRuntimes(runtime.directory).catch((error) => process.stderr.write(`[proxy-mate] old runtime cleanup failed: ${error.message}\n`));
-  return { plistPath: PLIST_PATH, label: LABEL, programArgs, runtime_directory: runtime.directory,
+  await prune(runtime.directory).catch((error) => process.stderr.write(`[proxy-mate] old runtime cleanup failed: ${error.message}\n`));
+  return { plistPath, label: LABEL, programArgs, runtime_directory: runtime.directory,
     mcp_server_path: mcpServerPath, mcp_client_path: path.join(path.dirname(mcpServerPath), 'client.mjs'),
-    guardian: { label: GUARDIAN_LABEL, plistPath: GUARDIAN_PLIST_PATH }, ready: true };
+    guardian: { label: GUARDIAN_LABEL, plistPath: guardianPlistPath }, ready: true };
 }
 
 export async function stableNodePath(executable) {

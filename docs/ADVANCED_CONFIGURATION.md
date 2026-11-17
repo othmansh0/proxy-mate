@@ -65,6 +65,30 @@ The daemon and explicit in-process capture give each address-family connection a
 
 Proxy forwarding failures expose `upstream_error` in flow summaries and response details, plus bounded machine-readable `response.tags`. The marker's `source: "proxy"` distinguishes a locally generated 502 from an actual backend 502. `get_diagnostics` returns flow-correlated `upstream-error` records with safe codes and the active attempt window; raw error messages, stacks, headers and bodies are excluded. Error metadata is retained with durable flows, including after daemon recovery.
 
+## Reliability settings
+
+Set these on the daemon before startup or installation. Installation preserves `PROXY_MATE_*` settings, but sets guardian PAC hosting and the selected PAC port explicitly in both LaunchAgents.
+
+| Variable | Default and behavior |
+| --- | --- |
+| `PROXY_MATE_DRAIN_MS` | 8000 ms. A finite nonnegative number controls proxy/gateway connection drain; 0 forces immediate completion. Invalid or negative values fall back to 8000. Daemon shutdown caps this to the remaining cleanup budget. |
+| `PROXY_MATE_BODY_WORKER_THRESHOLD` | 262144 bytes (256 KiB). Bodies larger than this go to workers; bodies with Content-Encoding go to workers regardless of wire size. Unencoded bodies at or below the threshold stay inline. |
+| `PROXY_MATE_BODY_WORKERS` | 2 lazy workers; positive integers are capped at 8. |
+| `PROXY_MATE_BODY_WORKER_QUEUE` | 32 waiting jobs; positive integers are capped at 128. Active jobs are separate from this queue. |
+| `PROXY_MATE_BODY_WORKER_TIMEOUT_MS` | 5000 ms per job, including queue time; positive integers are capped at 30000. |
+| `PROXY_MATE_PAC_HOST` | Unset uses the daemon's in-process PAC. Exactly `guardian` selects the independent guardian host. Installed jobs set `guardian`. First-use host failure logs an in-process fallback; occupied ports still fail. |
+| `PROXY_MATE_PAC_PORT` | 8081 for the guardian host. Installation writes the selected PAC port into both jobs. For manual launches, keep this consistent with the daemon's `--pac-port`; this environment variable alone does not change the daemon's routing port. |
+
+The body-worker options require positive integers; invalid values fall back to their defaults. The threshold is capped at JavaScript's maximum safe integer. Workers decode, redact, hash and store capture bodies off the event loop. Pool saturation, worker failure or timeout falls back inline only for bodies smaller than 1 MiB. Larger bodies are omitted with `omitted: "processing_overloaded"`; proxy forwarding continues. Metadata-only capture avoids body hashes. Status/diagnostics expose degradation counters; an omitted body is not a complete recording.
+
+The daemon LaunchAgent uses `ProcessType=Interactive`; the guardian uses `Standard`. Background scheduling previously starved proxy traffic during builds. `ExitTimeOut` is 30 seconds for the daemon and 20 seconds for the guardian. Daemon shutdown has a 20-second deadline: cleanup reserves 19 seconds, leaving one second for the final journal flush. It restores routing first (up to 6 seconds), then stops control calls (up to 3 seconds), stops the operator UI, and drains capture within the remaining budget. Claims survive for conditional re-arm. The guardian allows 25 seconds after its SIGTERM before escalation and rechecks process ownership before SIGKILL. Its own stop waits up to 10 seconds for the current tick and PAC host.
+
+Heartbeats default to 30 seconds with ±10% jitter; presence uses three missed intervals and 90 seconds of startup grace. These are code defaults, not environment options. Health probes bypass RPC rate/concurrency budgets after authentication. Normal control calls use per-client rate buckets; long calls have a separate concurrency pool.
+
+### Testing
+
+`PROXY_MATE_ALLOW_REAL_NETWORKSETUP` is a test safety override, not a setup feature. Under Node's test runner, real network-setting commands are blocked unless this override is exactly `1`. Tests should inject fake commands and isolate state instead. Do not enable it for routine tests.
+
 ## Deliberate limits
 
 `proxy-mate` focuses on safe agent-driven HTTP debugging. It does not ship a desktop GUI, Android/Windows/Linux automation, packet-level shaping, DNS/TUN/WireGuard capture, HTTP/3, arbitrary user scripting, general Mac app attribution, or live WebSocket frame injection. Those require a different engine or product surface and are documented instead of being emulated inaccurately.
@@ -73,8 +97,11 @@ See the [Proxyman and competitor comparison](PARITY.md).
 
 ## Verify
 
+Repository tests isolate themselves: under `node --test` each test process uses a private temporary state root unless `PROXY_MATE_HOME` is set explicitly. Leave it unset for `npm run check`. For the benchmark and soak scripts, which run outside the test runner, use a scratch root.
+
 ```bash
 npm run check
+export PROXY_MATE_HOME="$(mktemp -d /tmp/proxy-mate-scratch.XXXXXX)"
 npm run benchmark:storage
 npm run test:soak -- 300
 npm pack --dry-run

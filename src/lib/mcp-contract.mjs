@@ -47,7 +47,13 @@ const flowPartSchema = z.looseObject({
   body_omission_reason: z.string().nullish(),
   body_resource_uri: resourceUriSchema.nullish(),
 });
+const deviceUdidSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+const attributionFields = {
+  owner_client: z.string().nullish(), owner_task: z.string().nullish(),
+  device_udid: deviceUdidSchema.nullish(), attribution: z.enum(['device', 'claim', 'ambiguous', 'unknown']).optional(),
+};
 const flowSummarySchema = z.looseObject({
+  ...attributionFields,
   id: z.string().optional(),
   upstream_error: upstreamErrorSchema.nullable().optional(),
   request: flowPartSchema.nullable().optional(),
@@ -69,12 +75,33 @@ const flowListSchema = z.looseObject({
   order: z.enum(['newest_first', 'oldest_first']).optional(),
 });
 const flowDetailSchema = z.looseObject({
+  ...attributionFields,
   id: z.string().optional(),
   request: flowPartSchema.nullable().optional(),
   response: flowPartSchema.nullable().optional(),
   resource_uri: resourceUriSchema.optional(),
 });
+const routingLossReasonSchema = z.enum(['lease_expired', 'daemon_restart', 'external_change', 'guardian_recovery']);
+const routingClaimSchema = z.object({
+  claim_id: z.string(), client_id: z.string(), task_id: z.string().nullable(),
+  device_udids: z.array(deviceUdidSchema).max(8).optional(),
+  domains: z.array(z.string()), expires_at: z.string(),
+  state: z.enum(['active', 'suspended', 'expired']), mine: z.boolean().optional(),
+});
+const routingWarningSchema = z.object({
+  state: z.enum(['expired', 'suspended']), reason: routingLossReasonSchema,
+  claim_id: z.string(), recovery: z.string(),
+});
+const routingResultSchema = z.looseObject({
+  claim: routingClaimSchema.nullable().optional(), routing_union: z.array(z.string()).optional(),
+  routing_status: z.object({ active: z.boolean(), network_service: z.string().nullable(),
+    union_domains: z.array(z.string()), claims: z.array(routingClaimSchema), last_change: z.unknown().nullable() }).optional(),
+  removed_claims: z.array(routingClaimSchema).optional(), removed_other_claims: z.array(routingClaimSchema).optional(),
+});
 const proxyStatusSchema = z.looseObject({
+  clients: z.object({ count: z.number().int().nonnegative(), alive: z.number().int().nonnegative(),
+    me: z.object({ client_id: z.string(), task_id: z.string().nullable(), last_seen: z.number() }).nullable(),
+  }).optional(),
   running: z.boolean().optional(),
   connection_attempt_timeout_ms: z.number().int().min(10).max(10000).optional(),
   port: z.number().int().nullable().optional(),
@@ -82,6 +109,10 @@ const proxyStatusSchema = z.looseObject({
   recording: z.boolean().optional(),
   mode: z.string().optional(),
   routing_active: z.boolean().optional(),
+  routing_claims: z.array(routingClaimSchema.extend({ mine: z.boolean() })).optional(),
+  routing_union: z.array(z.string()).optional(),
+  routing_lost_reason: routingLossReasonSchema.nullable().optional(),
+  routing_lost_at: z.string().nullable().optional(),
   network_service: z.string().nullable().optional(),
   pac_url: z.string().nullable().optional(),
   domains: z.array(z.string()).optional(),
@@ -95,7 +126,13 @@ const proxyStatusSchema = z.looseObject({
     consecutive_failures: z.number().int().nonnegative(), last_error: z.unknown().nullable(),
   }).optional(),
 });
+const breakpointOwnerSchema = z.object({ client_id: z.string(), task_id: z.string().nullable() });
+const breakpointRecordSchema = z.looseObject({ owner: breakpointOwnerSchema.nullable().optional(), scope: z.enum(['mine', 'all']).optional() });
+const breakpointStatusSchema = z.looseObject({ skipped_out_of_scope: z.number().int().nonnegative() });
+const ruleOwnerSchema = z.union([breakpointOwnerSchema, z.object({ mine: z.literal(false) })]);
 const ruleSchema = z.looseObject({
+  owner: ruleOwnerSchema.nullable().optional(), mine: z.boolean().optional(),
+  match_scope: z.enum(['mine', 'all']).optional(),
   rule_id: z.string().optional(),
   id: z.string().optional(),
   type: z.string().optional(),
@@ -111,13 +148,13 @@ const diagnosticsSchema = z.looseObject({
   persistence_health: z.unknown().optional(),
 });
 
-function toolResultSchema(dataSchema = z.unknown()) {
+function toolResultSchema(dataSchema = z.looseObject({})) {
   // Keep top-level legacy aliases pass-through while validating the canonical
   // `data` payload used by current clients.
   return z.looseObject({
     schema_version: z.literal(MCP_CONTRACT_VERSION),
     ok: z.boolean(),
-    data: dataSchema.nullable(),
+    data: dataSchema.extend({ routing_warning: routingWarningSchema.optional() }).nullable(),
     error: errorSchema.nullable(),
     warnings: z.array(z.string()),
     next_actions: z.array(z.string()),
@@ -130,7 +167,30 @@ function toolResultSchema(dataSchema = z.unknown()) {
 // New clients should read only the versioned envelope fields.
 export const toolOutputSchema = toolResultSchema();
 
+const leaseStatusSchema = z.object({
+  active: z.boolean(), task_id: z.string().nullable(), expires_at: z.string().nullable(),
+  owned_resource_count: z.number().int().nonnegative(), other_lease_count: z.number().int().nonnegative(),
+  orphaned_resource_count: z.number().int().nonnegative(),
+  orphaned_resources: z.array(z.object({ kind: z.string(), id: z.string(), revision: z.string(),
+    last_owner_client: z.string(), last_owner_task: z.string(), orphaned_at: z.string() })),
+});
+
 const typedToolOutputSchemas = Object.freeze({
+  ...Object.fromEntries(['create_map_local', 'mock_json_response', 'create_map_remote', 'create_blacklist', 'capture_to_mock'].map(name => [name, toolResultSchema(ruleSchema)])),
+  ...Object.fromEntries(['update_rule', 'set_rule_enabled', 'set_rule_priority', 'patch_mock_json', 'create_network_condition', 'create_no_cache_rule', 'create_transform_plugin_rule'].map(name => [name, toolResultSchema(z.looseObject({ rule: ruleSchema }))])),
+  reorder_rules: toolResultSchema(rulesSchema),
+
+  create_breakpoint: toolResultSchema(z.looseObject({ rule: breakpointRecordSchema })),
+  list_pending_breakpoints: toolResultSchema(z.looseObject({ breakpoints: z.array(breakpointRecordSchema), status: breakpointStatusSchema })),
+  get_pending_breakpoint: toolResultSchema(z.looseObject({ breakpoint: breakpointRecordSchema })),
+  get_breakpoint_history: toolResultSchema(z.looseObject({ history: z.array(breakpointRecordSchema), status: breakpointStatusSchema })),
+  resolve_breakpoint: toolResultSchema(z.looseObject({ outcome: breakpointRecordSchema })),
+  cancel_breakpoint: toolResultSchema(z.looseObject({ outcome: breakpointRecordSchema })),
+  get_started: toolResultSchema(z.looseObject({ routing_guidance: z.string().optional() })),
+  set_proxy_routing: toolResultSchema(routingResultSchema),
+  clear_proxy_routing: toolResultSchema(routingResultSchema),
+  start_proxy: toolResultSchema(z.looseObject({ routing: routingResultSchema.optional() })),
+  enable_ssl_proxying: toolResultSchema(z.looseObject({ routing: routingResultSchema.optional() })),
   query_flow_json: toolResultSchema(z.looseObject({
     flow_id: z.string(), kind: z.enum(['req', 'res']), redacted: z.literal(true),
     results: z.array(z.looseObject({ pointer: z.string(), matched_count: z.number().int().nonnegative(),
@@ -138,14 +198,17 @@ const typedToolOutputSchemas = Object.freeze({
     scanned_nodes: z.number().int().nonnegative(), scan_limit: z.number().int().positive(),
   })),
   finish_capture_task: toolResultSchema(z.looseObject({
+    kept: z.array(z.unknown()), orphaned: z.array(z.unknown()), lease_status: leaseStatusSchema,
     status: z.literal('finished'), task_id: z.string(), removed: z.array(z.unknown()), retained: z.array(z.unknown()),
     lease_released: z.literal(true), capture_continues: z.boolean(), evidence_preserved: z.literal(true),
   })),
   acquire_capture_lease: toolResultSchema(z.looseObject({
+    lease_status: leaseStatusSchema,
     status: z.enum(['acquired', 'renewed']), capture_lease_id: z.string().uuid(),
     task_id: z.string(), expires_at: z.string(),
   })),
   release_capture_lease: toolResultSchema(z.looseObject({
+    lease_status: leaseStatusSchema,
     status: z.enum(['released', 'not_held']), task_id: z.string().optional(), capture_continues: z.boolean().optional(),
   })),
   list_simulator_apps: toolResultSchema(z.looseObject({
@@ -175,6 +238,7 @@ const typedToolOutputSchemas = Object.freeze({
 });
 
 const startProxySchema = {
+  force: z.boolean().optional(),
   port: z.number().int().min(1).max(65535).optional(),
   auto_setup: z.boolean().optional(),
   domains: z.array(z.string()).optional(),
@@ -221,12 +285,13 @@ const startProxySchema = {
 };
 
 const setRoutingSchema = {
+  device_udid: z.union([deviceUdidSchema, z.array(deviceUdidSchema).max(8)]).optional().describe("Pass the UDID of the Simulator you drive for flow attribution."),
   domains: z.array(z.string()).min(1),
   network_service: z.string().optional(),
   pac_port: z.number().int().min(1).max(65535).optional(),
   allow_broad_routing: z.boolean().optional(),
   replace_existing_proxy: z.boolean().optional(),
-  duration_seconds: z.number().int().min(1).max(86400).optional().describe('Routing lease in seconds; defaults to one hour, then owned PAC settings are restored.'),
+  duration_seconds: z.number().int().min(1).max(86400).optional().describe('Routing lease in seconds; defaults to one hour, then only your claim expires; other agents keep routing active.'),
 };
 
 // zod 4's z.record skips a '__proto__' key outright ("if (key === '__proto__')
@@ -366,14 +431,47 @@ function toolGroup(name) {
 }
 
 function tool(name, description, inputSchema = {}, annotations = READ, options = {}) {
+  // Evidence consumers share the same mine/all input, including replay and body exports.
+  const evidenceConsumers = [
+    'export_flow_curl', 'export_flow_code', 'export_flow_swift', 'repeat_flow', 'edit_and_repeat_flow',
+    'save_body_to_file', 'query_flow_json', 'inspect_flow_protocol', 'validate_flow_openapi',
+    'capture_to_mock', 'validate_capture_openapi', 'import_capture_session', 'import_har',
+    'get_websocket_connection', 'import_websocket_transcript', 'export_websocket_transcript',
+    'plan_websocket_replay', 'transform_websocket_transcript',
+  ];
+  if (evidenceConsumers.includes(name)) inputSchema = { ...inputSchema,
+    scope: z.enum(['mine', 'all']).optional().describe('Identified clients default to mine; pass all to read shared evidence.') };
+  if (['import_capture_session', 'import_har'].includes(name)) inputSchema = { ...inputSchema,
+    confirm_shared: z.boolean().optional().describe('Replacing other clients’ evidence requires scope all and confirm_shared true. Active-session replacement is refused; import into a new session ID.') };
+  const scopedReads = new Set(['get_flows', 'get_flow_detail', 'filter_flows', 'wait_for_flow', 'export_har', 'export_capture_session', 'analyze_capture', 'assert_capture', 'compare_flows', 'list_websocket_connections', 'get_websocket_messages']);
+  const scopedWrites = new Set(['clear_session', 'purge_capture_session', 'update_capture_session']);
+  if (scopedReads.has(name) || scopedWrites.has(name)) inputSchema = { ...inputSchema,
+    scope: z.enum(['mine', 'all']).optional().describe('Identified clients default to mine; legacy clients default to all. All reads are explicitly available.'),
+    ...(scopedWrites.has(name) ? { confirm_shared: z.boolean().optional().describe('Required with scope all for shared deletion or retention.') } : {}) };
+  const readData = typedToolOutputSchemas[name]?.shape.data.unwrap() ?? z.looseObject({});
+  const scopedOutput = scopedReads.has(name) ? toolResultSchema(readData.extend({
+    scope_applied: z.enum(['mine', 'all']), hidden_count: z.number().int().nonnegative(),
+  })) : scopedWrites.has(name) ? toolResultSchema(z.looseObject({
+    removed_count: z.number().int().nonnegative(), kept_other_clients_count: z.number().int().nonnegative(),
+  })) : null;
+  if (['create_map_local', 'mock_json_response', 'create_map_remote', 'create_blacklist', 'create_network_condition',
+    'create_no_cache_rule', 'capture_to_mock', 'create_transform_plugin_rule', 'import_rules'].includes(name)) {
+    inputSchema = { ...inputSchema, match_scope: z.enum(['mine', 'all']).optional() };
+    description += ' Rules default to match_scope=all because mocks usually target the app under test; choose mine to restrict matching to the owner’s device or uniquely claimed host. IDs are caller-namespaced by default; live foreign ID collisions return RULE_CONFLICT.';
+  }
+  if (['update_rule', 'set_rule_enabled', 'set_rule_priority', 'remove_rule', 'reorder_rules', 'patch_mock_json'].includes(name)) {
+    inputSchema = { ...inputSchema, force: z.boolean().optional() };
+    description += ' Live foreign rules require force=true; otherwise RULE_CONFLICT is returned.';
+  }
+
   const group = toolGroup(name);
   return Object.freeze({
     name,
     title: toolTitle(name),
     description,
     inputSchema: LEASE_PROTECTED_TOOLS.has(name) ? { ...inputSchema,
-      capture_lease_id: z.string().uuid().optional().describe('Required while a task holds the shared capture lease; the thin bridge remembers an acquired lease.') } : inputSchema,
-    outputSchema: typedToolOutputSchemas[name] ?? toolOutputSchema,
+      capture_lease_id: z.string().uuid().optional().describe('Identifies this task’s resource-scoped lease; the thin bridge remembers an acquired lease.') } : inputSchema,
+    outputSchema: scopedOutput ?? typedToolOutputSchemas[name] ?? toolOutputSchema,
     annotations,
     // Namespaced metadata is advisory. Hosts that do not recognize it simply
     // retain the standard title, description, and annotations above.
@@ -396,7 +494,7 @@ export const MCP_TOOLS = Object.freeze([
   }),
   tool('list_setup_workflows', 'List supported capture workflows and automation limits, including local-backend capture without system proxy changes.'),
   tool('get_version', 'Return proxy-mate, runtime, and execution-mode versions.'),
-  tool('acquire_capture_lease', 'Lease shared capture, routing and mock mutations for one task. Reads, exports and replay stay available to other agents. Renew with the current capture_lease_id; never take over another task.', {
+  tool('acquire_capture_lease', 'Lease resources for one client task. Independent tasks may run in parallel. Heartbeats renew the TTL; presence loss retains resources as orphans.', {
     task_id: z.string().regex(/^[A-Za-z0-9._-]{1,96}$/),
     capture_lease_id: z.string().uuid().optional(),
     ttl_seconds: z.number().int().min(30).max(3600).optional(),
@@ -405,6 +503,7 @@ export const MCP_TOOLS = Object.freeze([
     capture_lease_id: z.string().uuid().optional().describe('May be omitted on the thin bridge that acquired this lease.'),
   }, MUTATE),
   tool('finish_capture_task', 'Finish a leased task: remove only unchanged rules/reverse listeners created by this lease, release paused requests through normal rule cleanup, then release its lease. Keep shared capture, durable evidence and other tasks\' fixtures. keep_resources=true explicitly leaves QA fixtures installed.', {
+    task_id: z.string().regex(/^[A-Za-z0-9._-]{1,96}$/).optional().describe('Defaults to the caller task.'),
     keep_resources: z.boolean().optional(),
   }, NON_IDEMPOTENT),
   tool('start_operator_ui', 'Start the optional read-only loopback dashboard and return its bearer access code.', {
@@ -431,6 +530,7 @@ export const MCP_TOOLS = Object.freeze([
     udid: z.string().min(1).max(128).optional(),
   }, READ, { longRunning: true }),
   tool('start_app_capture', 'Capture only connections attributed to one Simulator app, without app code changes or Mac Keychain trust. Other and unknown connections pass through uninspected. Confirm the selected app and shared proxy routing before starting.', {
+    force: z.boolean().optional(),
     udid: z.string().min(1).max(128),
     bundle_id: z.string().min(1).max(255).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
     port: z.number().int().min(0).max(65535).optional(),
@@ -440,11 +540,12 @@ export const MCP_TOOLS = Object.freeze([
     restart_app: z.boolean().optional(),
     tls_passthrough: z.array(z.string().min(1).max(255)).max(256).optional(),
   }, OPEN_MUTATE, { longRunning: true }),
-  tool('stop_proxy', 'Stop the proxy, restore recorded PAC routing, and stop background watchers. Durable captured flows remain available.', {}, OPEN_MUTATE, { longRunning: true }),
-  tool('set_proxy_routing', 'Apply PAC routing for the given host globs. Other hosts remain direct.', setRoutingSchema, OPEN_MUTATE, { longRunning: true }),
-  tool('clear_proxy_routing', 'Restore the previously recorded PAC configuration and stop the PAC server.', { network_service: z.string().optional() }, MUTATE, { longRunning: true }),
+  tool('stop_proxy', 'Stop the proxy, restore recorded PAC routing, and stop background watchers. Durable captured flows remain available.', { force: z.boolean().optional() }, OPEN_MUTATE, { longRunning: true }),
+  tool('set_proxy_routing', 'Set your agent/task routing claim. PAC serves the union of all active claims; default duration is one hour.', setRoutingSchema, OPEN_MUTATE, { longRunning: true }),
+  tool('clear_proxy_routing', 'Clear only your routing claim. Other agents keep routing active. Explicit scope all clears every claim.', { network_service: z.string().optional(), scope: z.enum(['mine', 'all']).optional() }, MUTATE, { longRunning: true }),
   tool('trust_ca_on_simulators', 'Import the proxy CA on every currently booted iOS Simulator.', {}, ADD, { longRunning: true }),
   tool('setup_simulator_certificate', 'Preflight Xcode and import the proxy CA on selected Simulators without erasing devices or resetting keychains.', {
+    force: z.boolean().optional(),
     scope: z.enum(['booted', 'all_available']).optional(),
     device_ids: z.array(z.string().min(1)).max(50).optional(),
     developer_dir: z.string().optional(),
@@ -473,10 +574,12 @@ export const MCP_TOOLS = Object.freeze([
     archive_private_key: z.boolean().optional().describe('Retain the old private key in the owner-only archive; defaults false.'),
   }, MUTATE, { longRunning: true }),
   tool('restart_sim_apps', 'Terminate and relaunch one or all running iOS apps on a booted Simulator.', {
+    force: z.boolean().optional(),
     udid: z.string().optional(), bundle_id: z.string().optional(),
   }, MUTATE, { longRunning: true }),
   tool('get_proxy_status', 'Read the current proxy, recording, routing, storage, daemon, and Simulator watcher state; safe first step for troubleshooting.'),
   tool('toggle_recording', 'Enable, disable, or toggle flow recording without stopping proxying.', {
+    force: z.boolean().optional(),
     enabled: z.boolean().optional(),
   }, NON_IDEMPOTENT),
   tool('clear_session', 'Delete captured HTTP(S) flows and WebSocket captures from the active or selected session while keeping rules.', {
@@ -597,6 +700,7 @@ export const MCP_TOOLS = Object.freeze([
     rule_id: z.string().regex(/^[A-Za-z0-9._-]+$/).max(128).optional(), url: z.string().url(),
     method: z.string().optional(), status: z.number().int().min(200).max(599).optional(),
     priority: z.number().int().min(-10000).max(10000).optional(), headers: headerSchema.optional(), json: z.any(),
+    match_headers: matchHeadersSchema.optional(),
   }, MUTATE),
   tool('patch_mock_json', 'Atomically update a JSON Map Local mock using JSON Merge Patch: nested objects merge, null deletes a member, arrays replace. Does not release pending breakpoints.', {
     rule_id: z.string().min(1), patch: z.any(),
@@ -647,6 +751,7 @@ export const MCP_TOOLS = Object.freeze([
     match_query: matchQuerySchema.optional(),
   }, MUTATE),
   tool('create_breakpoint', 'Create or replace a headless request/response breakpoint rule. Matching traffic pauses until resolved or its deadline applies the configured fallback.', {
+    scope: z.enum(['mine', 'all']).optional().describe('Defaults to mine for current clients and all for legacy bridges.'),
     rule_id: z.string().regex(/^[A-Za-z0-9._-]+$/).max(128).optional(),
     url: z.string().optional().describe("Exact URL, or '*' wildcard; the first '?' always starts the query, split into match_query."),
     url_pattern: z.string().max(500).optional().describe("Regular expression, not a glob: '.' matches one character and '.*' many, while a bare '?' or '*' is a regex quantifier on the previous atom. Overrides url and its derived match_query."),
@@ -681,7 +786,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('get_breakpoint_history', 'Return bounded, redacted breakpoint resolution and timeout history.', {
     limit: z.number().int().min(0).max(500).optional(), rule_id: z.string().optional(),
     direction: z.enum(['request', 'response']).optional(),
-    outcome: z.enum(['resolved', 'timed_out', 'cancelled', 'closed', 'capacity_exceeded', 'manager_closed']).optional(),
+    outcome: z.enum(['resolved', 'timed_out', 'cancelled', 'closed', 'capacity_exceeded', 'manager_closed', 'skipped_out_of_scope']).optional(),
   }),
   tool('list_rules', 'List interception rules in evaluation order, including enablement and priority.'),
   tool('remove_rule', 'Remove a rule by id.', { rule_id: z.string().min(1) }, MUTATE),
@@ -700,14 +805,14 @@ export const MCP_TOOLS = Object.freeze([
   tool('test_rule', 'Explain whether one rule, or the ordered rule set, matches a synthetic request without sending it.', {
     rule_id: z.string().min(1).optional(),
     request: z.object({
-      method: z.string().optional(), url: z.string().optional(),
+      method: z.string().optional(), url: z.string().optional(), device_udid: z.string().optional(),
       headers: z.record(z.string(), z.string()).optional(), body: z.string().optional(),
     }),
   }),
-  tool('clear_rules', 'Remove all interception rules.', {}, MUTATE),
+  tool('clear_rules', 'Remove caller-owned and unowned legacy rules by default. scope=all requires confirm_shared=true; otherwise CONFIRM_SHARED_REQUIRED reports total, mine, foreign and unowned counts.', { scope: z.enum(['mine', 'all']).optional(), confirm_shared: z.boolean().optional() }, MUTATE),
   tool('export_rules', 'Export the current rule set to a JSON file.', { path: z.string().optional() }, NON_IDEMPOTENT, { longRunning: true }),
-  tool('import_rules', 'Import rules from a JSON file; replace=true removes existing rules first.', {
-    path: z.string().min(1), replace: z.boolean().optional(),
+  tool('import_rules', 'Import rules as caller-owned definitions; replace=true removes caller-owned and legacy rules first. Foreign live ID collisions return RULE_CONFLICT.', {
+    path: z.string().min(1), replace: z.boolean().optional(), scope: z.enum(['mine', 'all']).optional(), confirm_shared: z.boolean().optional(),
   }, NON_IDEMPOTENT, { longRunning: true }),
   tool('capture_to_mock', "Create a Map Local rule from a captured response. The mock is anchored on the captured URL and constrained to its query, so a flow captured from '/v1/orders?page=2' answers only page=2.", {
     flow_id: z.string().min(1), session_id: z.string().optional(), rule_id: z.string().optional(), method: z.string().optional(),

@@ -1,3 +1,10 @@
+import { createDeviceResolver } from './app-identity.mjs';
+import { createRoutingClaimsStore } from './routing-claims.mjs';
+import { BodyWorkerPool } from './body-worker-pool.mjs';
+import { drainServer, defaultDrainMs, trackServer, mockttpListener, limitedLog } from './drain.mjs';
+import { logLine } from './log-line.mjs';
+import { increment, registerGauge } from './metrics.mjs';
+import { validateCustomCaPaths } from './ca-paths.mjs';
 import { readEnvironment } from './environment.mjs';
 // Proxy engine wrapper: thin layer over mockttp that adds our flow capture,
 // large-body spillover, mock-rule registration with file-backed bodies,
@@ -9,16 +16,14 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { BlockList, isIP, createServer as createTcpServer } from 'node:net';
-import { storeFlowBody, writeMockBody, deleteFlowBodies } from './bodies.mjs';
+import { writeMockBody, deleteFlowBodies } from './bodies.mjs';
 import { STATE_DIR, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { atomicWriteFile } from './state.mjs';
 import { commitCaPair, recoverCaPair } from './ca-transaction.mjs';
 import { SessionStore } from './session-store.mjs';
 import { JsonlWebSocketStoreBackend, WebSocketStore, mockttpWebSocketHandlers } from './websocket-store.mjs';
-import { BreakpointManager, createMockttpBreakpointCallbacks } from './breakpoints.mjs';
+import { BreakpointManager, createMockttpBreakpointCallbacks, createBreakpointScope } from './breakpoints.mjs';
 import { redactBody, redactHeaders, redactUrl } from './redaction.mjs';
 import { PluginStore } from './plugin-store.mjs';
 import { activeConnectionAttemptTimeout } from './network-policy.mjs';
@@ -27,6 +32,9 @@ import {
   normalizeMatchUrl, matchUrlPath, matcherError, parseRequestQuery, queryMatches, ruleUrlMatchers,
   validateMatcherObject, validateMatchQuery,
 } from './url-match.mjs';
+
+const activeSocketSets = new Set();
+const activeConnections = () => [...activeSocketSets].reduce((total, sockets) => total + sockets.size, 0);
 
 const CA_DIR = path.join(STATE_DIR, 'ca');
 const CA_KEY = path.join(CA_DIR, 'key.pem');
@@ -37,7 +45,6 @@ const MAX_FLOWS = Number.isInteger(configuredMaxFlows) && configuredMaxFlows > 0
   : 500;
 const DEFAULT_MAX_BODY_SIZE = 5 * 1024 * 1024;
 const MAX_PLUGIN_BODY_PREVIEW_BYTES = 64 * 1024;
-const BODY_DECODERS = { gzip: promisify(gunzip), 'x-gzip': promisify(gunzip), deflate: promisify(inflate), br: promisify(brotliDecompress) };
 
 export { CA_CERT, CA_DIR };
 
@@ -145,7 +152,24 @@ export class ProxyEngine {
     maxPendingPersistence = 2_000,
     failClosedOnPersistenceError = readEnvironment('PROXY_MATE_PERSISTENCE_FAIL_CLOSED') === '1',
     pluginStore = new PluginStore(),
+    logWrite,
+    caStat,
+    bodyWorkerOptions,
+    deviceResolver = createDeviceResolver(),
+    routingClaims = createRoutingClaimsStore(),
   } = {}) {
+    this.breakpointScope = createBreakpointScope({ listClaims: () => routingClaims.listClaims() });
+    this.breakpointScope({});
+    this.deviceResolver = deviceResolver;
+    this.captureSockets = new Map();
+    this.attributeFlow = createFlowAttributor({ listClaims: () => routingClaims.listClaims() });
+    this.attributeFlow('', null);
+    this.logWrite = logWrite;
+    this.caStat = caStat;
+    this.bodyWorkers = new BodyWorkerPool(bodyWorkerOptions);
+    this.requestContexts = new Map();
+    this.abortLog = limitedLog('proxy', 'request aborted', { write: logWrite });
+    this.dropLog = limitedLog('proxy', 'connection dropped', { write: logWrite });
     this.server = null;
     this.port = null;
     this.flows = new Map();       // flow_id -> flow
@@ -255,12 +279,7 @@ export class ProxyEngine {
     let certPath;
     if (caKeyPath != null) {
       [keyPath, certPath] = [path.resolve(caKeyPath), path.resolve(caCertPath)];
-      const [keyStat, certStat] = await Promise.all([
-        fs.stat(keyPath).catch(() => null), fs.stat(certPath).catch(() => null),
-      ]);
-      if (!keyStat?.isFile() || !certStat?.isFile()) {
-        throw codedEngineError('CUSTOM_CA_FILE_INVALID', 'Custom CA key and certificate paths must both identify regular files.');
-      }
+      await validateCustomCaPaths({ keyPath, certPath, stat: this.caStat });
     } else {
       ({ keyPath, certPath } = await ensureCA());
     }
@@ -297,7 +316,21 @@ export class ProxyEngine {
     }
 
     this.server = server;
-    if (server.server) server.server.maxConnections = 128;
+    let listener;
+    try { listener = mockttpListener(server); }
+    catch (error) { await server.stop(); this.server = null; throw error; }
+    this.drainTracking = trackServer(listener);
+    activeSocketSets.add(this.drainTracking.sockets);
+    registerGauge('proxy.active_connections', activeConnections);
+    listener.maxConnections = 128;
+    listener.on('connection', socket => {
+      this.captureSockets.set(socket.remotePort, socket);
+      try { this.deviceResolver(socket); } catch { increment('proxy.attribution_degraded'); }
+      socket.once('close', () => {
+        if (this.captureSockets.get(socket.remotePort) === socket) this.captureSockets.delete(socket.remotePort);
+      });
+    });
+    listener.on('drop', () => { increment('proxy.connections_dropped'); this.dropLog({}); });
     this.port = server.port;
     this.socksEnabled = enableSocks === true;
     this.caCertPath = certPath;
@@ -365,13 +398,16 @@ export class ProxyEngine {
     };
   }
 
-  stop() {
-    const operation = this.lifecycleMutation.then(() => this.#stop());
+  stop(options = {}) {
+    const operation = this.lifecycleMutation.then(async () => {
+      try { return await this.#stop(options); }
+      finally { await this.bodyWorkers.close(); }
+    });
     this.lifecycleMutation = operation.catch(() => {});
     return operation;
   }
 
-  async #stop() {
+  async #stop({ graceMs = defaultDrainMs() } = {}) {
     await this.ruleMutation;
     // Resolve callbacks before asking Mockttp to stop, otherwise an intercepted
     // request can keep shutdown waiting for its breakpoint deadline. Closing
@@ -382,7 +418,21 @@ export class ProxyEngine {
       return { status: 'not_running' };
     }
     await new Promise((resolve) => setImmediate(resolve));
-    try { await this.server.stop(); } catch { /* ignore */ }
+    if (graceMs > 0) {
+      const summary = await drainServer(mockttpListener(this.server), { graceMs, ...this.drainTracking });
+      logLine('proxy', 'drain completed', summary, { write: this.logWrite });
+      // Public completion events are scheduled with setImmediate by mockttp.
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    try { await this.server.stop(); } catch (error) {
+      // destroyable-server rejects the second close after a successful drain.
+      if (error.code === 'ERR_SERVER_NOT_RUNNING') this.server.reset();
+    }
+    this.drainTracking?.dispose();
+    activeSocketSets.delete(this.drainTracking?.sockets);
+    this.drainTracking = null;
+    this.requestContexts.clear();
+    this.abortLog.flush(); this.dropLog.flush();
     await Promise.allSettled([...this.captureWork.values()]);
     await Promise.allSettled([...this.flowPersistence.values()]);
     await this.#flushWebSocketStore();
@@ -402,23 +452,76 @@ export class ProxyEngine {
 
   // ---- capture ----
   async #attachCaptureHandlers() {
-    await this.server.on('request', (req) => this.#queueCapture(req.id, async () => {
-      this.#recordRuleHit(req.matchedRuleId);
-      if (!this.recording) return;
-      const reqBody = await this.#bodyToBuffer(req.body);
-      const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
-      const stored = await storeCapturedBody(reqBody, req.headers, req.id, 'req', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
-      const flow = this.flows.get(req.id) ?? {
-        id: req.id, timestamp: Date.now(), request: null, response: null,
-      };
-      flow.request = {
-          method: req.method,
-          url: rawCaptureEnabled ? req.url : redactUrl(req.url),
-          protocol: req.protocol,
-          http_version: req.httpVersion ?? req.http_version ?? null,
-          hostname: req.hostname,
-          path: rawCaptureEnabled ? req.path : redactUrl(req.path),
-          headers: rawCaptureEnabled ? req.headers : redactHeaders(req.headers),
+    await this.server.on('request', (req) => {
+      let attribution;
+      try {
+        const socket = this.captureSockets.get(req.remotePort ?? req.remote_port);
+        const device = socket ? this.deviceResolver(socket) : null;
+        attribution = this.attributeFlow(req.hostname ?? new URL(req.url).hostname, device);
+      } catch {
+        increment('proxy.attribution_degraded');
+        attribution = { owner_client: null, owner_task: null, device_udid: null, attribution: 'unknown' };
+      }
+      this.#rememberRequest(req.id, req);
+      increment('proxy.bytes', req.body?.buffer?.length ?? 0);
+      return this.#queueCapture(req.id, async () => {
+        this.#recordRuleHit(req.matchedRuleId);
+        if (!this.recording) return;
+        const reqBody = await this.#bodyToBuffer(req.body);
+        const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
+        const stored = await this.bodyWorkers.process({ buffer: reqBody, headers: req.headers, flowId: req.id, kind: 'req', storeSensitiveData: rawCaptureEnabled, captureBodyMode: this.captureBodyMode, maxBodySize: this.maxBodySize });
+        const flow = this.flows.get(req.id) ?? {
+          id: req.id, timestamp: Date.now(), request: null, response: null,
+        };
+        Object.assign(flow, attribution);
+        flow.request = {
+            method: req.method,
+            url: rawCaptureEnabled ? req.url : redactUrl(req.url),
+            protocol: req.protocol,
+            http_version: req.httpVersion ?? req.http_version ?? null,
+            hostname: req.hostname,
+            path: rawCaptureEnabled ? req.path : redactUrl(req.path),
+            headers: rawCaptureEnabled ? req.headers : redactHeaders(req.headers),
+            body_inline: stored.inline,
+            body_path: stored.path,
+            body_size: stored.size,
+            body_sha: stored.sha,
+            body_encoding: stored.encoding,
+            body_original_size: stored.original_size,
+            body_redacted_at_capture: stored.redacted,
+            body_omitted: stored.omitted,
+            body_decoded: stored.decoded ?? false,
+            matched_rule_id: this.ruleEndpointIds.get(req.matchedRuleId) ?? null,
+            remote_ip: req.remoteIpAddress ?? req.remote_ip ?? null,
+            remote_port: req.remotePort ?? req.remote_port ?? null,
+            timing: jsonSafe(req.timingEvents),
+            trailers: rawCaptureEnabled ? jsonSafe(req.trailers ?? null) : redactHeaders(jsonSafe(req.trailers ?? null)),
+        };
+        this.#rememberFlow(flow);
+        await this.#persistFlow(flow);
+      }, req.body?.buffer?.length ?? 0);
+    });
+    await this.server.on('response', (res) => {
+      increment('proxy.flows_completed');
+      increment('proxy.bytes', res.body?.buffer?.length ?? 0);
+      this.requestContexts.delete(res.id);
+      return this.#queueCapture(res.id, async () => {
+        if (!this.recording) return;
+        const resBody = await this.#bodyToBuffer(res.body);
+        const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
+        const stored = await this.bodyWorkers.process({ buffer: resBody, headers: res.headers, flowId: res.id, kind: 'res', storeSensitiveData: rawCaptureEnabled, captureBodyMode: this.captureBodyMode, maxBodySize: this.maxBodySize });
+        const existing = await this.getDurableFlow(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
+        existing.response = {
+          statusCode: res.statusCode,
+          statusMessage: res.statusMessage,
+          tags: upstreamErrorTags(res.tags),
+          upstream_error: upstreamErrorFromTags(res.tags),
+          http_version: res.httpVersion ?? res.http_version ?? null,
+          headers: rawCaptureEnabled ? res.headers : redactHeaders(res.headers),
+          trailers: rawCaptureEnabled ? jsonSafe(res.trailers ?? null) : redactHeaders(jsonSafe(res.trailers ?? null)),
+          timing: jsonSafe(res.timingEvents),
+          remote_ip: res.remoteIpAddress ?? res.remote_ip ?? null,
+          remote_port: res.remotePort ?? res.remote_port ?? null,
           body_inline: stored.inline,
           body_path: stored.path,
           body_size: stored.size,
@@ -428,45 +531,11 @@ export class ProxyEngine {
           body_redacted_at_capture: stored.redacted,
           body_omitted: stored.omitted,
           body_decoded: stored.decoded ?? false,
-          matched_rule_id: this.ruleEndpointIds.get(req.matchedRuleId) ?? null,
-          remote_ip: req.remoteIpAddress ?? req.remote_ip ?? null,
-          remote_port: req.remotePort ?? req.remote_port ?? null,
-          timing: jsonSafe(req.timingEvents),
-          trailers: rawCaptureEnabled ? jsonSafe(req.trailers ?? null) : redactHeaders(jsonSafe(req.trailers ?? null)),
-      };
-      this.#rememberFlow(flow);
-      await this.#persistFlow(flow);
-    }, req.body?.buffer?.length ?? 0));
-    await this.server.on('response', (res) => this.#queueCapture(res.id, async () => {
-      if (!this.recording) return;
-      const resBody = await this.#bodyToBuffer(res.body);
-      const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
-      const stored = await storeCapturedBody(resBody, res.headers, res.id, 'res', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
-      const existing = await this.getDurableFlow(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
-      existing.response = {
-        statusCode: res.statusCode,
-        statusMessage: res.statusMessage,
-        tags: upstreamErrorTags(res.tags),
-        upstream_error: upstreamErrorFromTags(res.tags),
-        http_version: res.httpVersion ?? res.http_version ?? null,
-        headers: rawCaptureEnabled ? res.headers : redactHeaders(res.headers),
-        trailers: rawCaptureEnabled ? jsonSafe(res.trailers ?? null) : redactHeaders(jsonSafe(res.trailers ?? null)),
-        timing: jsonSafe(res.timingEvents),
-        remote_ip: res.remoteIpAddress ?? res.remote_ip ?? null,
-        remote_port: res.remotePort ?? res.remote_port ?? null,
-        body_inline: stored.inline,
-        body_path: stored.path,
-        body_size: stored.size,
-        body_sha: stored.sha,
-        body_encoding: stored.encoding,
-        body_original_size: stored.original_size,
-        body_redacted_at_capture: stored.redacted,
-        body_omitted: stored.omitted,
-        body_decoded: stored.decoded ?? false,
-      };
-      this.#rememberFlow(existing);
-      await this.#persistFlow(existing);
-    }, res.body?.buffer?.length ?? 0));
+        };
+        this.#rememberFlow(existing);
+        await this.#persistFlow(existing);
+      }, res.body?.buffer?.length ?? 0);
+    });
   }
 
   #queueCapture(id, capture, bytes = 0) {
@@ -474,6 +543,7 @@ export class ProxyEngine {
     // Bound work BEFORE body conversion, and serialize both halves of a flow.
     if ((!this.captureWork.has(id) && this.captureWork.size >= 100) || this.captureQueuedBytes + bytes > this.maxCaptureQueuedBytes) {
       this.captureDropped += 1;
+      increment('proxy.capture_dropped');
       return;
     }
     this.captureQueuedBytes += bytes;
@@ -493,6 +563,32 @@ export class ProxyEngine {
     this.captureWork.set(id, operation);
   }
 
+  #rememberRequest(id, data) {
+    if (!id) return;
+    let url;
+    try { url = new URL(data.url); } catch { /* head events provide hostname */ }
+    const previous = this.requestContexts.get(id);
+    this.requestContexts.set(id, {
+      method: data.method ?? previous?.method,
+      host: data.hostname ?? url?.hostname ?? previous?.host,
+      port: data.port ?? (url ? Number(url.port || (url.protocol === 'https:' ? 443 : 80)) : previous?.port),
+      startedAt: previous?.startedAt ?? Date.now(),
+      aborted: previous?.aborted ?? false,
+    });
+    if (this.requestContexts.size > 2048) this.requestContexts.delete(this.requestContexts.keys().next().value);
+  }
+
+  #requestAborted(id, data) {
+    if (!this.requestContexts.has(id)) this.#rememberRequest(id, data);
+    const context = this.requestContexts.get(id);
+    if (context?.aborted) return; // abort and passthrough-abort can describe the same failure
+    if (context) context.aborted = true;
+    increment('proxy.requests_aborted');
+    this.abortLog({ flow_id: id, method: context?.method, host: context?.host, port: context?.port,
+      error_code: data.error?.code ?? null, downstream_aborted: data.downstreamAborted ?? true,
+      elapsed_ms: Math.max(0, Date.now() - (context?.startedAt ?? Date.now())) });
+  }
+
   async #attachDiagnosticHandlers() {
     const push = (kind, evt) => {
       const rec = { kind, timestamp: Date.now(), ...evt };
@@ -502,6 +598,8 @@ export class ProxyEngine {
       }
     };
     await this.server.on('rule-event', (event) => {
+      if (event.eventType === 'passthrough-request-head') this.#rememberRequest(event.requestId, event.eventData);
+      if (event.eventType === 'passthrough-abort') this.#requestAborted(event.requestId, event.eventData);
       const diagnostic = upstreamErrorDiagnostic(event);
       if (diagnostic) push('upstream-error', {
         ...diagnostic, connection_attempt_timeout_ms: activeConnectionAttemptTimeout(),
@@ -535,6 +633,7 @@ export class ProxyEngine {
         error: e?.error && { message: e.error.message, code: e.error.code },
       }));
       await this.server.on('abort', (e) => {
+        this.#requestAborted(e?.id, e);
         try { this.webSocketStore.onError({ streamId: e?.id, error: e?.error, timingEvents: e?.timingEvents }); } catch { /* not a correlated WebSocket */ }
       });
     } catch { /* ignore */ }
@@ -601,6 +700,24 @@ export class ProxyEngine {
       this.flowCacheSizes.delete(stale);
       this.flows.delete(stale);
     }
+  }
+
+  forgetPurgedFlows(ids) {
+    const removed = new Set(ids);
+    for (const id of removed) {
+      this.flows.delete(id);
+      this.flowCacheBytes -= this.flowCacheSizes.get(id) ?? 0;
+      this.flowCacheSizes.delete(id);
+    }
+    this.flowOrder = this.flowOrder.filter(id => !removed.has(id));
+  }
+
+  async purgeScopedFlows(options) {
+    await Promise.allSettled([...this.flowPersistence.values()]);
+    const result = await this.sessionStore.deleteFlowsByScope(options);
+    if (options.sessionId === this.sessionId) this.forgetPurgedFlows(result.purged_flow_ids);
+    await Promise.all(result.purged_flow_ids.map(id => deleteFlowBodies(id)));
+    return result;
   }
 
   async clearFlows() {
@@ -847,7 +964,16 @@ export class ProxyEngine {
     const normalizedRequest = normalizeDryRunRequest(request);
     const evaluations = this.listRuleConfigs()
       .filter((rule) => !onlyRuleId || rule.rule_id === onlyRuleId)
-      .map((rule) => evaluateRule(rule, normalizedRequest));
+      .map((rule) => {
+        const evaluation = evaluateRule(rule, normalizedRequest);
+        if (rule.match_scope === 'mine') {
+          const inScope = this.breakpointScope({ owner: rule.owner, hostname: new URL(normalizedRequest.url).hostname,
+            device_udid: request.device_udid ?? null });
+          evaluation.criteria.push(matchCriterion('match_scope', inScope, 'mine'));
+          evaluation.matched &&= inScope;
+        }
+        return evaluation;
+      });
     const selected = evaluations.find((evaluation) => evaluation.matched);
     return {
       dry_run: true,
@@ -929,6 +1055,16 @@ export class ProxyEngine {
   async #registerEndpoint(rule, runtimePriority, ruleServer = this.server) {
     const regex = compileSafeRegex(rule.url_pattern, 'url_pattern');
     let builder = methodBuilder(ruleServer, rule.method, regex).asPriority(runtimePriority);
+    if (rule.match_scope === 'mine') builder = builder.matching(req => {
+      let device = null;
+      try {
+        const socket = this.captureSockets.get(req.remotePort ?? req.remote_port);
+        if (socket) device = this.deviceResolver(socket);
+      } catch { /* Best effort; use the same attribution hook as breakpoints. */ }
+      let hostname = req.hostname;
+      try { hostname ??= new URL(req.url).hostname; } catch { /* unknown */ }
+      return this.breakpointScope({ owner: rule.owner, hostname, device_udid: device });
+    });
     if (rule.match_headers) builder = builder.withHeaders(rule.match_headers);
     if (rule.match_query) builder = builder.withQuery(rule.match_query);
     if (rule.match_json_body_including) builder = builder.withJsonBodyIncluding(rule.match_json_body_including);
@@ -957,6 +1093,17 @@ export class ProxyEngine {
         ...proxyPassThroughOptions(this.upstreamProxyConfig),
         ...createMockttpBreakpointCallbacks(this.breakpoints, {
           ruleId: rule.rule_id,
+          owner: rule.owner, scope: rule.scope ?? 'all',
+          inScope: req => {
+            let device = null;
+            try {
+              const socket = this.captureSockets.get(req.remotePort ?? req.remote_port);
+              if (socket) device = this.deviceResolver(socket);
+            } catch { /* Device discovery is best effort; claims remain available. */ }
+            let hostname = req.hostname;
+            try { hostname ??= new URL(req.url).hostname; } catch { /* unknown host */ }
+            return this.breakpointScope({ owner: rule.owner, hostname, device_udid: device });
+          },
           ...directions,
           timeoutMs: rule.breakpoint_timeout_ms,
           defaultAction: rule.breakpoint_default_action,
@@ -1023,6 +1170,7 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
   if (typeof ruleId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(ruleId)) {
     throw new Error('rule_id must contain only letters, numbers, dot, underscore, or hyphen (1-128 characters)');
   }
+  if (input.match_scope != null && !['mine', 'all'].includes(input.match_scope)) throw new Error('match_scope must be mine or all');
   const type = input.type ?? 'map_local';
   if (!['map_local', 'map_remote', 'blacklist', 'network_condition', 'breakpoint', 'plugin_transform'].includes(type)) {
     throw new Error(`unsupported rule type: ${type}`);
@@ -1156,6 +1304,8 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
     createdBody,
     config: {
       rule_id: ruleId,
+      owner: input.owner ?? existing?.owner ?? null,
+      match_scope: input.match_scope ?? existing?.match_scope ?? 'all',
       type,
       url_pattern: input.url_pattern,
       method,
@@ -1181,6 +1331,8 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
       delay_ms: delayMs,
       fault,
       ...(type === 'breakpoint' ? {
+        owner: input.owner ?? existing?.owner ?? null,
+        scope: input.scope ?? existing?.scope ?? 'all',
         breakpoint_direction: breakpointDirection,
         breakpoint_timeout_ms: breakpointTimeoutMs,
         breakpoint_default_action: breakpointDefaultAction,
@@ -2006,82 +2158,6 @@ function redactDiagnosticUrl(value) {
   } catch { return value; }
 }
 
-async function storeCapturedBody(buffer, headers, flowId, kind, storeSensitiveData, captureBodyMode, maxBodySize = DEFAULT_MAX_BODY_SIZE) {
-  let body = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer ?? '');
-  const wireSize = body.length;
-  const encodings = String(headers?.['content-encoding'] ?? '').toLowerCase().split(',').map((s) => s.trim()).filter((s) => s && s !== 'identity');
-  let decoded = false;
-  let omission = !wireSize && (Number(headers?.['content-length']) > 0 || /chunked/i.test(String(headers?.['transfer-encoding'] ?? '')))
-    ? 'body unavailable: nonempty length or chunked framing with no retained bytes; possibly exceeded capture limit' : null;
-  if (wireSize && encodings.length && captureBodyMode !== 'metadata_only') {
-    try {
-      if (encodings.length > 4) throw new Error('Too many content encodings');
-      for (const encoding of encodings.reverse()) {
-        if (!Object.hasOwn(BODY_DECODERS, encoding)) throw new Error('Unsupported content encoding');
-        body = await BODY_DECODERS[encoding](body, { maxOutputLength: maxBodySize });
-      }
-      decoded = true;
-    } catch {
-      omission = 'encoded body could not be decoded within the capture limit';
-    }
-  }
-  if (omission) return {
-    inline: null, path: null, size: wireSize, sha: null, encoding: 'binary',
-    original_size: wireSize, redacted: false, omitted: omission, decoded: false,
-  };
-  const text = losslessUtf8(body);
-  if (captureBodyMode === 'metadata_only') {
-    return {
-      inline: body.length === 0 ? '' : null,
-      path: null,
-      size: body.length,
-      sha: body.length ? crypto.createHash('sha256').update(body).digest('hex') : null,
-      encoding: text == null ? 'binary' : 'utf8',
-      original_size: body.length,
-      redacted: false,
-      omitted: body.length ? 'body omitted by metadata_only capture policy' : null,
-    };
-  }
-  if (storeSensitiveData && captureBodyMode === 'all' || body.length === 0) {
-    return {
-      ...await storeFlowBody(body, flowId, kind),
-      decoded,
-      original_size: body.length,
-      redacted: false,
-      omitted: null,
-    };
-  }
-
-  if (text == null) {
-    return {
-      inline: null,
-      path: null,
-      size: body.length,
-      sha: crypto.createHash('sha256').update(body).digest('hex'),
-      encoding: 'binary',
-      original_size: body.length,
-      redacted: false,
-      omitted: 'binary body omitted because sensitive storage is disabled',
-    };
-  }
-  const safeText = redactBody(text, headers);
-  const stored = await storeFlowBody(Buffer.from(safeText, 'utf8'), flowId, kind);
-  return {
-    ...stored,
-    decoded,
-    original_size: body.length,
-    redacted: safeText !== text,
-    omitted: null,
-  };
-}
-
-function losslessUtf8(buffer) {
-  try {
-    const text = buffer.toString('utf8');
-    return Buffer.byteLength(text, 'utf8') === buffer.length ? text : null;
-  } catch { return null; }
-}
-
 function redactWebSocketSnapshotForStorage(snapshot) {
   const safe = structuredClone(snapshot);
   for (const connection of safe.connections ?? []) {
@@ -2231,4 +2307,24 @@ export async function removeOwnedMockBody(filePath) {
   const resolved = path.resolve(filePath);
   if (!resolved.startsWith(ownedRoot)) return;
   try { await fs.unlink(resolved); } catch { /* already absent */ }
+}
+
+// Refresh asynchronously at most once a second, with no I/O on the flow path.
+export function createFlowAttributor({ listClaims, now = Date.now } = {}) {
+  let snapshot = [], refreshedAt = -Infinity, refreshing = false;
+  return (hostname, device_udid = null) => {
+    const at = now();
+    if (!refreshing && at - refreshedAt >= 1000) {
+      refreshing = true; refreshedAt = at;
+      Promise.resolve().then(listClaims).then(claims => {
+        snapshot = claims.map(c => ({ ...c, hosts: c.domains.map(domain => new RegExp('^' + domain.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i')) }));
+      }).catch(() => { snapshot = []; increment('proxy.attribution_degraded'); }).finally(() => { refreshing = false; });
+    }
+    const active = snapshot.filter(c => Date.parse(c.expires_at) > at);
+    const devices = device_udid ? active.filter(c => c.device_udids?.some(id => id.toUpperCase() === device_udid.toUpperCase())) : [];
+    const matches = devices.length === 1 ? devices : active.filter(c => c.hosts.some(host => host.test(hostname ?? '')));
+    const owner = matches.length === 1 ? matches[0] : null;
+    return { owner_client: owner?.client_id ?? null, owner_task: owner?.task_id ?? null, device_udid,
+      attribution: owner ? devices.length === 1 ? 'device' : 'claim' : matches.length > 1 ? 'ambiguous' : 'unknown' };
+  };
 }

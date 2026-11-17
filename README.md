@@ -78,7 +78,7 @@ The agent can also inspect captured WebSocket messages, use captured local rever
 
 ## How it works
 
-A local background service owns capture, rules and durable sessions. MCP clients connect through a small stdio bridge and share that service. Closing an agent does not stop capture. Temporary routing expires, and task leases coordinate agents changing shared rules.
+A local background service owns capture, rules and durable sessions. MCP clients connect through a small stdio bridge and share that service. Closing an agent does not stop capture. Routing claims combine per agent/task; heartbeats renew their deadlines, and clearing one claim preserves the others. New bridges default scoped evidence reads and clears to their own traffic; explicit shared reads remain available. See [multi-agent behavior](docs/AGENT_GUIDE.md#several-agents-on-one-daemon).
 
 Agents finish tasks with `finish_capture_task`: it removes their tracked, unchanged mocks and reverse listeners and releases the lease. Other tasks' fixtures, saved captures and exports remain. Ask the agent to keep fixtures explicitly when QA needs to reuse them.
 

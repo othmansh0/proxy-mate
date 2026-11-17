@@ -1,19 +1,67 @@
 #!/usr/bin/env node
+import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { createGuardian } from './lib/guardian.mjs';
-const tick = createGuardian();
-let busy = false;
-let current = Promise.resolve();
-const timer = setInterval(() => {
-  if (busy) return;
-  busy = true;
-  current = tick().catch((error) => { process.stderr.write(`[proxy-mate guardian] recovery check failed: ${error.code ?? error.name}\n`); })
-    .finally(() => { busy = false; });
-}, 3000);
-const stop = async () => {
-  clearInterval(timer);
-  setTimeout(() => process.exit(1), 10000);
-  await current;
-  process.exit(0);
+import { logLine, errorFields } from './lib/log-line.mjs';
+import os from 'node:os';
+import { createPacHost } from './lib/pac-host.mjs';
+
+export function startGuardian({ tick = createGuardian(), log = logLine,
+  interval = setInterval, clear = clearInterval, timeout = setTimeout, clearTimeout: cancelTimeout = clearTimeout,
+  exit = process.exit.bind(process), once = process.once.bind(process), now = Date.now,
+  loadavg = os.loadavg, stopWaitMs = 10000,
+  env = process.env, pacHostOptions = {}, pacHostFactory = createPacHost,
+} = {}) {
+  let busy = false, stopping = false, current = Promise.resolve(), stopped;
+  let pacHost;
+  const ready = Promise.resolve().then(async () => {
+    if (env.PROXY_MATE_PAC_HOST !== 'guardian') return;
+    try {
+      pacHost = pacHostFactory({ ...pacHostOptions, port: Number(env.PROXY_MATE_PAC_PORT ?? 8081) });
+      await pacHost.start();
+      log('guardian', 'PAC host started', { port: pacHost.port });
+    } catch (error) {
+      log('guardian', 'PAC host unavailable', errorFields(error));
+    }
+  });
+  log('guardian', 'started', { tick_ms: 3000, stop_wait_ms: stopWaitMs });
+  const timer = interval(() => {
+    if (busy || stopping) return;
+    busy = true;
+    const started = now();
+    current = Promise.resolve().then(tick).catch((error) => {
+      log('guardian', 'step failed', { step: 'tick', ...errorFields(error), elapsed_ms: now() - started, load1: loadavg()[0] });
+    }).finally(() => { busy = false; });
+    return current;
+  }, 3000);
+  const stop = () => {
+    if (stopping) return stopped;
+    stopping = true;
+    clear(timer);
+    stopped = (async () => {
+      const deadline = timeout(() => {
+        log('guardian', 'stop deadline exceeded', { wait_ms: stopWaitMs });
+        exit(1);
+      }, stopWaitMs);
+      await current;
+      await ready;
+      await pacHost?.stop();
+      cancelTimeout(deadline);
+      log('guardian', 'stopped');
+      exit(0);
+    })();
+    return stopped;
+  };
+  once('SIGTERM', stop);
+  once('SIGINT', stop);
+  return { stop, ready };
+}
+
+// Node resolves symlinks for the main module, so compare real paths: a
+// guardian launched through a symlinked runtime path must still start.
+const invokedDirectly = () => {
+  if (!process.argv[1]) return false;
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; }
+  catch { return import.meta.url === pathToFileURL(process.argv[1]).href; }
 };
-process.once('SIGTERM', stop);
-process.once('SIGINT', stop);
+if (invokedDirectly()) startGuardian();

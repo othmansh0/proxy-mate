@@ -2,6 +2,8 @@
 
 `proxy-mate` runs locally. It does not include analytics, telemetry, advertising, crash upload, or a hosted control service.
 
+Per-agent evidence scopes, routing claims and task leases coordinate processes running as the same macOS user. They are not a security boundary. Client IDs and task IDs are not authentication; daemon access still requires the local bearer token. Clients can explicitly read shared evidence with `scope: "all"`. Unknown or ambiguous traffic on shared claimed hosts may be visible to multiple agents.
+
 First-time interactive setup defaults to one Simulator app. This mode attributes local connections before inspection and does not store unselected or unknown clients' traffic. HTTP proxy forwarding necessarily handles routing metadata; unselected HTTPS remains an opaque tunnel. App mode imports the CA only into the selected Simulator and does not change Mac Keychain trust. Capture across domains/apps and Mac trust require an explicit broader choice. Existing certificate trust is not automatically removed when switching modes.
 
 Mac certificate setup displays a native explanation before requesting system authentication. The operation installs the debugging CA and reads certificate metadata to identify its trust status; it does not request saved Keychain passwords. Trust persists until removed and is broader than the selected capture scope. Captured traffic may be returned to connected MCP clients, whose handling of that data is separate from this local service.
