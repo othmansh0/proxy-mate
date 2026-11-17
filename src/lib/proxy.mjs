@@ -1,3 +1,4 @@
+import { BodyWorkerPool } from './body-worker-pool.mjs';
 import { drainServer, defaultDrainMs, trackServer, mockttpListener, limitedLog } from './drain.mjs';
 import { logLine } from './log-line.mjs';
 import { increment, registerGauge } from './metrics.mjs';
@@ -13,10 +14,8 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import { gunzip, inflate, brotliDecompress } from 'node:zlib';
 import { BlockList, isIP, createServer as createTcpServer } from 'node:net';
-import { storeFlowBody, writeMockBody, deleteFlowBodies } from './bodies.mjs';
+import { writeMockBody, deleteFlowBodies } from './bodies.mjs';
 import { STATE_DIR, TRANSFORM_PLUGIN_GRANT_ENV, liveTransformGrantEnabled } from './config.mjs';
 import { atomicWriteFile } from './state.mjs';
 import { commitCaPair, recoverCaPair } from './ca-transaction.mjs';
@@ -44,7 +43,6 @@ const MAX_FLOWS = Number.isInteger(configuredMaxFlows) && configuredMaxFlows > 0
   : 500;
 const DEFAULT_MAX_BODY_SIZE = 5 * 1024 * 1024;
 const MAX_PLUGIN_BODY_PREVIEW_BYTES = 64 * 1024;
-const BODY_DECODERS = { gzip: promisify(gunzip), 'x-gzip': promisify(gunzip), deflate: promisify(inflate), br: promisify(brotliDecompress) };
 
 export { CA_CERT, CA_DIR };
 
@@ -154,9 +152,11 @@ export class ProxyEngine {
     pluginStore = new PluginStore(),
     logWrite,
     caStat,
+    bodyWorkerOptions,
   } = {}) {
     this.logWrite = logWrite;
     this.caStat = caStat;
+    this.bodyWorkers = new BodyWorkerPool(bodyWorkerOptions);
     this.requestContexts = new Map();
     this.abortLog = limitedLog('proxy', 'request aborted', { write: logWrite });
     this.dropLog = limitedLog('proxy', 'connection dropped', { write: logWrite });
@@ -382,7 +382,10 @@ export class ProxyEngine {
   }
 
   stop(options = {}) {
-    const operation = this.lifecycleMutation.then(() => this.#stop(options));
+    const operation = this.lifecycleMutation.then(async () => {
+      try { return await this.#stop(options); }
+      finally { await this.bodyWorkers.close(); }
+    });
     this.lifecycleMutation = operation.catch(() => {});
     return operation;
   }
@@ -440,7 +443,7 @@ export class ProxyEngine {
         if (!this.recording) return;
         const reqBody = await this.#bodyToBuffer(req.body);
         const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
-        const stored = await storeCapturedBody(reqBody, req.headers, req.id, 'req', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
+        const stored = await this.bodyWorkers.process({ buffer: reqBody, headers: req.headers, flowId: req.id, kind: 'req', storeSensitiveData: rawCaptureEnabled, captureBodyMode: this.captureBodyMode, maxBodySize: this.maxBodySize });
         const flow = this.flows.get(req.id) ?? {
           id: req.id, timestamp: Date.now(), request: null, response: null,
         };
@@ -479,7 +482,7 @@ export class ProxyEngine {
         if (!this.recording) return;
         const resBody = await this.#bodyToBuffer(res.body);
         const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
-        const stored = await storeCapturedBody(resBody, res.headers, res.id, 'res', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
+        const stored = await this.bodyWorkers.process({ buffer: resBody, headers: res.headers, flowId: res.id, kind: 'res', storeSensitiveData: rawCaptureEnabled, captureBodyMode: this.captureBodyMode, maxBodySize: this.maxBodySize });
         const existing = await this.getDurableFlow(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
         existing.response = {
           statusCode: res.statusCode,
@@ -2073,82 +2076,6 @@ function redactDiagnosticUrl(value) {
     }
     return url.toString();
   } catch { return value; }
-}
-
-async function storeCapturedBody(buffer, headers, flowId, kind, storeSensitiveData, captureBodyMode, maxBodySize = DEFAULT_MAX_BODY_SIZE) {
-  let body = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer ?? '');
-  const wireSize = body.length;
-  const encodings = String(headers?.['content-encoding'] ?? '').toLowerCase().split(',').map((s) => s.trim()).filter((s) => s && s !== 'identity');
-  let decoded = false;
-  let omission = !wireSize && (Number(headers?.['content-length']) > 0 || /chunked/i.test(String(headers?.['transfer-encoding'] ?? '')))
-    ? 'body unavailable: nonempty length or chunked framing with no retained bytes; possibly exceeded capture limit' : null;
-  if (wireSize && encodings.length && captureBodyMode !== 'metadata_only') {
-    try {
-      if (encodings.length > 4) throw new Error('Too many content encodings');
-      for (const encoding of encodings.reverse()) {
-        if (!Object.hasOwn(BODY_DECODERS, encoding)) throw new Error('Unsupported content encoding');
-        body = await BODY_DECODERS[encoding](body, { maxOutputLength: maxBodySize });
-      }
-      decoded = true;
-    } catch {
-      omission = 'encoded body could not be decoded within the capture limit';
-    }
-  }
-  if (omission) return {
-    inline: null, path: null, size: wireSize, sha: null, encoding: 'binary',
-    original_size: wireSize, redacted: false, omitted: omission, decoded: false,
-  };
-  const text = losslessUtf8(body);
-  if (captureBodyMode === 'metadata_only') {
-    return {
-      inline: body.length === 0 ? '' : null,
-      path: null,
-      size: body.length,
-      sha: body.length ? crypto.createHash('sha256').update(body).digest('hex') : null,
-      encoding: text == null ? 'binary' : 'utf8',
-      original_size: body.length,
-      redacted: false,
-      omitted: body.length ? 'body omitted by metadata_only capture policy' : null,
-    };
-  }
-  if (storeSensitiveData && captureBodyMode === 'all' || body.length === 0) {
-    return {
-      ...await storeFlowBody(body, flowId, kind),
-      decoded,
-      original_size: body.length,
-      redacted: false,
-      omitted: null,
-    };
-  }
-
-  if (text == null) {
-    return {
-      inline: null,
-      path: null,
-      size: body.length,
-      sha: crypto.createHash('sha256').update(body).digest('hex'),
-      encoding: 'binary',
-      original_size: body.length,
-      redacted: false,
-      omitted: 'binary body omitted because sensitive storage is disabled',
-    };
-  }
-  const safeText = redactBody(text, headers);
-  const stored = await storeFlowBody(Buffer.from(safeText, 'utf8'), flowId, kind);
-  return {
-    ...stored,
-    decoded,
-    original_size: body.length,
-    redacted: safeText !== text,
-    omitted: null,
-  };
-}
-
-function losslessUtf8(buffer) {
-  try {
-    const text = buffer.toString('utf8');
-    return Buffer.byteLength(text, 'utf8') === buffer.length ? text : null;
-  } catch { return null; }
 }
 
 function redactWebSocketSnapshotForStorage(snapshot) {
