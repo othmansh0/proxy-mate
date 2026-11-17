@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { createGuardian } from './lib/guardian.mjs';
 import { logLine, errorFields } from './lib/log-line.mjs';
 import os from 'node:os';
@@ -41,4 +42,11 @@ export function startGuardian({ tick = createGuardian(), log = logLine,
   return { stop };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) startGuardian();
+// Node resolves symlinks for the main module, so compare real paths: a
+// guardian launched through a symlinked runtime path must still start.
+const invokedDirectly = () => {
+  if (!process.argv[1]) return false;
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; }
+  catch { return import.meta.url === pathToFileURL(process.argv[1]).href; }
+};
+if (invokedDirectly()) startGuardian();
