@@ -9,6 +9,7 @@ test('guardian preserves a healthy daemon and transient health failures', async 
   const expected = path.join(STATE_DIR, 'runtime/build-owned/src/server.mjs');
   const tick = createGuardian({ read: async () => ({ pid: 123, runtime_role: 'daemon', runtime_entry: expected }), readPid: async () => 123,
     isAlive: () => true, handshake: async () => ({ controlUrl: 'local', token: 'test' }), probe: async () => healthy,
+    loadavg: () => [0], cores: () => 4, liveness: async () => null, livenessExists: async () => false,
     now: () => clock, signal: () => { stopped++; }, intent: async () => {},
     run: async () => ({ stdout: `/usr/bin/node ${expected} --daemon` }), record: async () => {} });
   assert.equal((await tick()).action, 'waiting_for_health');
@@ -62,6 +63,9 @@ function fixture(overrides = {}) {
     read: async () => ({ pid: 123, runtime_role: 'daemon', runtime_entry: expected }),
     readPid: async () => 123, isAlive: () => live,
     handshake: async () => null, probe: async () => false,
+    liveness: async () => null, livenessExists: async () => false,
+    // WP4 tests isolate termination mechanics from the load-scaled WP10 policy.
+    shouldTerminate: ({ failingForMs }) => failingForMs >= 30000,
     run: async () => ({ stdout: `/usr/bin/node ${expected} --daemon` }),
     signal: (pid, sig) => { order.push(sig); signals.push([pid, sig]); },
     intent: async (value) => { order.push('intent'); assert.deepEqual(value, { targetPid: 123, reason: 'guardian_health_timeout', by: 'guardian' }); },
@@ -78,7 +82,7 @@ test('guardian termination spans ticks, writes intent first and waits 25 seconds
   await f.tick(); f.time(30000);
   assert.equal((await f.tick()).action, 'restart_requested');
   assert.deepEqual(f.order, ['intent', 'terminating_unresponsive_owner', 'SIGTERM']);
-  assert.deepEqual(f.events[0].details, { failing_for_ms: 30000, load1: 8, cores: 4, probe_timeout_ms: 1000 });
+  assert.deepEqual(f.events[0].details, { failing_for_ms: 30000, decision: 'legacy_timeout', heartbeat_age_ms: null, unreachable_for_ms: 0, load1: 8, cores: 4, hang_ceiling_ms: 120000, probe_timeout_ms: 2000 });
   f.time(54999); assert.equal((await f.tick()).action, 'waiting_for_exit');
   assert.equal(f.signals.length, 1);
   f.time(55000); assert.equal((await f.tick()).action, 'kill_requested');
