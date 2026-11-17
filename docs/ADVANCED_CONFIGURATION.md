@@ -97,11 +97,11 @@ See the [Proxyman and competitor comparison](PARITY.md).
 
 ## Verify
 
-Use a fresh scratch state root for repository checks; fixtures may remove its contents.
+Repository tests isolate themselves: under `node --test` each test process uses a private temporary state root unless `PROXY_MATE_HOME` is set explicitly. Leave it unset for `npm run check`. For the benchmark and soak scripts, which run outside the test runner, use a scratch root.
 
 ```bash
-export PROXY_MATE_HOME="$(mktemp -d /tmp/proxy-mate-tests.XXXXXX)"
 npm run check
+export PROXY_MATE_HOME="$(mktemp -d /tmp/proxy-mate-scratch.XXXXXX)"
 npm run benchmark:storage
 npm run test:soak -- 300
 npm pack --dry-run

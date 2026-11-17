@@ -153,10 +153,9 @@ input; only the server process's own environment.
 
 ## Tests and checks
 
-Set `PROXY_MATE_HOME` to a fresh scratch directory before running repository tests. Some fixtures replace or remove the configured state root. Never run them against an installed daemon's state directory.
+Run repository tests **without** setting `PROXY_MATE_HOME`. Under `node --test`, each test process gets its own private temporary state directory, so fixtures that replace or remove the state root can never reach an installed daemon's `~/.proxy-mcp` or `~/.proxy-mate`, and parallel test files never share rules, claims, leases or sessions. The real `networksetup` is refused inside test runs. Exporting one `PROXY_MATE_HOME` for the whole suite would make parallel files share state and become flaky.
 
 ```sh
-export PROXY_MATE_HOME="$(mktemp -d /tmp/proxy-mate-tests.XXXXXX)"
 npm test                                      # full Node test suite
 npm run check                                 # server syntax check + full suite
 node --test test/rules.engine.test.mjs        # one focused test file

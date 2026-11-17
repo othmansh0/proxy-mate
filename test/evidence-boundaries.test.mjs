@@ -5,6 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
+const { STATE_DIR } = await import('../src/lib/config.mjs');
 const document = { openapi: '3.0.3', paths: {} };
 const flowTools = ['get_flow_detail', 'export_flow_curl', 'export_flow_code', 'export_flow_swift', 'repeat_flow', 'edit_and_repeat_flow', 'save_body_to_file', 'query_flow_json', 'inspect_flow_protocol', 'validate_flow_openapi', 'capture_to_mock', 'compare_flows'];
 const connectionTools = ['get_websocket_connection', 'export_websocket_transcript', 'plan_websocket_replay', 'transform_websocket_transcript'];
@@ -43,7 +44,7 @@ for (const name of ['import_capture_session', 'import_har']) test(`${name} gates
   const target = `target-${randomUUID()}`;
   await engine.sessionStore.createSession({ id: target });
   await engine.sessionStore.appendFlow({ sessionId: target, flow: { id: 'keep', owner_client: 'B', attribution: 'claim', request: { url: 'https://private.invalid/' } } });
-  const dir = path.join(process.env.PROXY_MATE_HOME, 'exports');
+  const dir = path.join(STATE_DIR, 'exports');
   await fs.mkdir(dir, { recursive: true });
   const source = path.join(dir, `${name}.json`);
   const capture = await engine.sessionStore.exportSession(target);
@@ -87,7 +88,7 @@ test('owned and shared WebSocket access and body exports remain available', asyn
 });
 test('WebSocket transcript imports cannot overwrite a foreign connection by embedded ID', async t => {
   const { tools } = await fixture(t);
-  const dir = path.join(process.env.PROXY_MATE_HOME, 'exports');
+  const dir = path.join(STATE_DIR, 'exports');
   await fs.mkdir(dir, { recursive: true });
   const source = path.join(dir, `ws-${randomUUID()}.json`);
   await fs.writeFile(source, JSON.stringify({ format: 'proxy-mate.websocket-transcript/v1', connection: { id: 'foreign', messages: [] } }));
@@ -95,7 +96,7 @@ test('WebSocket transcript imports cannot overwrite a foreign connection by embe
 });
 test('capture replacement checks the embedded active session ID', async t => {
   const { engine, tools } = await fixture(t);
-  const dir = path.join(process.env.PROXY_MATE_HOME, 'exports');
+  const dir = path.join(STATE_DIR, 'exports');
   await fs.mkdir(dir, { recursive: true });
   const source = path.join(dir, `active-${randomUUID()}.json`);
   await fs.writeFile(source, JSON.stringify(await engine.sessionStore.exportSession(engine.sessionId)));
