@@ -76,7 +76,7 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
   assert.equal(received.status, 202);
   assert.deepEqual(JSON.parse(received.text), { edited: true });
   const observed = await call(1, 'wait_for_flow', { scope: 'all', url_contains: 'leased-breakpoint', include_existing: true, timeout_ms: 1000 });
-  const exported = await call(1, 'save_body_to_file', { flow_id: observed.flow.id });
+  const exported = await call(1, 'save_body_to_file', { flow_id: observed.flow.id, scope: 'all' });
   assert.equal(exported.redacted, true);
   await call(0, 'remove_rule', { rule_id: 'qa-a-pause' });
   await call(0, 'mock_json_response', { rule_id: 'qa-a-cleanup', url: 'http://fixture.invalid/cleanup', json: { cleanup: true } });

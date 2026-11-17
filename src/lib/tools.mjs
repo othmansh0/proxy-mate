@@ -136,6 +136,31 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     const page = await engine.listDurableFlows(args);
     return { ...page, flows: page.flows.filter(scope.predicate), ...scopeMeta(scope, page.flows.filter(f => !scope.predicate(f)).length) };
   }
+  async function scopedFlow(id, context, args = {}) {
+    const flow = await engine.getDurableFlow(id, args.session_id);
+    const scope = await resolveScope(context, args.scope);
+    if (flow && !scope.predicate(flow)) throw Object.assign(new Error('Flow belongs to another client; pass scope: all to read it.'), {
+      code: 'FLOW_OUT_OF_SCOPE', recovery: 'pass scope: all' });
+    return flow;
+  }
+  async function scopedConnection(id, context, args = {}) {
+    // Check the stored metadata before redaction or transcript/body access.
+    const connection = engine.webSocketStore.connections.get(String(id ?? '').trim());
+    const scope = await resolveScope(context, args.scope);
+    if (connection && !scope.predicate(connection)) throw Object.assign(new Error('Connection belongs to another client; pass scope: all to read it.'), {
+      code: 'CONNECTION_OUT_OF_SCOPE', recovery: 'pass scope: all' });
+    return connection;
+  }
+  async function guardSessionReplacement(args, context, sessionId) {
+    if (!args.replace) return;
+    // Refuse even while stopped: the engine may still hold cached flow objects.
+    if (sessionId === engine.sessionId) throw Object.assign(new Error('Cannot replace the active session while its evidence is cached.'), {
+      code: 'ACTIVE_SESSION_REPLACE_FORBIDDEN', recovery: 'Select a different active session, or import into a new session ID.' });
+    const mine = await resolveScope(context, 'mine');
+    const count = await engine.sessionStore.countScopedFlows({ sessionId, scope: mine });
+    const scope = await resolveScope(context, args.scope);
+    if (count.hidden) await requireSharedConfirmation({ ...args, confirm_shared: scope.mode === 'all' && args.confirm_shared === true }, context, sessionId);
+  }
   async function requireSharedConfirmation(args, context, sessionId) {
     const mine = await resolveScope(context, 'mine');
     const count = await engine.sessionStore.countScopedFlows({ sessionId, scope: mine });
@@ -1137,11 +1162,12 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       omitted_body_count: omittedBodies, redacted: !includeSensitive };
   }
 
-  async function import_capture_session(args = {}) {
+  async function import_capture_session(args = {}, context = {}) {
     const source = await authorizeReadPath(args.path);
     const stat = await fs.stat(source);
     if (stat.size > 512 * 1024 * 1024) throw new Error('Capture-session import exceeds the 512 MB safety limit.');
     const document = JSON.parse(await fs.readFile(source, 'utf8'));
+    await guardSessionReplacement(args, context, args.session_id ?? document?.session?.id);
     const session = await engine.sessionStore.importSession({
       document,
       sessionId: args.session_id,
@@ -1243,7 +1269,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
         includeSensitive })) };
   }
 
-  async function get_websocket_connection(args = {}) {
+  async function get_websocket_connection(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const connection = engine.webSocketStore.getConnection({
       connectionId: args.connection_id,
       includeSensitive: requireSensitiveAccess(args.include_sensitive ?? false),
@@ -1254,8 +1281,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
 
   async function get_websocket_messages(args = {}, context = {}) {
     const scope = await resolveScope(context, args.scope);
-    const connection = engine.webSocketStore.getConnection({ connectionId: args.connection_id });
-    if (connection && !scope.predicate(connection)) return { ...scopeMeta(scope, 1), messages: [], has_more: false, next_cursor: null };
+    try { await scopedConnection(args.connection_id, context, args); }
+    catch (error) {
+      if (error.code !== 'CONNECTION_OUT_OF_SCOPE') throw error;
+      return { ...scopeMeta(scope, 1), messages: [], has_more: false, next_cursor: null };
+    }
     return { ...scopeMeta(scope), ...engine.webSocketStore.listMessages({
       connectionId: args.connection_id,
       cursor: args.cursor,
@@ -1266,7 +1296,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     }) };
   }
 
-  async function export_websocket_transcript(args = {}) {
+  async function export_websocket_transcript(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const transcript = engine.webSocketStore.exportTranscript({ connectionId: args.connection_id, includeSensitive });
     const out = args.path
@@ -1277,15 +1308,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return { path: out, connection_id: args.connection_id, message_count: transcript.connection?.messages?.length ?? 0, redacted: !includeSensitive };
   }
 
-  async function import_websocket_transcript(args = {}) {
+  async function import_websocket_transcript(args = {}, context = {}) {
     const source = await authorizeReadPath(args.path);
     const stat = await fs.stat(source);
     if (stat.size > 64 * 1024 * 1024) throw Object.assign(new Error('WebSocket transcript exceeds 64 MB.'), { code: 'WEBSOCKET_IMPORT_TOO_LARGE' });
     const transcript = JSON.parse(await fs.readFile(source, 'utf8'));
+    // Imports can overwrite an existing ID even when replace is false.
+    await scopedConnection(transcript?.connection?.id, context, args);
     return { status: 'imported', ...engine.webSocketStore.importTranscript(transcript, { replace: args.replace ?? false }) };
   }
 
-  async function plan_websocket_replay(args = {}) {
+  async function plan_websocket_replay(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const transcript = engine.webSocketStore.exportTranscript({ connectionId: args.connection_id, includeSensitive });
     return buildWebSocketReplayPlan(transcript, { mutations: args.mutations ?? [] });
@@ -1405,7 +1439,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return { status: 'registered', rule };
   }
 
-  async function transform_websocket_transcript(args = {}) {
+  async function transform_websocket_transcript(args = {}, context = {}) {
+    await scopedConnection(args.connection_id, context, args);
     const plugin = await engine.pluginStore.get(args.plugin_id);
     if (!plugin) throw Object.assign(new Error(`Transform plugin not found: ${args.plugin_id}`), { code: 'PLUGIN_NOT_FOUND' });
     if (plugin.stage !== 'websocket_offline') {
@@ -1830,10 +1865,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
 
   async function get_flow_detail(args = {}, context = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const f = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const f = await scopedFlow(args.flow_id, context, args);
     if (!f) throw new Error(`flow not found: ${args.flow_id}`);
     const scope = await resolveScope(context, args.scope);
-    if (!scope.predicate(f)) throw Object.assign(new Error('Flow belongs to another client; pass scope: all to read it.'), { code: 'FLOW_OUT_OF_SCOPE', recovery: 'pass scope: all' });
     const bodyMode = args.body_mode ?? (args.full_body ? 'full' : 'preview');
     const detail = flowDetailForReturn(f, {
       full: bodyMode === 'full', includeSensitive,
@@ -1924,9 +1958,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     };
   }
 
-  async function export_flow_curl(args = {}) {
+  async function export_flow_curl(args = {}, context = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw new Error(`flow not found: ${args.flow_id}`);
     const redactedFields = [];
     const headers = includeSensitive ? flow.request.headers : redactHeaders(flow.request.headers, redactedFields);
@@ -1952,7 +1986,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   }
 
   async function repeat_flow(args = {}, context = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     return composeHttpRequest({
@@ -1966,7 +2000,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   }
 
   async function edit_and_repeat_flow(args = {}, context = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     return composeHttpRequest({
@@ -1986,12 +2020,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   }
 
   async function compare_flows(args = {}, context = {}) {
-    const left = await engine.getDurableFlow(args.left_flow_id, args.session_id);
-    const right = await engine.getDurableFlow(args.right_flow_id, args.session_id);
+    const left = await scopedFlow(args.left_flow_id, context, args);
+    const right = await scopedFlow(args.right_flow_id, context, args);
     if (!left) throw flowNotFound(args.left_flow_id);
     if (!right) throw flowNotFound(args.right_flow_id);
     const scope = await resolveScope(context, args.scope);
-    if (![left, right].every(scope.predicate)) throw Object.assign(new Error("Flow out of scope; pass scope: all"), { code: "FLOW_OUT_OF_SCOPE" });
     return {
       ...scopeMeta(scope), left_flow_id: left.id,
       right_flow_id: right.id,
@@ -1999,8 +2032,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     };
   }
 
-  async function export_flow_swift(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function export_flow_swift(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const safe = structuredClone(flow);
     if (safe.request) {
@@ -2011,8 +2044,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return generateSwiftUrlSession(safe);
   }
 
-  async function export_flow_code(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function export_flow_code(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     return generateRequestCode(flow, args.language ?? 'javascript');
   }
@@ -2043,8 +2076,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return { scope_applied: analysis.scope_applied, hidden_count: analysis.hidden_count, analysis, assertions: evaluateCaptureAssertions(analysis, args.assertions ?? {}) };
   }
 
-  async function inspect_flow_protocol(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function inspect_flow_protocol(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow) throw flowNotFound(args.flow_id);
     const kind = args.kind ?? 'res';
     const part = kind === 'req' ? flow.request : flow.response;
@@ -2113,7 +2146,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     throw error;
   }
 
-  async function validate_flow_openapi(args = {}) {
+  async function validate_flow_openapi(args = {}, context = {}) {
     const hasDocument = args.document !== undefined;
     const hasDocumentPath = typeof args.document_path === 'string' && args.document_path.trim() !== '';
     if (hasDocument === hasDocumentPath) {
@@ -2139,7 +2172,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       document = await fs.readFile(source, 'utf8');
       documentSource = 'authorized_path';
     }
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow?.request) throw flowNotFound(args.flow_id);
     const validationFlow = await hydrateOpenApiFlowBodies(flow, maxBodyBytes);
     return {
@@ -2155,7 +2188,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     };
   }
 
-  async function validate_capture_openapi(args = {}) {
+  async function validate_capture_openapi(args = {}, context = {}) {
     const hasDocument = args.document !== undefined;
     const hasDocumentPath = typeof args.document_path === 'string' && args.document_path.trim() !== '';
     if (hasDocument === hasDocumentPath) {
@@ -2183,7 +2216,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       documentSource = 'authorized_path';
     }
     const sessionId = args.session_id ?? engine.sessionId;
-    const page = await engine.sessionStore.listFlows({ sessionId, limit: maxFlows });
+    const scope = await resolveScope(context, args.scope);
+    const page = scope.mode === 'all'
+      ? await engine.sessionStore.listFlows({ sessionId, limit: maxFlows })
+      : await scopedPage({ session_id: sessionId, limit: maxFlows }, scope);
+    const counts = scope.mode === 'all' ? null : await engine.sessionStore.countScopedFlows({ sessionId, scope });
     const flows = [];
     for (const flow of page.flows) flows.push(await hydrateOpenApiFlowBodies(flow, maxBodyBytes));
     const result = validateOpenApiFlows(document, flows, {
@@ -2193,14 +2230,15 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       externalDocuments: args.external_documents ?? {},
     });
     return {
+      ...scopeMeta(scope, counts?.hidden ?? 0),
       session_id: sessionId,
       document_source: documentSource,
       limits: { max_document_bytes: maxDocumentBytes, max_body_bytes: maxBodyBytes, max_flows: maxFlows },
       ...result,
       // The storage page can be truncated independently of the validator.
       truncated: result.truncated || page.has_more,
-      skipped_count: result.skipped_count + (page.has_more ? Math.max(0, (page.session?.flow_count ?? flows.length) - flows.length) : 0),
-      total: page.session?.flow_count ?? result.total,
+      skipped_count: result.skipped_count + (page.has_more ? Math.max(0, (counts?.visible ?? page.session?.flow_count ?? flows.length) - flows.length) : 0),
+      total: counts?.visible ?? page.session?.flow_count ?? result.total,
     };
   }
 
@@ -2228,10 +2266,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return copy;
   }
 
-  async function save_body_to_file(args = {}) {
+  async function save_body_to_file(args = {}, context = {}) {
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
     const { flow_id, kind = 'res', path: destPath } = args;
-    const f = await engine.getDurableFlow(flow_id, args.session_id);
+    const f = await scopedFlow(flow_id, context, args);
     if (!f) throw new Error(`flow not found: ${flow_id}`);
     const part = kind === 'req' ? f.request : f.response;
     if (!part) throw new Error(`flow has no ${kind}`);
@@ -2253,8 +2291,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       captured_size: part.body_size, captured_sha: part.body_sha, redacted: !includeSensitive };
   }
 
-  async function query_flow_json(args = {}) {
-    const flow = await engine.getDurableFlow(args.flow_id, args.session_id);
+  async function query_flow_json(args = {}, context = {}) {
+    const flow = await scopedFlow(args.flow_id, context, args);
     if (!flow) throw flowNotFound(args.flow_id);
     const part = args.kind === 'req' ? flow.request : flow.response;
     const body = await bodyForExport(part);
@@ -2298,12 +2336,12 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   }
 
   // Capture-to-mock — the Proxyman killer feature.
-  async function capture_to_mock(args = {}) {
-    await ensureProxyRunning();
+  async function capture_to_mock(args = {}, context = {}) {
     const { flow_id, rule_id, method, url_pattern, status, content_type } = args;
     const includeSensitive = requireSensitiveAccess(args.include_sensitive ?? false);
-    const f = await engine.getDurableFlow(flow_id, args.session_id);
+    const f = await scopedFlow(flow_id, context, args);
     if (!f) throw new Error(`flow not found: ${flow_id}`);
+    await ensureProxyRunning();
     if (!f.response) throw new Error('flow has no response yet');
     if (f.response.body_omitted) {
       throw Object.assign(new Error(`Cannot create a mock from an omitted response: ${f.response.body_omitted}`), { code: 'BODY_UNAVAILABLE' });
@@ -2456,7 +2494,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return { ...scopeMeta(scope, hidden), path: out, entry_count: entries.length, omitted_body_count: omittedBodies, redacted: !includeSensitive };
   }
 
-  async function import_har(args = {}) {
+  async function import_har(args = {}, context = {}) {
     const source = await authorizeReadPath(args.path);
     const stat = await fs.stat(source);
     if (stat.size > 256 * 1024 * 1024) throw new Error('HAR import exceeds the 256 MB safety limit.');
@@ -2464,6 +2502,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     const entries = har?.log?.entries;
     if (!Array.isArray(entries)) throw new Error('Invalid HAR: expected log.entries array.');
     const sessionId = args.session_id ?? `har_${Date.now()}`;
+    await guardSessionReplacement(args, context, sessionId);
     if (args.replace) await engine.sessionStore.purgeSession(sessionId);
     await engine.sessionStore.ensureSession({ id: sessionId, name: args.name ?? path.basename(source) });
     let imported = 0;
