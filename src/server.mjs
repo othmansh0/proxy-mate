@@ -31,7 +31,7 @@ import { rememberCaptureLease, INTERNAL_CAPTURE_CONTROL } from './lib/capture-le
 import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/network-policy.mjs';
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
-import { PacServer } from './lib/pac.mjs';
+import { PacServer, recordRoutingSuspension, rearmRouting } from './lib/pac.mjs';
 import { createDaemonPacServer } from './lib/pac-host.mjs';
 import { makeTools, INTERNAL_ROUTING_CONTROL } from './lib/tools.mjs';
 import {
@@ -208,11 +208,14 @@ async function runDaemon(args) {
     await step('routing', 6000, async () => {
       // Stop claim-expiry timers first so no sync re-applies routing mid-shutdown;
       // claims stay on disk for re-arm after restart.
-      try { tools[INTERNAL_ROUTING_CONTROL]?.stop?.(); } catch { /* best effort */ }
+      try { await tools[INTERNAL_ROUTING_CONTROL]?.stop?.(); } catch { /* best effort */ }
+      const routingState = await readState();
       await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, {
         routingOnly: true, timeoutCapMs: () => Math.max(0, routingDeadline - performance.now()),
       });
       routingRestored = true;
+      try { await recordRoutingSuspension({ state: routingState, reason: 'daemon_shutdown' }); }
+      catch (error) { logLine('daemon', 'routing suspension record failed', errorFields(error)); }
     });
     await step('control', 3000, async () => {
       const result = await ctrl?.stop({ queueTimeoutMs: Math.min(3000, remaining()) });
@@ -375,6 +378,14 @@ async function runDaemon(args) {
   const readyDetails = { ...durations, proxy_port: engine.port, pac_port: pacServer.port ?? pacPort, control_port: ctrl.port };
   await recordRuntimeEvent('ready', { details: readyDetails });
   logLine('daemon', 'ready', readyDetails);
+  // Claims may re-arm even with --no-routing; that flag only controls CLI domains.
+  const routingController = tools[INTERNAL_ROUTING_CONTROL];
+  const rearmAbort = new AbortController();
+  const rearming = rearmRouting({ controller: routingController, signal: rearmAbort.signal }).catch(error => {
+    logLine('daemon', 'routing re-arm failed', errorFields(error));
+  });
+  const stopRouting = routingController.stop;
+  routingController.stop = async () => { rearmAbort.abort(); stopRouting(); await rearming; };
   } catch (error) {
     logLine('daemon', 'startup failed; rolling back', { phase, error_code: error?.code ?? null, error_message: error?.message ?? String(error) });
     await recordRuntimeEvent('startup_failed', { code: 1, reason: 'startup_failed', details: {
