@@ -8,9 +8,11 @@ import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 
 import { CA_CERT, CA_DIR, ensureCA, rotateCA, removeOwnedMockBody } from './proxy.mjs';
-import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains } from './pac.mjs';
+import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains, createRoutingController, pickActiveNetworkService } from './pac.mjs';
+import { createRoutingClaimsStore } from './routing-claims.mjs';
+import { LEGACY_CLIENT_ID } from './client-identity.mjs';
 import { gettingStarted, searchHelp, setupWorkflows } from './guidance.mjs';
-import { runtimeIdentity, readRuntimeEvents } from './runtime-identity.mjs';
+import { runtimeIdentity, readRuntimeEvents, recordRuntimeEvent } from './runtime-identity.mjs';
 import { encodeAgentJson, mergeJsonPatch } from './agent-json.mjs';
 import {
   trustCaOnSimulators, restartSimApps, watchSimulators,
@@ -73,7 +75,115 @@ function resourceRevision(config) {
 
 // Factory: builds a tool object given an engine + pac server pair. Optionally
 // owns lifecycle helpers (sim watcher stop fn, etc.).
-export function makeTools({ engine, pacServer, mode = 'in-process' }) {
+// Non-enumerable integration hook: tools[INTERNAL_ROUTING_CONTROL] exposes the
+// single lazily constructed controller (after the engine has bound its port).
+export const INTERNAL_ROUTING_CONTROL = Symbol('routing-control');
+export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
+  pacPort = PAC_PORT_DEFAULT, now = Date.now, setTimer, clearTimer,
+  hostCertificateStatus = getHostCertificateStatus,
+}) {
+  const claims = createRoutingClaimsStore({ now });
+  let controller;
+  let routingOptions = {};
+  let routingCache = null;
+  const claimDetails = new Map();
+  const routingController = () => controller ??= createRoutingController({ claims, pacServer,
+    proxyPort: engine.port, pacPort: routingOptions.pac_port ?? pacPort,
+    run, select: service => select ? select(routingOptions.network_service ?? service)
+      : pickActiveNetworkService(routingOptions.network_service ?? service),
+    now, setTimer, clearTimer });
+  const owner = context => ({ client_id: context.client_id ?? LEGACY_CLIENT_ID, task_id: context.task_id ?? null });
+  const owned = (claim, context) => claim.client_id === owner(context).client_id && claim.task_id === owner(context).task_id;
+  const invalidateRouting = () => { routingCache = null; };
+  function lossEvent(event) {
+    if (event.event === 'routing_claim_expired') return 'lease_expired';
+    if (['lease_expired', 'daemon_restart', 'external_change', 'guardian_recovery'].includes(event.reason)) return event.reason;
+    if (event.event === 'restored_dead_owner_routing') return 'guardian_recovery';
+    if (event.event === 'routing_cleared' && event.status === 'changed_externally') return 'external_change';
+    if (event.event === 'routing_suspended') return 'daemon_restart';
+    return null;
+  }
+  async function routingStatus() {
+    if (controller) return controller.status();
+    const [rows, state] = await Promise.all([claims.listClaims({ includeExpired: true }), readState()]);
+    const active = Boolean(state?.routing_active && state.pid === process.pid);
+    return { active, network_service: state?.network_service ?? null,
+      union_domains: [...new Set(rows.filter(c => Date.parse(c.expires_at) > now()).flatMap(c => c.domains))].sort(),
+      claims: rows.map(c => ({ claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id,
+        domains: c.domains, expires_at: c.expires_at,
+        state: Date.parse(c.expires_at) <= now() ? 'expired' : active ? 'active' : 'suspended' })), last_change: null };
+  }
+  async function routingSnapshot(fresh = false) {
+    if (!fresh && routingCache && now() - routingCache.at < 1000) return routingCache.value;
+    const [status, events, guardian] = await Promise.all([
+      routingStatus(), readRuntimeEvents(), readRuntimeEvents('guardian'),
+    ]);
+    // Expiry sweeps remove rows. Keep their bounded journal tombstones visible
+    // until a newer set or explicit clear supersedes them.
+    const rows = [...status.claims];
+    for (const c of rows) claimDetails.set(c.claim_id, c);
+    const latest = new Map();
+    for (const e of events) if (e.claim_id && /^routing_claim_/.test(e.event)) latest.set(e.claim_id, e);
+    for (const e of latest.values()) if (e.event === 'routing_claim_expired' && !rows.some(c => owned(c, e))) {
+      rows.push({ claim_id: e.claim_id, client_id: e.client_id, task_id: e.task_id ?? null,
+        domains: claimDetails.get(e.claim_id)?.domains ?? [], expires_at: claimDetails.get(e.claim_id)?.expires_at ?? e.at, state: 'expired' });
+    }
+    for (const id of claimDetails.keys()) if (!rows.some(c => c.claim_id === id)) claimDetails.delete(id);
+    const lost = [...events, ...guardian].filter(e => lossEvent(e)).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+    const value = { ...status, claims: rows, routing_lost_reason: lost ? lossEvent(lost) : null, routing_lost_at: lost?.at ?? null };
+    routingCache = { at: now(), value };
+    return value;
+  }
+  async function routingResult(status, context) {
+    const state = await readState();
+    const claim = status.claims.find(c => owned(c, context)) ?? null;
+    return { claim, routing_union: status.union_domains, routing_status: status,
+      domains: status.union_domains, networkService: status.network_service,
+      pacUrl: state?.pac_url ?? null, expires_at: claim?.expires_at ?? null };
+  }
+  async function applyClaim(args, context, preserveExpiry = false) {
+    validateRoutingDomains(args.domains, { allowBroad: args.allow_broad_routing === true });
+    const duration = args.duration_seconds ?? 3600;
+    if (!Number.isInteger(duration) || duration < 1 || duration > 86400) throw Object.assign(new Error('Routing duration must be 1-86400 seconds.'), { code: 'ROUTING_LEASE_INVALID' });
+    routingOptions = { network_service: args.network_service, pac_port: args.pac_port };
+    const control = routingController();
+    const before = await control.status();
+    const state = await readState();
+    // A pre-claims runtime remains untouched until explicitly cleared.
+    if (state?.routing_active && !before.claims.length) throw Object.assign(new Error('Clear legacy routing explicitly before creating claims.'), { code: 'ROUTING_OWNED' });
+    if (state?.routing_active) {
+      const actual = await getAutoProxyState(state.network_service, run);
+      if (!actual.enabled || actual.url !== state.pac_url) {
+        if (!args.replace_existing_proxy) throw Object.assign(new Error('System proxy changed externally.'), { code: 'ROUTING_CONFLICT' });
+        await clearPacRouting({ pacServer, run });
+      }
+    }
+    const previous = before.claims.find(c => owned(c, context));
+    const saved = (await claims.listClaims({ includeExpired: true })).find(c => owned(c, context));
+    let status;
+    try {
+      if (preserveExpiry && previous && Date.parse(previous.expires_at) > now()) {
+        // Store upsert accepts an explicit clock; anchoring it at the original
+        // renewal preserves both requested duration and the exact expiry.
+        const stored = (await claims.listClaims()).find(c => c.claim_id === previous.claim_id);
+        await claims.upsertClaim({ ...owner(context), domains: args.domains, allowBroad: args.allow_broad_routing === true,
+          durationSeconds: stored.requested_seconds, now: Date.parse(stored.expires_at) - stored.requested_seconds * 1000 });
+        status = await control.sync();
+      } else status = await control.set({ ...owner(context), domains: args.domains,
+        durationSeconds: args.duration_seconds ?? 3600, allowBroad: args.allow_broad_routing === true,
+        replaceExisting: args.replace_existing_proxy === true });
+    } catch (error) {
+      if (saved) await claims.upsertClaim({ ...saved, durationSeconds: saved.requested_seconds,
+        allowBroad: true, now: Date.parse(saved.expires_at) - saved.requested_seconds * 1000 });
+      else await claims.removeClaim(owner(context));
+      invalidateRouting();
+      throw error;
+    }
+    for (const c of status.claims) claimDetails.set(c.claim_id, c);
+    invalidateRouting();
+    return routingResult(status, context);
+  }
+
   const captureLease = new CaptureLease();
   let simWatchStop = null;
   let appGateway = null;
@@ -238,7 +348,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   // ---- proxy lifecycle ----
-  async function start_proxy(args = {}) {
+  async function start_proxy(args = {}, context = {}) {
     if (appGateway) throw Object.assign(new Error('App-only capture is active. Stop it before switching capture modes.'), { code: 'APP_CAPTURE_ACTIVE' });
     const {
       port, auto_setup = false, network_service, pac_port, tls_passthrough, max_body_size,
@@ -315,19 +425,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       ({ trust, routing } = await setupSimulatorRouting({
         certPath: activeCaCert,
         keyPath: engine.caKeyPath,
-        applyRouting: () => applyPacRouting({
-          domains,
-          networkService: network_service,
-          pacPort: pac_port ?? PAC_PORT_DEFAULT,
-          proxyPort: engine.port,
-          pacServer,
-          allowBroad: args.allow_broad_routing === true,
-          replaceExisting: args.replace_existing_proxy === true,
-          durationSeconds: args.duration_seconds ?? 3600,
-        }),
+        applyRouting: () => applyClaim({ ...args, domains }, context),
       }));
     } catch (error) {
-      try { await clearPacRouting({ pacServer }); } catch { /* retain routing breadcrumbs */ }
       if (newlyStarted) await engine.stop();
       await patchState({ proxy_port: engine.port, setup_error: error.message });
       throw error;
@@ -436,31 +536,41 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       : out;
   }
 
-  async function set_proxy_routing(args = {}) {
+  async function set_proxy_routing(args = {}, context = {}) {
     await ensureProxyRunning();
     if (appGateway) throw Object.assign(new Error('Stop app-only capture before selecting domain or Mac-wide capture.'), { code: 'APP_CAPTURE_ACTIVE' });
-    const hostTrust = await getHostCertificateStatus(await activeCaCertificate());
+    const hostTrust = await hostCertificateStatus(await activeCaCertificate());
     if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA with setup_host_certificate before changing Mac routing. No routing settings were changed.'), {
       code: 'HOST_CA_UNTRUSTED', retryable: false, recovery: ['Call setup_host_certificate, then retry the scoped routing request.'],
     });
-    const { domains, network_service, pac_port } = args;
+    const { domains } = args;
     if (!Array.isArray(domains) || domains.length === 0) {
       throw new Error('domains must be a non-empty array.');
     }
-    const routing = await applyPacRouting({
-      domains, networkService: network_service,
-      pacPort: pac_port ?? PAC_PORT_DEFAULT,
-      proxyPort: engine.port, pacServer,
-      allowBroad: args.allow_broad_routing === true,
-      replaceExisting: args.replace_existing_proxy === true,
-      durationSeconds: args.duration_seconds ?? 3600,
-    });
+    const routing = await applyClaim(args, context);
     return { status: 'routing_on', ...routing };
   }
 
-  async function clear_proxy_routing(args = {}) {
-    const out = await clearPacRouting({ pacServer, networkService: args.network_service });
-    return { status: 'routing_off', ...out };
+  async function clear_proxy_routing(args = {}, context = {}) {
+    if (args.scope !== undefined && !['mine', 'all'].includes(args.scope)) throw new Error('scope must be mine or all');
+    const before = await routingSnapshot(true);
+    const removed = before.claims.filter(c => args.scope === 'all' || owned(c, context));
+    const state = await readState();
+    let status = before;
+    // A no-claim clear must not disturb unclaimed legacy/app routing.
+    if (removed.length) status = await routingController().clear({ ...owner(context), all: args.scope === 'all' });
+    else if (state?.routing_active && !before.claims.length && (args.scope === 'all' || owner(context).client_id === LEGACY_CLIENT_ID)) {
+      await clearPacRouting({ pacServer, networkService: args.network_service, run });
+      status = await routingStatus();
+    }
+    for (const c of removed) {
+      claimDetails.delete(c.claim_id);
+      if (c.state === 'expired') await recordRuntimeEvent('routing_claim_cleared', { details: {
+        claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id } });
+    }
+    invalidateRouting();
+    return { status: status.active ? 'routing_on' : 'routing_off', ...await routingResult(status, context),
+      removed_claims: removed, removed_other_claims: removed.filter(c => c.client_id !== owner(context).client_id) };
   }
 
   async function trust_ca_on_simulators_tool() {
@@ -651,8 +761,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   }
 
   async function get_proxy_status(_args = {}, context = {}) {
-    const [state, pid, storage, runtime, events, guardianEvents] = await Promise.all([
-      readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'),
+    const [state, pid, storage, runtime, events, guardianEvents, routingStatus] = await Promise.all([
+      readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'), routingSnapshot(true),
     ]);
     return {
       running: engine.isRunning(),
@@ -687,6 +797,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
       domains: state?.domains ?? [],
       routing_expires_at: state?.routing_expires_at ?? null,
       routing_fail_open: true,
+      routing_claims: routingStatus.claims.map(c => ({ ...c, mine: owned(c, context) })),
+      routing_union: routingStatus.union_domains,
+      routing_lost_reason: routingStatus.routing_lost_reason,
+      routing_lost_at: routingStatus.routing_lost_at,
       tls_passthrough: engine.tlsPassthrough,
       simulator_watcher: simWatchStop ? 'running' : 'stopped',
       recent_simulator_events: simWatcherEvents.slice(-10),
@@ -742,7 +856,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     return { name: 'proxy-mate', version: SERVER_VERSION, node: process.version, mode };
   }
 
-  async function get_started(args = {}) { return gettingStarted(args, await get_proxy_status()); }
+  async function get_started(args = {}, context = {}) { return gettingStarted(args, await get_proxy_status({}, context)); }
   async function search_docs(args = {}) { return searchHelp(args.query, args.limit); }
   async function list_setup_workflows() { return setupWorkflows(); }
 
@@ -781,13 +895,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     };
   }
 
-  async function enable_ssl_proxying(args = {}) {
+  async function enable_ssl_proxying(args = {}, context = {}) {
     await ensureProxyRunning();
     if (!args.domain) throw new Error('domain is required');
+    if (appGateway) throw Object.assign(new Error('Stop app-only capture first.'), { code: 'APP_CAPTURE_ACTIVE' });
+    const hostTrust = await hostCertificateStatus(await activeCaCertificate());
+    if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA first.'), { code: 'HOST_CA_UNTRUSTED' });
+    const previous = (await routingController().status()).claims.find(c => owned(c, context));
+    const domains = [...new Set([...(previous?.domains ?? []), args.domain])];
     const state = await readState();
-    const domains = [...new Set([...(state?.domains ?? []), args.domain])];
-    const routing = await set_proxy_routing({ domains, network_service: state?.network_service, pac_port: state?.pac_port ?? PAC_PORT_DEFAULT });
-    return { status: 'enabled', domain: args.domain, de_duplicated: domains.length === (state?.domains?.length ?? 0), routing };
+    const routing = await applyClaim({ domains, network_service: state?.network_service,
+      allow_broad_routing: previous?.domains.includes('*') }, context, true);
+    return { status: 'enabled', domain: args.domain, de_duplicated: domains.length === (previous?.domains.length ?? 0), routing };
   }
 
   async function clear_session(args = {}) {
@@ -2278,6 +2397,17 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
     release_capture_lease: (args) => captureLease.release(args),
     finish_capture_task,
   };
+  // Also serialize direct/in-process callers, which do not use control.mjs's
+  // mutation queue. SSL read/merge and claim writes must remain one operation.
+  let routingMutation = Promise.resolve();
+  for (const name of ['start_proxy', 'set_proxy_routing', 'clear_proxy_routing', 'enable_ssl_proxying']) {
+    const fn = tools[name];
+    tools[name] = (...args) => {
+      const result = routingMutation.then(() => fn(...args));
+      routingMutation = result.catch(() => {});
+      return result;
+    };
+  }
   for (const name of LEASE_PROTECTED_TOOLS) {
     const fn = tools[name];
     if (!fn) continue;
@@ -2301,6 +2431,18 @@ export function makeTools({ engine, pacServer, mode = 'in-process' }) {
   // The daemon must still release sockets/routing on SIGTERM while a task
   // holds a lease. Symbols are never addressable through JSON-RPC tool names.
   Object.defineProperty(tools, INTERNAL_CAPTURE_CONTROL, { value: { stop_proxy, start_sim_watcher } });
+  Object.defineProperty(tools, INTERNAL_ROUTING_CONTROL, { get: routingController });
+  if (mode === 'daemon') for (const [name, fn] of Object.entries(tools)) {
+    tools[name] = async (args = {}, context = {}) => {
+      const result = await fn(args, context);
+      const status = await routingSnapshot();
+      const claim = status.claims.find(c => owned(c, context));
+      if (!claim || claim.state === 'active' || !result || typeof result !== 'object') return result;
+      return { ...result, routing_warning: { state: claim.state,
+        reason: claim.state === 'expired' ? 'lease_expired' : status.routing_lost_reason ?? 'daemon_restart',
+        claim_id: claim.claim_id, recovery: 'Re-arm your routing with set_proxy_routing; call clear_proxy_routing when done.' } };
+    };
+  }
   return tools;
 }
 

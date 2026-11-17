@@ -311,3 +311,25 @@ test('every match_headers in the registry keeps a prototype-shaped key the calle
   }
   assert.equal({}.evil, undefined);
 });
+
+test('routing contracts declare claims, loss reasons and warnings for every tool', () => {
+  const claim = { claim_id: 'claim-1', client_id: 'client-a', task_id: null,
+    domains: ['a.test'], expires_at: new Date().toISOString(), state: 'expired', mine: true };
+  const warning = { state: 'expired', reason: 'lease_expired', claim_id: claim.claim_id, recovery: 'Call set_proxy_routing.' };
+  for (const tool of MCP_TOOLS) {
+    // Every result schema must reject a malformed warning, including tools
+    // without a specialized data contract.
+    const result = successToolResult(tool.name, {}, { routing_warning: { ...warning, state: 'bad' } }).structuredContent;
+    assert.equal(tool.outputSchema.safeParse(result).success, false, tool.name);
+  }
+  const validate = (name, data) => MCP_TOOLS.find(t => t.name === name).outputSchema.safeParse(successToolResult(name, {}, data).structuredContent).success;
+  assert.equal(validate('get_proxy_status', { routing_claims: [claim], routing_union: ['a.test'], routing_lost_reason: 'lease_expired', routing_lost_at: claim.expires_at, routing_warning: warning }), true);
+  assert.equal(validate('get_proxy_status', { routing_claims: [{ ...claim, mine: 'yes' }] }), false);
+  assert.equal(validate('get_proxy_status', { routing_lost_reason: 'unknown' }), false);
+  assert.equal(validate('set_proxy_routing', { status: 'routing_on', claim, routing_union: ['a.test'] }), true);
+  assert.equal(validate('clear_proxy_routing', { status: 'routing_off', claim: null, routing_union: [], removed_other_claims: [claim] }), true);
+  assert.equal(validate('set_proxy_routing', { routing_union: [42] }), false);
+  assert.equal(validate('enable_ssl_proxying', { routing: { claim, routing_union: ['a.test'] } }), true);
+  assert.equal(validate('start_proxy', { routing: { routing_union: [42] } }), false);
+  assert.equal(MCP_TOOLS.find(t => t.name === 'clear_proxy_routing').inputSchema.scope.safeParse('all').success, true);
+});
