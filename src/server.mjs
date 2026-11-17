@@ -33,7 +33,7 @@ import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/net
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
 import { createDaemonPacServer } from './lib/pac-host.mjs';
-import { makeTools } from './lib/tools.mjs';
+import { makeTools, INTERNAL_ROUTING_CONTROL } from './lib/tools.mjs';
 import {
   readState, isStateStale, defensiveNetworkResetAllServices, sweepStaleTempFiles, readProcessIdentity,
   writePidFile, readPidFile, clearPidFile, clearState, patchState, readHandshake,
@@ -206,6 +206,9 @@ async function runDaemon(args) {
     const routingDeadline = performance.now() + Math.min(6000, remaining());
     let routingRestored = false;
     await step('routing', 6000, async () => {
+      // Stop claim-expiry timers first so no sync re-applies routing mid-shutdown;
+      // claims stay on disk for re-arm after restart.
+      try { tools[INTERNAL_ROUTING_CONTROL]?.stop?.(); } catch { /* best effort */ }
       await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, {
         routingOnly: true, timeoutCapMs: () => Math.max(0, routingDeadline - performance.now()),
       });
