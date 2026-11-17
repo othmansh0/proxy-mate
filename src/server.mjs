@@ -31,6 +31,7 @@ import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/net
 
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
+import { createDaemonPacServer } from './lib/pac-host.mjs';
 import { makeTools } from './lib/tools.mjs';
 import {
   readState, isStateStale, defensiveNetworkResetAllServices,
@@ -169,7 +170,7 @@ async function runDaemon(args) {
     try { await engine.setActiveSession(priorState.active_session_id, { create: false }); }
     catch (error) { engine.diagnostics.push({ kind: 'session-restore-failed', code: error.code ?? 'SESSION_RESTORE_FAILED' }); }
   }
-  const pacServer = new PacServer();
+  const pacServer = createDaemonPacServer();
   const tools = makeTools({ engine, pacServer, mode: 'daemon' });
 
   const { domains, tls_passthrough } = await loadDomainsConfig(args);

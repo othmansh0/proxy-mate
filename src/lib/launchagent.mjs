@@ -114,7 +114,7 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
   if (domainsFile) programArgs.push('--domains-file', path.resolve(domainsFile));
   for (const a of extraArgs) programArgs.push(a);
 
-  const environment = serviceEnvironment();
+  const environment = { ...serviceEnvironment(), PROXY_MATE_PAC_HOST: 'guardian', PROXY_MATE_PAC_PORT: String(pacPort ?? 8081) };
   // Retain the previous CWD authorization boundary for explicit fixture reads.
   // Files under protected folders may still require macOS user permission.
   environment.PROXY_MATE_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXY_MATE_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);

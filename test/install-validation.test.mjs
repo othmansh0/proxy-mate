@@ -28,7 +28,7 @@ for (const mode of ['fresh', 'upgrade', 'legacy migration']) {
       await fs.writeFile(path.join(root, `${label}.plist`), 'old Background plist');
       jobs.add(label);
     }
-    await installLaunchAgent({ serverPath: '/fixture/src/server.mjs' }, {
+    await installLaunchAgent({ serverPath: '/fixture/src/server.mjs', ...(mode === 'upgrade' ? { pacPort: 43210 } : {}) }, {
       plistDir: root,
       stage: async () => ({ directory: root, serverPath: path.join(root, 'src/server.mjs'), sourceRoot: root }),
       read: async () => null,
@@ -44,6 +44,8 @@ for (const mode of ['fresh', 'upgrade', 'legacy migration']) {
     });
     for (const [label, processType] of priorities) {
       const xml = await fs.readFile(path.join(root, `${label}.plist`), 'utf8');
+      assert.match(xml, /<key>PROXY_MATE_PAC_HOST<\/key><string>guardian<\/string>/);
+      assert.ok(xml.includes(`<key>PROXY_MATE_PAC_PORT</key><string>${mode === 'upgrade' ? 43210 : 8081}</string>`));
       assert.match(xml, new RegExp(`<key>ProcessType</key>\\s*<string>${processType}</string>`));
     }
     assert.deepEqual([...jobs].sort(), [LABEL, GUARDIAN_LABEL].sort());
