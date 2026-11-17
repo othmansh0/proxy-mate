@@ -70,11 +70,11 @@ test('contracts validate attribution and routing devices', () => {
   assert.equal(input.device_udid.safeParse('bad').success, false);
   for (const name of ['get_flows', 'filter_flows', 'get_flow_detail']) {
     const def = MCP_TOOLS.find(t => t.name === name);
-    const f = { id: 'a', owner_client: 'a', owner_task: null, device_udid: d1, attribution: 'device' };
-    const result = successToolResult(name, {}, name === 'get_flow_detail' ? f : { flows: [f] }).structuredContent;
+    const f = { scope_applied: 'all', hidden_count: 0, id: 'a', owner_client: 'a', owner_task: null, device_udid: d1, attribution: 'device' };
+    const result = successToolResult(name, {}, name === 'get_flow_detail' ? f : { scope_applied: 'all', hidden_count: 0, flows: [f] }).structuredContent;
     assert.equal(def.outputSchema.safeParse(result).success, true);
     f.attribution = 'invalid';
-    assert.equal(def.outputSchema.safeParse({ ...result, data: name === 'get_flow_detail' ? f : { flows: [f] } }).success, false);
+    assert.equal(def.outputSchema.safeParse({ ...result, data: name === 'get_flow_detail' ? f : { scope_applied: 'all', hidden_count: 0, flows: [f] } }).success, false);
   }
 });
 test('v2 database migrates forward idempotently without rewriting old JSON or counts', async t => {

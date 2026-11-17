@@ -35,7 +35,7 @@ test('high-traffic tools validate their canonical output payloads while retainin
 
   const flows = successToolResult('get_flows', {}, {
     flows: [{ id: 'f-1', request: { method: 'GET', url: 'https://example.test' }, response: { statusCode: 200 } }],
-    total: 1, has_more: false,
+    scope_applied: "all", hidden_count: 0, total: 1, has_more: false,
   }).structuredContent;
   assert.equal(MCP_TOOLS.find((tool) => tool.name === 'get_flows').outputSchema.safeParse(flows).success, true);
 
@@ -45,7 +45,7 @@ test('high-traffic tools validate their canonical output payloads while retainin
 
 test('captured headers preserve repeated values and redact sensitive arrays', () => {
   const detail = successToolResult('get_flow_detail', {}, {
-    id: 'repeated-headers',
+    id: 'repeated-headers', scope_applied: 'all', hidden_count: 0,
     request: { headers: { accept: ['application/json', 'text/plain'], authorization: ['Bearer secret'] } },
     response: { statusCode: 200, headers: {
       'content-type': 'application/json',

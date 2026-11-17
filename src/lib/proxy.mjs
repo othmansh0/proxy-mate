@@ -702,6 +702,24 @@ export class ProxyEngine {
     }
   }
 
+  forgetPurgedFlows(ids) {
+    const removed = new Set(ids);
+    for (const id of removed) {
+      this.flows.delete(id);
+      this.flowCacheBytes -= this.flowCacheSizes.get(id) ?? 0;
+      this.flowCacheSizes.delete(id);
+    }
+    this.flowOrder = this.flowOrder.filter(id => !removed.has(id));
+  }
+
+  async purgeScopedFlows(options) {
+    await Promise.allSettled([...this.flowPersistence.values()]);
+    const result = await this.sessionStore.deleteFlowsByScope(options);
+    if (options.sessionId === this.sessionId) this.forgetPurgedFlows(result.purged_flow_ids);
+    await Promise.all(result.purged_flow_ids.map(id => deleteFlowBodies(id)));
+    return result;
+  }
+
   async clearFlows() {
     const priorIds = [];
     let cursor = null;
