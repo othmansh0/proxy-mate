@@ -2,35 +2,79 @@
 
 ## Unreleased
 
-- Enforce evidence scopes across flow/body exports, replay, WebSocket inspection and OpenAPI validation; protect shared import replacements and clarify resource-scoped leases.
-- Cancel in-flight routing safely during shutdown, journal suspension before restoration, preserve stopped and expired claims without reactivation, and honor custom daemon PAC ports.
+Multi-agent reliability release. Many agents can now share one daemon on a heavily loaded Mac. A slow daemon is no longer killed. Routing survives restarts. Each agent's evidence, routing, leases, rules and breakpoints are scoped to that agent by default. The root causes and load-test evidence are in `docs/RELIABILITY_AUDIT.md`.
 
-- Upgrade note: rule IDs now default to a caller namespace and rules persist ownership; live foreign mutations require `force`, while `clear_rules` defaults to caller-owned and legacy rules (`scope: "all"` requires `confirm_shared: true`). Rules keep matching all traffic by default because mocks usually target the app under test; opt into `match_scope: "mine"` for owner-device or uniquely claimed-host matching. Legacy saved rules remain unowned and mutable. Rule lists/exports hide foreign task ownership, and JSON mocks preserve `match_headers`.
-- Add isolated three-bridge multi-agent regression and JSON qualification evidence for scoped traffic, breakpoints, restart recovery, drain and presence (routing qualification pending PAC-port wiring); record guardian policy decisions separately and retry load-harness port races.
+### Upgrade notes (behaviour changes)
 
-- Upgrade note: new clients create breakpoints scoped to their claimed devices or unambiguous hosts by default (`scope: "all"` restores shared matching); skipped traffic is counted in breakpoint history/status. Global capture controls and Simulator app restarts now require `force: true` while other live clients hold routing claims. App restarts default to the caller’s claimed devices.
-- Upgrade note: capture leases now protect individual task resources and persist across crashes in leases.json. Heartbeats renew leases; expired or absent owners leave visible orphan resources. Independent tasks and cross-client breakpoint resolution can proceed; finish_capture_task accepts task_id and cleans only that task’s unchanged resources.
-- Upgrade note: identified clients now read and clear only their evidence by default (`scope: "mine"`); use `scope: "all"` for shared reads and add `confirm_shared: true` for shared wipes. Legacy bridges retain all-scope defaults. Results report hidden or retained evidence counts.
+- **Per-agent routing claims.**
+  - `set_proxy_routing` creates or updates the caller's claim. The PAC serves the union of every live claim, and system routing is cleared only when the last claim ends.
+  - `clear_proxy_routing` clears only your claim; `scope: "all"` clears every claim.
+  - `enable_ssl_proxying` keeps the claim's expiry.
+  - Results warn owners whose claim has expired or is suspended (`routing_warning`), and status reports the union and why routing was lost.
+- **Scoped evidence.**
+  - Identified bridges read, export, replay and clear only their own flows and WebSocket captures by default (`scope: "mine"`). Pass `scope: "all"` for shared reads, and add `confirm_shared: true` for shared wipes and replacements.
+  - Results report `scope_applied` and `hidden_count`.
+  - Shared-host traffic stays visible to every agent that claims the host.
+  - Legacy bridges without a client identity keep all-scope defaults.
+- **Per-task leases.**
+  - Leases protect individual task resources instead of a global lock, and persist across crashes in `leases.json`. Heartbeats renew them.
+  - Absent owners leave visible orphan resources.
+  - Breakpoint resolution is always allowed.
+  - `finish_capture_task` accepts `task_id`.
+- **Rule ownership.**
+  - Default rule IDs are namespaced by caller, and rules persist their owner.
+  - Mutating a live foreign rule needs `force: true`, and otherwise returns `RULE_CONFLICT`.
+  - `clear_rules` defaults to the caller's rules and legacy rules.
+  - Rules still match everyone's traffic unless `match_scope: "mine"`.
+  - `mock_json_response` keeps `match_headers`.
+- **Scoped breakpoints and guarded controls.**
+  - New clients' breakpoints pause only their own device or unambiguous hosts (`scope: "all"` restores shared matching).
+  - `stop_proxy`, `toggle_recording`, app capture and Simulator app restarts refuse with `OTHER_CLIENTS_ACTIVE` while other live agents hold claims, unless `force: true` is passed.
+- **Active-session imports.** Imports cannot replace the active session (`ACTIVE_SESSION_REPLACE_FORBIDDEN`). Import into a new session instead.
+- **LaunchAgents.** The daemon is installed with `ProcessType=Interactive` and the guardian with `Standard`; both were `Background`, the lowest scheduling band. The daemon's launchd `ExitTimeOut` is 30 s. Re-run `proxy-mate install` or `init --upgrade` to apply this.
 
-- Preserve routing suspension and re-arm active agent claims after daemon restarts only while restored PAC settings remain unchanged, with bounded retries and retained expiry metadata. `--no-routing` disables CLI domain routing; existing agent claims may still re-arm.
-- Track bridge presence with quiet heartbeats, renew only the caller’s routing deadlines without network churn, and release absent clients’ claims while preserving other captures.
+### Supervision
 
-- Attribute captured flows to routing claim owners and Simulator devices, with durable owner and device indexes.
-- Preserve slow daemon owners using worker liveness, scale guardian probe and failure windows with load, and record bounded slow/hung diagnostics.
-- Serve the read-only union PAC from the guardian across daemon restarts, with explicit in-process fallback when the guardian host is unavailable.
-- Upgrade note: routing tools now manage per-agent/task claims; clear_proxy_routing clears only your claim (scope "all" clears everyone). SSL additions preserve expiry, status exposes the union and routing loss, and daemon results warn owners of expired or suspended claims. Active pre-claims legacy routing is left untouched until explicitly cleared.
-- Restore system routing before daemon shutdown work, bound control and drain waits within a 20-second deadline, and give launchd 30 seconds while preserving routing claims.
-- Offload large capture bodies to a lazy bounded worker pool, decode text once, skip metadata-only hashes, and safely omit bodies when processing is overloaded.
+- The guardian keeps slow daemons alive. A worker-thread liveness probe reports the main loop's heartbeat age and traffic progress. The guardian terminates only a hung or unreachable owner, after windows that scale with host load.
+- Guardian termination runs across ticks:
+  - shutdown intent is recorded before SIGTERM;
+  - SIGKILL waits 25 s;
+  - process checks scale with load;
+  - every failed step is logged and journaled with its message and timing.
+- Health probes are answered before control-plane rate and concurrency limits. Rate buckets are per bridge, and long calls use their own pool. Rejections are counted and exposed through an authenticated `/metrics`.
+- Bridges reuse a successful readiness check for 2 s and back off during outages. Resource subscriptions poll every 3 s instead of 750 ms.
 
-- Give guardian-initiated shutdowns 25 seconds before escalation, record shutdown intent and load-aware diagnostics, and retry failed recovery steps without blocking ticks.
-- Add an isolated daemon load harness with real bridge and guardian probes, optional CPU starvation and background scheduling, JSON evidence, and owned-process cleanup.
-- Keep authenticated health probes available under agent load, isolate bridge rate and long-call budgets, expose control metrics, and reduce bridge readiness and subscription polling.
-- Add an authenticated worker-thread liveness probe with heartbeat age and traffic progress, plus event-loop delay and utilization gauges, so supervision can distinguish a slow main loop from a stalled process.
-- Keep Simulator traffic responsive under build load with Interactive daemon and Standard guardian LaunchAgents; reject unusable custom CA paths before installation with coded diagnostics and recovery hints.
-- Drain proxy and app gateway connections before shutdown; add contextual abort logs, progress/drop metrics, and actionable custom CA errors.
-- Add durable per-client routing claims and a union PAC controller so clearing or expiring one claim preserves other captures; scale network command deadlines with host load.
-- Preserve runtime history in rotating append-only journals, verify daemon process identity, sweep abandoned temp files, and attribute shutdowns and startup failures with phase timings and ports.
-- Batch capture writes, cache storage counts, and append WebSocket journals with bounded compaction to reduce event-loop stalls under concurrent captures.
+### Routing and PAC
+
+- Durable per-client routing claims with a union PAC controller. Network command deadlines scale with host load.
+- The guardian serves the PAC from claims, so the PAC URL survives daemon restarts. There is an explicit, logged in-process fallback.
+- Shutdown restores system routing first, inside a 20 s budget.
+- A restart, recovery or shutdown suspends routing. The daemon re-arms surviving claims only when the system auto-proxy still matches what was restored, so VPN and external changes are never overridden. A cancelled re-arm cannot start new network changes. Suspension is journaled before restoration.
+- `stop_proxy` pauses claim expiry until `start_proxy`. Expired claims are never revived by heartbeats or resurrected by the PAC host.
+- The daemon honours a custom `--pac-port`.
+
+### Presence and attribution
+
+- Bridges send quiet heartbeats. Renewal extends only the caller's deadlines, without network changes. Absent clients' claims and leases are released while other captures are kept.
+- Captured flows record the owning claim and Simulator device (`owner_client`, `owner_task`, `device_udid`, `attribution`).
+
+### Data plane and storage
+
+- The proxy and app gateway drain in-flight connections before stopping (`PROXY_MATE_DRAIN_MS`, default 8000). Tunnels are closed at the deadline.
+- Large capture bodies are redacted and hashed in a bounded worker pool. Text is decoded once, metadata-only capture skips hashing, and overloaded processing omits bodies safely.
+- Capture writes are batched, storage counts cached, and WebSocket captures appended with bounded compaction.
+
+### Observability and robustness
+
+- Log lines are timestamped. Aborted requests are logged with flow id, method and host, never paths or bodies.
+- Progress, drop and event-loop metrics are recorded.
+- Rotating append-only runtime journals; daemon process identity checked by start time and boot session; abandoned temp files swept; shutdowns, startup failures and unrecorded exits attributed, with phase timings and ports.
+- Custom CA paths are validated at install and start, with coded errors and recovery hints.
+
+### Testing and qualification
+
+- `scripts/load-qualify.mjs` is an isolated load harness. It covers real bridges and guardian decisions, optional CPU starvation and Background-band emulation, and JSON evidence. `scripts/qualify-multi-agent.mjs` and `test/multi-agent.integration.test.mjs` add a three-bridge regression.
+- Test runs can never touch a real installation. Under `node --test`, each process gets a private temporary state directory, and the real `networksetup` is refused. Gated test-only fakes for networksetup, host-trust status and heartbeat timing are inert in production.
 
 ## 0.9.1 — 2026-11-16
 
