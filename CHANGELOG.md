@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add isolated three-bridge multi-agent regression and JSON qualification evidence for scoped traffic, breakpoints, restart recovery, drain and presence (routing qualification pending PAC-port wiring); record guardian policy decisions separately and retry load-harness port races.
+
 - Upgrade note: new clients create breakpoints scoped to their claimed devices or unambiguous hosts by default (`scope: "all"` restores shared matching); skipped traffic is counted in breakpoint history/status. Global capture controls and Simulator app restarts now require `force: true` while other live clients hold routing claims. App restarts default to the caller’s claimed devices.
 - Upgrade note: capture leases now protect individual task resources and persist across crashes in leases.json. Heartbeats renew leases; expired or absent owners leave visible orphan resources. Independent tasks and cross-client breakpoint resolution can proceed; finish_capture_task accepts task_id and cleans only that task’s unchanged resources.
 - Upgrade note: identified clients now read and clear only their evidence by default (`scope: "mine"`); use `scope: "all"` for shared reads and add `confirm_shared: true` for shared wipes. Legacy bridges retain all-scope defaults. Results report hidden or retained evidence counts.

@@ -39,7 +39,7 @@ export function summarize(events) {
 }
 
 export function failsQualification(report) {
-  return report.guardian.timeline.some(e => e.action === 'restart_requested' || e.action.startsWith('terminating'))
+  return (report.guardian.policy_decisions?.length ?? 0) > 0 || (report.guardian.terminations?.length ?? 0) > 0 || report.guardian.timeline.some(e => e.action === 'restart_requested' || e.action.startsWith('terminating'))
     || report.requests.total === 0 || report.requests.failures / report.requests.total > .01;
 }
 

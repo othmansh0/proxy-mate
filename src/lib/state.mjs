@@ -1,3 +1,4 @@
+import { networksetupBinary } from './test-hooks.mjs';
 // state.json — persisted daemon state for crash recovery.
 //
 // Pattern (per Agent D's research): SIGKILL/OOM never fires user code. The
@@ -14,7 +15,7 @@ import { promisify } from 'node:util';
 import { STATE_DIR } from './config.mjs';
 
 const execFileP = promisify(execFile);
-const NETWORKSETUP = '/usr/sbin/networksetup';
+const NETWORKSETUP = networksetupBinary();
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const PID_FILE = path.join(STATE_DIR, 'daemon.pid');
 const HANDSHAKE_FILE = path.join(STATE_DIR, 'handshake.json');
@@ -170,7 +171,7 @@ export function assertRealNetworkCommandAllowed(env = process.env) {
 // Targeted reset: clear only the autoproxy on the service we configured.
 export async function targetedAutoProxyOff(service) {
   if (!service) return false;
-  assertRealNetworkCommandAllowed();
+  if (NETWORKSETUP === '/usr/sbin/networksetup') assertRealNetworkCommandAllowed();
   try { await execFileP(NETWORKSETUP, ['-setautoproxystate', service, 'off']); }
   catch { /* ignore */ }
   return true;

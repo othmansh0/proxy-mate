@@ -1,3 +1,4 @@
+import { fakeHostTrust } from './test-hooks.mjs';
 import { createBreakpointScope } from './breakpoints.mjs';
 // Shared tool implementations. Both the daemon's control HTTP server and the
 // in-process MCP-server route through these functions. Each tool returns
@@ -86,6 +87,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   pacPort = PAC_PORT_DEFAULT, now = Date.now, setTimer, clearTimer,
   hostCertificateStatus = getHostCertificateStatus,
 }) {
+  const fakeTrust = fakeHostTrust(); // Test-only read-only status override, never certificate operations.
+  if (fakeTrust) logLine('daemon', 'test-only fake host trust status active');
   const claims = createRoutingClaimsStore({ now });
   let controller;
   let routingOptions = {};
@@ -617,7 +620,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   async function set_proxy_routing(args = {}, context = {}) {
     await ensureProxyRunning();
     if (appGateway) throw Object.assign(new Error('Stop app-only capture before selecting domain or Mac-wide capture.'), { code: 'APP_CAPTURE_ACTIVE' });
-    const hostTrust = await hostCertificateStatus(await activeCaCertificate());
+    const hostTrust = fakeTrust ? { trusted: true } : await hostCertificateStatus(await activeCaCertificate());
     if (!hostTrust.trusted) throw Object.assign(new Error('Trust the active CA with setup_host_certificate before changing Mac routing. No routing settings were changed.'), {
       code: 'HOST_CA_UNTRUSTED', retryable: false, recovery: ['Call setup_host_certificate, then retry the scoped routing request.'],
     });
@@ -888,6 +891,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       mock_rules_count: engine.mockRules.size,
       flows_count: engine.flows.size,
       diagnostics_count: engine.diagnostics.length,
+      ...(fakeTrust ? { fake_host_trust: true } : {}),
       recording: engine.recording,
       routing_active: state?.routing_active ?? false,
       network_service: state?.network_service ?? null,
