@@ -110,6 +110,7 @@ async function daemonFixture(failPhase) {
   const noOp = async () => {};
   const internal = Symbol();
   const deps = {
+    readEnvironment: () => undefined,
     configureConnectionAttempts() {}, acquireRuntime: async () => { if (failPhase === 'lock') throw Object.assign(new Error('busy'), { code: 'RUNTIME_BUSY' }); return noOp; }, reconcileRuntime: async () => { if (failPhase === 'reconcile') throw Object.assign(new Error('stale'), { code: 'RECOVERY_FAILED' }); },
     sweepStaleTempFiles: noOp, STATE_DIR: home, startLogMaintenance: () => () => {},
     startEventLoopMetrics: () => ({ stop() {} }), startLiveness: async () => ({ stop: noOp }),

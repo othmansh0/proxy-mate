@@ -514,7 +514,28 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     }
   }
 
-  async function stop_proxy() {
+  async function stop_proxy(_args = {}, { routingOnly = false, skipRouting = false, timeoutCapMs, graceMs } = {}) {
+    // Only the symbol-addressed daemon path supplies these internal options.
+    if (routingOnly) {
+      try { return await clearPacRouting({ pacServer, timeoutCapMs }); }
+      finally { await patchState({ routing_suspended: { reason: 'daemon_shutdown', at: new Date().toISOString() } }); }
+    }
+    if (skipRouting) {
+      // Drain gateway and engine together; a failed auxiliary stop must not
+      // prevent the proxy from closing or capture persistence from flushing.
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => appGateway?.stop({ graceMs })),
+        Promise.resolve().then(() => engine.stop({ graceMs })),
+        Promise.resolve().then(() => stop_sim_watcher()),
+        Promise.resolve().then(() => onboardingPortal.stop()),
+        Promise.resolve().then(() => reverseProxies.stopAll()),
+      ]);
+      appGateway = null; appScope = null;
+      await patchState({ proxy_port: null, capture_scope: null, stopped_at: new Date().toISOString() });
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
+      return results[1].value;
+    }
     let routingCleanupError = null;
     try { await clearPacRouting({ pacServer }); }
     catch (error) { routingCleanupError = error?.message ?? String(error); }

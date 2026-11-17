@@ -181,26 +181,61 @@ async function runDaemon(args) {
   let ctrl = null;
   let finishStartup;
   const startupSettled = new Promise((resolve) => { finishStartup = resolve; });
-  const cleanup = async () => {
+  const cleanup = async (deadline = performance.now() + 19000) => {
+    // Leave one second for installShutdownHandlers' final event-journal flush.
+    const remaining = () => Math.max(0, deadline - performance.now());
+    const step = async (name, budgetMs, run) => {
+      const started = performance.now();
+      let timer, ok = false;
+      try {
+        const result = await Promise.race([
+          Promise.resolve().then(run),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${name} shutdown budget exhausted`)), Math.max(0, Math.min(budgetMs, remaining()))); }),
+        ]);
+        ok = true;
+        return result;
+      } catch (error) {
+        logLine('daemon', 'shutdown step failed', { step: name, ...errorFields(error) });
+      } finally {
+        clearTimeout(timer);
+        logLine('daemon', 'shutdown step', { step: name, elapsed_ms: Math.round(performance.now() - started), ok });
+      }
+    };
     stopLogMaintenance();
     await startupSettled;
-    // Cancel control work before draining capture or restoring routing.
-    await ctrl?.stop();
-    await tools.stop_operator_ui();
-    const stopped = await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy();
-    await clearPidFile();
-    if (!stopped.routing_cleanup_error) {
-      const lease = (await readState())?.capture_lease;
+    const routingDeadline = performance.now() + Math.min(6000, remaining());
+    let routingRestored = false;
+    await step('routing', 6000, async () => {
+      await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, {
+        routingOnly: true, timeoutCapMs: () => Math.max(0, routingDeadline - performance.now()),
+      });
+      routingRestored = true;
+    });
+    await step('control', 3000, async () => {
+      const result = await ctrl?.stop({ queueTimeoutMs: Math.min(3000, remaining()) });
+      if (result?.queue_drained === false) throw new Error('Control queue shutdown budget exhausted');
+    });
+    await step('operator_ui', 1000, () => tools.stop_operator_ui());
+    const configuredDrain = Number(readEnvironment('PROXY_MATE_DRAIN_MS') ?? 8000);
+    const graceMs = Math.max(0, Math.min(Number.isFinite(configuredDrain) && configuredDrain >= 0 ? configuredDrain : 8000, remaining() - 3000));
+    await step('capture', Math.max(0, remaining() - 2000), () => tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, { skipRouting: true, graceMs }));
+    await step('pid', 250, () => clearPidFile());
+    await step('state', 500, async () => {
+      if (!routingRestored) return; // Keep routing breadcrumbs for recovery.
+      const state = await readState();
+      const lease = state?.capture_lease;
       await clearState();
       await patchState({ active_session_id: engine.sessionId,
+        routing_suspended: state?.routing_suspended,
         ...(lease && Date.parse(lease.expires_at) > Date.now() ? { capture_lease: lease } : {}) });
-    }
-    await stopObservability();
-    await releaseRuntime();
+    });
+    await step('observability', 500, () => stopObservability());
+    await step('lock', remaining(), () => releaseRuntime());
   };
   const shutdown = installShutdownHandlers(async () => {
+    const deadline = performance.now() + 19000;
     await startupSettled;
-    if (startupResourcesReady) return cleanup();
+    if (startupResourcesReady) return cleanup(deadline);
     stopLogMaintenance();
     await stopObservability();
     await releaseRuntime();

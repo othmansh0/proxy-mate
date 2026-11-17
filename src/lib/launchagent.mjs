@@ -62,7 +62,7 @@ ${argsXml}
   <key>WorkingDirectory</key>
   <string>${escapeXml(path.dirname(path.dirname(programArgs[1])))}</string>
   <key>ExitTimeOut</key>
-  <integer>20</integer>
+  <integer>${label === LABEL ? 30 : 20}</integer>
   <key>ProcessType</key>
   <string>${escapeXml(processType)}</string>
   <key>StandardOutPath</key>
