@@ -22,13 +22,18 @@ import { selectNetworkService } from './network-service.mjs';
 const execFileP = promisify(execFile);
 const NETWORKSETUP = '/usr/sbin/networksetup';
 // Sample host load for every command, including rollback commands.
-async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.availableParallelism(), timeoutCapMs = Infinity } = {}) {
+async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.availableParallelism(), timeoutCapMs = Infinity, signal, deadline } = {}) {
+  signal?.throwIfAborted();
   const load = Number(loadavg()[0]);
-  const cap = typeof timeoutCapMs === 'function' ? timeoutCapMs() : timeoutCapMs;
+  const cap = Math.min(typeof timeoutCapMs === 'function' ? timeoutCapMs() : timeoutCapMs, deadline == null ? Infinity : deadline - performance.now());
   if (cap <= 0) throw Object.assign(new Error('Routing budget exhausted.'), { code: 'ROUTING_COMMAND_TIMEOUT' });
   const timeout = Math.max(1, Math.min(Math.ceil(cap), 20000, Math.ceil(5000 * Math.max(1, (Number.isFinite(load) ? load : 0) / Math.max(1, cores)))));
   if (run === execFileP) assertRealNetworkCommandAllowed();
-  try { return await run(NETWORKSETUP, args, { timeout, maxBuffer: 1024 * 1024 }); }
+  try {
+    const result = await run(NETWORKSETUP, args, { timeout, signal, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 });
+    signal?.throwIfAborted();
+    return result;
+  }
   catch (error) {
     if (error?.killed || error?.code === 'ETIMEDOUT' || error?.code === 'ERR_CHILD_PROCESS_TIMEOUT') {
       throw Object.assign(new Error(`Routing command timed out after ${timeout} ms.`, { cause: error }), {
@@ -201,7 +206,7 @@ export async function getAutoProxyState(networkService, run = execFileP, options
     const enabled = /^Enabled:[ \t]*Yes[ \t]*$/mi.test(stdout);
     return { enabled, url };
   } catch (error) {
-    if (error?.code === 'ROUTING_COMMAND_TIMEOUT') throw error;
+    if (options.signal?.aborted || error?.code === 'ABORT_ERR' || error?.code === 'ROUTING_COMMAND_TIMEOUT') throw error;
     return { enabled: false, url: '', unreadable: error?.message ?? String(error) };
   }
 }
@@ -221,10 +226,10 @@ export async function applyPacRouting(options) {
 
 async function applyValidatedPacRouting({ domains, networkService, pacPort, proxyPort, pacServer,
   allowBroad = false, replaceExisting = false, durationSeconds = 3600,
-  run = execFileP, select = pickActiveNetworkService, loadavg, cores, manageLease = true,
+  run = execFileP, select = pickActiveNetworkService, loadavg, cores, manageLease = true, signal, deadline, timeoutCapMs, routingMode = 'legacy', expectedAutoProxy, priorAutoProxyOverride,
 }) {
   const rawRun = run;
-  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores });
+  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores, signal, deadline, timeoutCapMs });
   if (!Number.isInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 86400) throw routingError('ROUTING_LEASE_INVALID', 'Routing duration must be 1-86400 seconds.');
   const service = await select(networkService);
   let currentState = await readState();
@@ -237,8 +242,9 @@ async function applyValidatedPacRouting({ domains, networkService, pacPort, prox
   }
   const actualBefore = await getAutoProxyState(service, run);
   if (actualBefore.unreadable) throw routingError('ROUTING_SNAPSHOT_FAILED', 'Cannot read current PAC settings; nothing was changed.');
+  if (expectedAutoProxy && (actualBefore.enabled !== expectedAutoProxy.enabled || actualBefore.url !== expectedAutoProxy.url)) throw routingError('ROUTING_CONFLICT', 'System routing changed during re-arm; nothing was changed.');
   const ownedBefore = currentState?.routing_active && currentState.network_service === service && actualBefore.url === currentState.pac_url;
-  const priorAutoProxy = ownedBefore ? currentState.prior_auto_proxy : actualBefore;
+  const priorAutoProxy = priorAutoProxyOverride ?? (ownedBefore ? currentState.prior_auto_proxy : actualBefore);
   if (priorAutoProxy?.unreadable) throw Object.assign(new Error('Cannot snapshot the current PAC configuration; routing was not changed.'), { code: 'ROUTING_SNAPSHOT_FAILED' });
   if (actualBefore.enabled && !ownedBefore && !replaceExisting) throw routingError('ROUTING_CONFLICT', 'Another automatic proxy is enabled. Inspect it first; replacing it requires replace_existing_proxy=true.');
   for (const command of ['-getwebproxy', '-getsecurewebproxy']) {
@@ -248,8 +254,10 @@ async function applyValidatedPacRouting({ domains, networkService, pacPort, prox
   const pacBody = buildPacText(domains, '127.0.0.1', proxyPort);
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.writeFile(PAC_FILE, pacBody);
+  signal?.throwIfAborted();
   pacServer.setBody(pacBody);
   await pacServer.start(pacPort);
+  signal?.throwIfAborted();
   const pacUrl = `http://127.0.0.1:${pacServer.port}/proxy.pac`;
 
   // Pre-record state: pid, modifiedServices, pacUrl. Written BEFORE networksetup
@@ -264,6 +272,7 @@ async function applyValidatedPacRouting({ domains, networkService, pacPort, prox
     domains,
     routing_active: true,
     routing_phase: 'applying',
+    routing_mode: routingMode,
     prior_auto_proxy: priorAutoProxy,
     routing_expires_at: new Date(Date.now() + durationSeconds * 1000).toISOString(),
     started_at: new Date().toISOString(),
@@ -286,9 +295,9 @@ async function applyValidatedPacRouting({ domains, networkService, pacPort, prox
   }
 }
 
-export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP, loadavg, cores, timeoutCapMs } = {}) {
+export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP, loadavg, cores, timeoutCapMs, signal, deadline, verifyRestore = false } = {}) {
   const rawRun = run;
-  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores, timeoutCapMs });
+  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores, timeoutCapMs, signal, deadline });
   const persisted = await readState();
   if (!persisted?.routing_active) {
     await pacServer?.stop();
@@ -307,6 +316,12 @@ export async function clearPacRouting({ pacServer, networkService, recoverStale 
     const prior = persisted.prior_auto_proxy ?? { enabled: false, url: '' };
     await run(NETWORKSETUP, ['-setautoproxyurl', service, prior.url ?? '']);
     await run(NETWORKSETUP, ['-setautoproxystate', service, prior.enabled ? 'on' : 'off']);
+    if (verifyRestore) {
+      const actual = await getAutoProxyState(service, run);
+      if (actual.unreadable || actual.url !== (prior.url ?? '') || actual.enabled !== Boolean(prior.enabled)) {
+        throw routingError('ROUTING_RESTORE_FAILED', 'Restored PAC settings could not be verified; recovery state retained.');
+      }
+    }
   }
   if (pacServer) await pacServer.stop();
   await patchState({ routing_active: false, routing_phase: null, routing_expires_at: null, cleared_at: new Date().toISOString() });
@@ -315,9 +330,9 @@ export async function clearPacRouting({ pacServer, networkService, recoverStale 
 
 // Persist independently of state.json so reconciliation cannot erase intent.
 export async function recordRoutingSuspension({ state, reason, claims = createRoutingClaimsStore(),
-  now = Date.now, record = recordRuntimeEvent } = {}) {
+  now = Date.now, record = recordRuntimeEvent, phase = 'complete' } = {}) {
   if (!state?.network_service) return;
-  const suspension = { reason, at: new Date(now()).toISOString(), network_service: state.network_service,
+  const suspension = { reason, phase, at: new Date(now()).toISOString(), network_service: state.network_service,
     restored_auto_proxy: state.prior_auto_proxy ?? { enabled: false, url: '' }, pac_url: state.pac_url };
   await claims.setSuspension(suspension);
   await record('routing_suspended', { details: suspension });
@@ -325,7 +340,7 @@ export async function recordRoutingSuspension({ state, reason, claims = createRo
 
 // Each retry repeats the comparison: a VPN change during backoff wins too.
 export async function rearmRouting({ claims = createRoutingClaimsStore(), controller, run = execFileP,
-  record = recordRuntimeEvent, now = Date.now, signal,
+  record = recordRuntimeEvent, now = Date.now, signal, deadline,
   wait = ms => delay(ms, undefined, { signal, ref: false }), retryDelays = [20000, 40000, 60000],
 } = {}) {
   const emit = (event, details) => record(event, { details });
@@ -336,12 +351,17 @@ export async function rearmRouting({ claims = createRoutingClaimsStore(), contro
     const suspension = await claims.getSuspension();
     if (!suspension) return;
     try {
-      const current = await getAutoProxyState(suspension.network_service, run);
-      if (current.unreadable || current.enabled !== suspension.restored_auto_proxy.enabled || current.url !== suspension.restored_auto_proxy.url) {
+      const current = await getAutoProxyState(suspension.network_service, run, { signal, deadline });
+      const restored = current.enabled === suspension.restored_auto_proxy.enabled && current.url === suspension.restored_auto_proxy.url;
+      const pendingOwned = suspension.phase === 'pending' && current.enabled && current.url === suspension.pac_url;
+      if (current.unreadable || (!restored && !pendingOwned)) {
         await emit('routing_not_rearmed', { reason: 'external_change' }); return;
       }
       if (signal?.aborted) return;
-      await controller.sync({ networkService: suspension.network_service, replaceExisting: true });
+      await controller.resume?.();
+      await controller.sync({ networkService: suspension.network_service, replaceExisting: true, signal, deadline, expectedAutoProxy: current,
+        priorAutoProxyOverride: pendingOwned ? suspension.restored_auto_proxy : undefined });
+      if (signal?.aborted) return;
     } catch (error) {
       await emit('routing_not_rearmed', { reason: 'rearm_failed', code: error.code ?? 'ROUTING_REARM_FAILED' });
       if (attempt >= retryDelays.length || signal?.aborted) return;
@@ -363,13 +383,22 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
 }) {
   let queue = Promise.resolve(), timer = null, stopped = false;
   let lastChange = null;
+  let cancellation = new AbortController(), inFlight = Promise.resolve();
   const stamp = () => new Date(now()).toISOString();
   const emit = (event, details) => Promise.resolve().then(() => record(event, { details })).catch(() => {});
   const serialize = fn => {
     const result = queue.then(fn); queue = result.catch(() => {}); return result;
   };
   const domainsOf = rows => [...new Set(rows.flatMap(c => c.domains))].sort();
-  const commandOptions = { pacServer, networkService, run, loadavg, cores };
+  const trackedRun = (...args) => {
+    inFlight = Promise.resolve().then(() => {
+      if (run === execFileP) assertRealNetworkCommandAllowed();
+      args[2]?.signal?.throwIfAborted();
+      return run(...args);
+    });
+    return inFlight;
+  };
+  const commandOptions = { pacServer, networkService, run: trackedRun, loadavg, cores };
   async function sweep() {
     const { expired } = await claims.sweepExpired({ now: now() });
     for (const c of expired) await emit('routing_claim_expired', { claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id });
@@ -392,6 +421,9 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
     timer?.unref?.();
   }
   async function syncInternal(options = {}, reason = 'sync') {
+    if (stopped) return statusInternal();
+    const signal = options.signal ? AbortSignal.any([options.signal, cancellation.signal]) : cancellation.signal;
+    signal.throwIfAborted();
     const rows = await claims.listClaims({ now: now() });
     const domains = domainsOf(rows);
     try {
@@ -399,27 +431,32 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
       if (domains.length) {
         const service = options.networkService ?? await select(networkService);
         const targetPort = typeof proxyPort === 'function' ? proxyPort() : proxyPort;
+        if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw routingError('PROXY_NOT_RUNNING', 'Start the proxy before applying routing.');
+        signal.throwIfAborted();
         if (state?.routing_active && state.pid !== process.pid) throw routingError('ROUTING_OWNED', 'Routing is owned by another runtime.');
         if (state?.routing_active && state.network_service === service && pacServer.port != null) {
           clearTimeout(pacServer.leaseTimer); pacServer.leaseTimer = null;
           const body = buildPacText(domains, '127.0.0.1', targetPort);
           await fs.writeFile(PAC_FILE, body);
+          signal.throwIfAborted();
           pacServer.setBody(body);
-          await patchState({ domains, routing_expires_at: rows.map(c => c.expires_at).sort()[0] });
+          await patchState({ domains, routing_mode: 'claims', routing_expires_at: rows.map(c => c.expires_at).sort()[0] });
         } else {
           await applyValidatedPacRouting({ ...commandOptions, domains, proxyPort: targetPort, pacPort,
-            select: async () => service, replaceExisting: options.replaceExisting, manageLease: false });
+            select: async () => service, replaceExisting: options.replaceExisting, manageLease: false,
+            signal, deadline: options.deadline, timeoutCapMs: options.timeoutCapMs, routingMode: 'claims',
+            expectedAutoProxy: options.expectedAutoProxy, priorAutoProxyOverride: options.priorAutoProxyOverride });
           // Retire any old single-owner timer when adopting routing.
           clearTimeout(pacServer.leaseTimer); pacServer.leaseTimer = null;
           await patchState({ routing_expires_at: rows.map(c => c.expires_at).sort()[0] });
           await emit('routing_applied', { network_service: service, domain_count: domains.length });
         }
       } else {
-        const result = await clearPacRouting(commandOptions);
+        const result = await clearPacRouting({ ...commandOptions, signal, deadline: options.deadline, timeoutCapMs: options.timeoutCapMs });
         if (result.status !== 'not_active') await emit('routing_cleared', { network_service: result.networkService, status: result.status });
       }
       lastChange = { at: stamp(), reason };
-    } finally { arm(rows); }
+    } finally { if (!signal.aborted) arm(rows); }
     return statusInternal();
   }
   async function statusInternal() {
@@ -451,14 +488,19 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
       if (!sync) {
         // Heartbeats change deadlines only. The expiry timer owns pruning and
         // union changes, so renewal never selects a service or runs networksetup.
-        arm(await claims.listClaims({ now: now(), includeExpired: true }));
+        arm(await claims.listClaims({ now: now() }));
         return statusInternal();
       }
       await sweep(); return syncInternal({}, 'claim_renewed');
     }),
     sync: (options = {}) => serialize(async () => { await sweep(); return syncInternal(options); }),
     status: () => serialize(statusInternal),
-    stop: () => { stopped = true; if (timer !== null) clearTimer(timer); timer = null; },
+    resume: () => { stopped = false; if (cancellation.signal.aborted) cancellation = new AbortController(); },
+    stop: () => {
+      stopped = true; cancellation.abort();
+      if (timer !== null) clearTimer(timer); timer = null;
+      return inFlight.catch(() => {});
+    },
   };
   return controller;
 }

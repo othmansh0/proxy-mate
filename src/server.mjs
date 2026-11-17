@@ -214,6 +214,7 @@ async function runDaemon(args) {
       // claims stay on disk for re-arm after restart.
       try { await tools[INTERNAL_ROUTING_CONTROL]?.stop?.(); } catch { /* best effort */ }
       const routingState = await readState();
+      await recordRoutingSuspension({ state: routingState, reason: 'daemon_shutdown', phase: 'pending' });
       await tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, {
         routingOnly: true, timeoutCapMs: () => Math.max(0, routingDeadline - performance.now()),
       });
@@ -267,7 +268,7 @@ async function runDaemon(args) {
     catch (error) { engine.diagnostics.push({ kind: 'session-restore-failed', code: error.code ?? 'SESSION_RESTORE_FAILED' }); }
   }
   const pacServer = createDaemonPacServer();
-  tools = makeTools({ engine, pacServer, mode: 'daemon', clientRegistry });
+  tools = makeTools({ engine, pacServer, mode: 'daemon', clientRegistry, pacPort: args.pacPort ?? PAC_PORT_DEFAULT, networkService: args.networkService });
 
   const { domains, tls_passthrough } = await loadDomainsConfig(args);
   if (!args.skipRouting && domains.length) validateRoutingDomains(domains, { allowBroad: args.allowBroadRouting === true });
@@ -390,11 +391,11 @@ async function runDaemon(args) {
   // Claims may re-arm even with --no-routing; that flag only controls CLI domains.
   const routingController = tools[INTERNAL_ROUTING_CONTROL];
   const rearmAbort = new AbortController();
-  const rearming = rearmRouting({ controller: routingController, signal: rearmAbort.signal }).catch(error => {
+  void rearmRouting({ controller: routingController, signal: rearmAbort.signal }).catch(error => {
     logLine('daemon', 'routing re-arm failed', errorFields(error));
   });
   const stopRouting = routingController.stop;
-  routingController.stop = async () => { rearmAbort.abort(); stopRouting(); await rearming; };
+  routingController.stop = async () => { rearmAbort.abort(); await stopRouting(); };
   } catch (error) {
     logLine('daemon', 'startup failed; rolling back', { phase, error_code: error?.code ?? null, error_message: error?.message ?? String(error) });
     await recordRuntimeEvent('startup_failed', { code: 1, reason: 'startup_failed', details: {

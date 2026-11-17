@@ -27,7 +27,7 @@ export function createPacHost({ port = 8081, host = '127.0.0.1', directory = STA
         if (claims.corrupt) throw new Error('Corrupt routing claims');
         const live = claims.filter(c => Date.parse(c.expires_at) > at);
         const domains = unionDomains(live);
-        if (state?.routing_active) domains.push(...state.domains);
+        if (state?.routing_active && state.routing_mode !== 'claims') domains.push(...(state.domains ?? []));
         const proxyPort = state?.proxy_port ?? state?.daemon_proxy_port ?? 8080;
         if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535) throw new Error('Invalid proxy port');
         cached = buildPacText([...new Set(domains)], '127.0.0.1', proxyPort);

@@ -83,7 +83,7 @@ export const INTERNAL_PRESENCE_LOST = Symbol('presence-lost');
 export const INTERNAL_ROUTING_CONTROL = Symbol('routing-control');
 export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   clientRegistry, restartApps = restartSimApps,
-  pacPort = PAC_PORT_DEFAULT, now = Date.now, setTimer, clearTimer,
+  pacPort = PAC_PORT_DEFAULT, networkService, now = Date.now, setTimer, clearTimer,
   hostCertificateStatus = getHostCertificateStatus,
 }) {
   const claims = createRoutingClaimsStore({ now });
@@ -92,7 +92,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   let routingCache = null;
   const claimDetails = new Map();
   const routingController = () => controller ??= createRoutingController({ claims, pacServer,
-    proxyPort: () => engine.port, pacPort: routingOptions.pac_port ?? pacPort,
+    networkService, proxyPort: () => engine.port, pacPort: routingOptions.pac_port ?? pacPort,
     run, select: service => select ? select(routingOptions.network_service ?? service)
       : pickActiveNetworkService(routingOptions.network_service ?? service),
     now, setTimer, clearTimer });
@@ -460,7 +460,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     }
 
     await patchState({ pid: process.pid, proxy_port: engine.port, started_at: new Date().toISOString() });
-    if (!auto_setup) return { ...started, auto_setup: false };
+    routingController().resume();
+    if (!auto_setup) {
+      if ((await claims.listClaims({ now: now() })).length) await routingController().sync();
+      return { ...started, auto_setup: false };
+    }
 
     const activeCaCert = await activeCaCertificate();
     const hostCertificate = trust_host_ca
@@ -574,7 +578,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   async function stop_proxy(_args = {}, { routingOnly = false, skipRouting = false, timeoutCapMs, graceMs } = {}) {
     // Only the symbol-addressed daemon path supplies these internal options.
     if (routingOnly) {
-      try { return await clearPacRouting({ pacServer, timeoutCapMs }); }
+      try { return await clearPacRouting({ pacServer, run, timeoutCapMs, verifyRestore: true }); }
       finally { await patchState({ routing_suspended: { reason: 'daemon_shutdown', at: new Date().toISOString() } }); }
     }
     if (skipRouting) {
@@ -593,8 +597,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       if (failed) throw failed.reason;
       return results[1].value;
     }
+    await routingController().stop();
     let routingCleanupError = null;
-    try { await clearPacRouting({ pacServer }); }
+    try { await clearPacRouting({ pacServer, run }); }
     catch (error) { routingCleanupError = error?.message ?? String(error); }
     await appGateway?.stop();
     appGateway = null;

@@ -67,10 +67,10 @@ test('unreadable and malformed files never throw from listClaims', async (t) => 
   await fs.writeFile(path.join(directory, 'routing-claims.json'), JSON.stringify({ version: 1, claims: [{}] }));
   assert.equal((await createRoutingClaimsStore({ directory }).listClaims()).corrupt, true);
 });
-test('renewal extends every retained claim of the client and enforces union capacity', async (t) => {
+test('renewal leaves expired client claims expired', async (t) => {
   const { claims } = await store(t);
   await claims.upsertClaim({ client_id: 'a', domains: ['a.test'], durationSeconds: 1 });
   await claims.upsertClaim({ client_id: 'b', domains: ['b.test'], durationSeconds: 10 });
   await claims.renewClaimsForClient('a', { now: 3000 });
-  assert.equal((await claims.listClaims({ now: 3000 })).length, 2);
+  assert.equal((await claims.listClaims({ now: 3000 })).length, 1);
 });

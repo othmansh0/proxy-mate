@@ -138,8 +138,12 @@ export function createGuardian({ read = readState, readPid = readPidFile, handsh
           const current = await step('read', read);
           if (current?.pid !== state.pid || await step('is_alive', () => isAlive(state.pid))) return { action: 'owner_changed' };
           if (current.routing_active) {
-            await step('restore', () => restore({ recoverStale: true }));
             await step('suspend', async () => {
+              const { recordRoutingSuspension } = await import('./pac.mjs');
+              await recordRoutingSuspension({ state: current, reason: 'guardian_recovery', record, now, phase: 'pending' });
+            });
+            await step('restore', () => restore({ recoverStale: true, verifyRestore: true }));
+            await step('suspend_complete', async () => {
               const { recordRoutingSuspension } = await import('./pac.mjs');
               await recordRoutingSuspension({ state: current, reason: 'guardian_recovery', record, now });
             });

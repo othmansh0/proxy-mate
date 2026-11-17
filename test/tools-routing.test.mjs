@@ -148,3 +148,39 @@ test('routing devices are validated before side effects and retained on the call
     assert.deepEqual((await claims.listClaims()).find(c => c.client_id === a.client_id).device_udids, [udid]);
   }
 });
+
+test('stop_proxy suspends expiry until start_proxy deliberately resumes claims', async t => {
+  const f = await fixture(t);
+  f.engine.stop = async () => { f.engine.port = null; return { status: 'stopped' }; };
+  f.engine.start = async () => { f.engine.port = 8124; return { status: 'started' }; };
+  await f.tools.set_proxy_routing({ domains: ['a.test'], duration_seconds: 1 }, a);
+  await f.tools.set_proxy_routing({ domains: ['b.test'], duration_seconds: 300 }, b);
+  await f.tools.stop_proxy({ force: true }, a);
+  await f.advance(1001);
+  assert.equal((await readState()).routing_active, false);
+  assert.equal(f.pac.port, null);
+  await f.tools.start_proxy({ auto_setup: false }, b);
+  assert.equal((await readState()).routing_active, true);
+  assert.match(f.pac.body, /127\.0\.0\.1:8124/);
+  assert.doesNotMatch(f.pac.body, /a\.test/);
+});
+
+test('daemon tools apply and serve the configured custom PAC port', async t => {
+  const source = await fs.readFile(new URL('../src/server.mjs', import.meta.url), 'utf8');
+  const construction = source.match(/tools = makeTools\(\{ engine, pacServer, mode: 'daemon'[^\n]+/)[0];
+  const f = await fixture(t);
+  const server = new PacServer();
+  await server.start(0); const customPort = server.port; await server.stop();
+  const start = server.start.bind(server);
+  server.start = port => { assert.equal(port, customPort); return start(port); };
+  const tools = new Function('makeTools', 'engine', 'pacServer', 'clientRegistry', 'args', 'PAC_PORT_DEFAULT',
+    `let tools; ${construction}; return tools;`)(options => makeTools({ ...options, run: f.run, select: async s => s ?? 'Fake', hostCertificateStatus: async () => ({ trusted: true, ok: true }) }),
+    f.engine, server, undefined, { pacPort: customPort, networkService: 'Custom' }, 8081);
+  t.after(async () => { await tools[INTERNAL_ROUTING_CONTROL].stop(); await server.stop(); });
+  await tools.set_proxy_routing({ domains: ['custom.test'] }, a);
+  assert.equal(server.port, customPort);
+  const state = await readState();
+  assert.equal(state.pac_url, `http://127.0.0.1:${customPort}/proxy.pac`);
+  assert.equal(state.network_service, 'Custom');
+  assert.match(await (await fetch(state.pac_url)).text(), /custom\.test/);
+});
