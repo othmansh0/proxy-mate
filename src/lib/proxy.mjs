@@ -1,3 +1,7 @@
+import { drainServer, defaultDrainMs, trackServer, mockttpListener, limitedLog } from './drain.mjs';
+import { logLine } from './log-line.mjs';
+import { increment, registerGauge } from './metrics.mjs';
+import { validateCustomCaPaths } from './ca-paths.mjs';
 import { readEnvironment } from './environment.mjs';
 // Proxy engine wrapper: thin layer over mockttp that adds our flow capture,
 // large-body spillover, mock-rule registration with file-backed bodies,
@@ -27,6 +31,9 @@ import {
   normalizeMatchUrl, matchUrlPath, matcherError, parseRequestQuery, queryMatches, ruleUrlMatchers,
   validateMatcherObject, validateMatchQuery,
 } from './url-match.mjs';
+
+const activeSocketSets = new Set();
+const activeConnections = () => [...activeSocketSets].reduce((total, sockets) => total + sockets.size, 0);
 
 const CA_DIR = path.join(STATE_DIR, 'ca');
 const CA_KEY = path.join(CA_DIR, 'key.pem');
@@ -145,7 +152,14 @@ export class ProxyEngine {
     maxPendingPersistence = 2_000,
     failClosedOnPersistenceError = readEnvironment('PROXY_MATE_PERSISTENCE_FAIL_CLOSED') === '1',
     pluginStore = new PluginStore(),
+    logWrite,
+    caStat,
   } = {}) {
+    this.logWrite = logWrite;
+    this.caStat = caStat;
+    this.requestContexts = new Map();
+    this.abortLog = limitedLog('proxy', 'request aborted', { write: logWrite });
+    this.dropLog = limitedLog('proxy', 'connection dropped', { write: logWrite });
     this.server = null;
     this.port = null;
     this.flows = new Map();       // flow_id -> flow
@@ -255,12 +269,7 @@ export class ProxyEngine {
     let certPath;
     if (caKeyPath != null) {
       [keyPath, certPath] = [path.resolve(caKeyPath), path.resolve(caCertPath)];
-      const [keyStat, certStat] = await Promise.all([
-        fs.stat(keyPath).catch(() => null), fs.stat(certPath).catch(() => null),
-      ]);
-      if (!keyStat?.isFile() || !certStat?.isFile()) {
-        throw codedEngineError('CUSTOM_CA_FILE_INVALID', 'Custom CA key and certificate paths must both identify regular files.');
-      }
+      await validateCustomCaPaths({ keyPath, certPath, stat: this.caStat });
     } else {
       ({ keyPath, certPath } = await ensureCA());
     }
@@ -297,7 +306,14 @@ export class ProxyEngine {
     }
 
     this.server = server;
-    if (server.server) server.server.maxConnections = 128;
+    let listener;
+    try { listener = mockttpListener(server); }
+    catch (error) { await server.stop(); this.server = null; throw error; }
+    this.drainTracking = trackServer(listener);
+    activeSocketSets.add(this.drainTracking.sockets);
+    registerGauge('proxy.active_connections', activeConnections);
+    listener.maxConnections = 128;
+    listener.on('drop', () => { increment('proxy.connections_dropped'); this.dropLog({}); });
     this.port = server.port;
     this.socksEnabled = enableSocks === true;
     this.caCertPath = certPath;
@@ -365,13 +381,13 @@ export class ProxyEngine {
     };
   }
 
-  stop() {
-    const operation = this.lifecycleMutation.then(() => this.#stop());
+  stop(options = {}) {
+    const operation = this.lifecycleMutation.then(() => this.#stop(options));
     this.lifecycleMutation = operation.catch(() => {});
     return operation;
   }
 
-  async #stop() {
+  async #stop({ graceMs = defaultDrainMs() } = {}) {
     await this.ruleMutation;
     // Resolve callbacks before asking Mockttp to stop, otherwise an intercepted
     // request can keep shutdown waiting for its breakpoint deadline. Closing
@@ -382,7 +398,21 @@ export class ProxyEngine {
       return { status: 'not_running' };
     }
     await new Promise((resolve) => setImmediate(resolve));
-    try { await this.server.stop(); } catch { /* ignore */ }
+    if (graceMs > 0) {
+      const summary = await drainServer(mockttpListener(this.server), { graceMs, ...this.drainTracking });
+      logLine('proxy', 'drain completed', summary, { write: this.logWrite });
+      // Public completion events are scheduled with setImmediate by mockttp.
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    try { await this.server.stop(); } catch (error) {
+      // destroyable-server rejects the second close after a successful drain.
+      if (error.code === 'ERR_SERVER_NOT_RUNNING') this.server.reset();
+    }
+    this.drainTracking?.dispose();
+    activeSocketSets.delete(this.drainTracking?.sockets);
+    this.drainTracking = null;
+    this.requestContexts.clear();
+    this.abortLog.flush(); this.dropLog.flush();
     await Promise.allSettled([...this.captureWork.values()]);
     await Promise.allSettled([...this.flowPersistence.values()]);
     await this.#flushWebSocketStore();
@@ -402,23 +432,66 @@ export class ProxyEngine {
 
   // ---- capture ----
   async #attachCaptureHandlers() {
-    await this.server.on('request', (req) => this.#queueCapture(req.id, async () => {
-      this.#recordRuleHit(req.matchedRuleId);
-      if (!this.recording) return;
-      const reqBody = await this.#bodyToBuffer(req.body);
-      const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
-      const stored = await storeCapturedBody(reqBody, req.headers, req.id, 'req', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
-      const flow = this.flows.get(req.id) ?? {
-        id: req.id, timestamp: Date.now(), request: null, response: null,
-      };
-      flow.request = {
-          method: req.method,
-          url: rawCaptureEnabled ? req.url : redactUrl(req.url),
-          protocol: req.protocol,
-          http_version: req.httpVersion ?? req.http_version ?? null,
-          hostname: req.hostname,
-          path: rawCaptureEnabled ? req.path : redactUrl(req.path),
-          headers: rawCaptureEnabled ? req.headers : redactHeaders(req.headers),
+    await this.server.on('request', (req) => {
+      this.#rememberRequest(req.id, req);
+      increment('proxy.bytes', req.body?.buffer?.length ?? 0);
+      return this.#queueCapture(req.id, async () => {
+        this.#recordRuleHit(req.matchedRuleId);
+        if (!this.recording) return;
+        const reqBody = await this.#bodyToBuffer(req.body);
+        const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
+        const stored = await storeCapturedBody(reqBody, req.headers, req.id, 'req', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
+        const flow = this.flows.get(req.id) ?? {
+          id: req.id, timestamp: Date.now(), request: null, response: null,
+        };
+        flow.request = {
+            method: req.method,
+            url: rawCaptureEnabled ? req.url : redactUrl(req.url),
+            protocol: req.protocol,
+            http_version: req.httpVersion ?? req.http_version ?? null,
+            hostname: req.hostname,
+            path: rawCaptureEnabled ? req.path : redactUrl(req.path),
+            headers: rawCaptureEnabled ? req.headers : redactHeaders(req.headers),
+            body_inline: stored.inline,
+            body_path: stored.path,
+            body_size: stored.size,
+            body_sha: stored.sha,
+            body_encoding: stored.encoding,
+            body_original_size: stored.original_size,
+            body_redacted_at_capture: stored.redacted,
+            body_omitted: stored.omitted,
+            body_decoded: stored.decoded ?? false,
+            matched_rule_id: this.ruleEndpointIds.get(req.matchedRuleId) ?? null,
+            remote_ip: req.remoteIpAddress ?? req.remote_ip ?? null,
+            remote_port: req.remotePort ?? req.remote_port ?? null,
+            timing: jsonSafe(req.timingEvents),
+            trailers: rawCaptureEnabled ? jsonSafe(req.trailers ?? null) : redactHeaders(jsonSafe(req.trailers ?? null)),
+        };
+        this.#rememberFlow(flow);
+        await this.#persistFlow(flow);
+      }, req.body?.buffer?.length ?? 0);
+    });
+    await this.server.on('response', (res) => {
+      increment('proxy.flows_completed');
+      increment('proxy.bytes', res.body?.buffer?.length ?? 0);
+      this.requestContexts.delete(res.id);
+      return this.#queueCapture(res.id, async () => {
+        if (!this.recording) return;
+        const resBody = await this.#bodyToBuffer(res.body);
+        const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
+        const stored = await storeCapturedBody(resBody, res.headers, res.id, 'res', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
+        const existing = await this.getDurableFlow(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
+        existing.response = {
+          statusCode: res.statusCode,
+          statusMessage: res.statusMessage,
+          tags: upstreamErrorTags(res.tags),
+          upstream_error: upstreamErrorFromTags(res.tags),
+          http_version: res.httpVersion ?? res.http_version ?? null,
+          headers: rawCaptureEnabled ? res.headers : redactHeaders(res.headers),
+          trailers: rawCaptureEnabled ? jsonSafe(res.trailers ?? null) : redactHeaders(jsonSafe(res.trailers ?? null)),
+          timing: jsonSafe(res.timingEvents),
+          remote_ip: res.remoteIpAddress ?? res.remote_ip ?? null,
+          remote_port: res.remotePort ?? res.remote_port ?? null,
           body_inline: stored.inline,
           body_path: stored.path,
           body_size: stored.size,
@@ -428,45 +501,11 @@ export class ProxyEngine {
           body_redacted_at_capture: stored.redacted,
           body_omitted: stored.omitted,
           body_decoded: stored.decoded ?? false,
-          matched_rule_id: this.ruleEndpointIds.get(req.matchedRuleId) ?? null,
-          remote_ip: req.remoteIpAddress ?? req.remote_ip ?? null,
-          remote_port: req.remotePort ?? req.remote_port ?? null,
-          timing: jsonSafe(req.timingEvents),
-          trailers: rawCaptureEnabled ? jsonSafe(req.trailers ?? null) : redactHeaders(jsonSafe(req.trailers ?? null)),
-      };
-      this.#rememberFlow(flow);
-      await this.#persistFlow(flow);
-    }, req.body?.buffer?.length ?? 0));
-    await this.server.on('response', (res) => this.#queueCapture(res.id, async () => {
-      if (!this.recording) return;
-      const resBody = await this.#bodyToBuffer(res.body);
-      const rawCaptureEnabled = this.storeSensitiveData && this.captureBodyMode === 'all';
-      const stored = await storeCapturedBody(resBody, res.headers, res.id, 'res', rawCaptureEnabled, this.captureBodyMode, this.maxBodySize);
-      const existing = await this.getDurableFlow(res.id) ?? { id: res.id, timestamp: Date.now(), request: null };
-      existing.response = {
-        statusCode: res.statusCode,
-        statusMessage: res.statusMessage,
-        tags: upstreamErrorTags(res.tags),
-        upstream_error: upstreamErrorFromTags(res.tags),
-        http_version: res.httpVersion ?? res.http_version ?? null,
-        headers: rawCaptureEnabled ? res.headers : redactHeaders(res.headers),
-        trailers: rawCaptureEnabled ? jsonSafe(res.trailers ?? null) : redactHeaders(jsonSafe(res.trailers ?? null)),
-        timing: jsonSafe(res.timingEvents),
-        remote_ip: res.remoteIpAddress ?? res.remote_ip ?? null,
-        remote_port: res.remotePort ?? res.remote_port ?? null,
-        body_inline: stored.inline,
-        body_path: stored.path,
-        body_size: stored.size,
-        body_sha: stored.sha,
-        body_encoding: stored.encoding,
-        body_original_size: stored.original_size,
-        body_redacted_at_capture: stored.redacted,
-        body_omitted: stored.omitted,
-        body_decoded: stored.decoded ?? false,
-      };
-      this.#rememberFlow(existing);
-      await this.#persistFlow(existing);
-    }, res.body?.buffer?.length ?? 0));
+        };
+        this.#rememberFlow(existing);
+        await this.#persistFlow(existing);
+      }, res.body?.buffer?.length ?? 0);
+    });
   }
 
   #queueCapture(id, capture, bytes = 0) {
@@ -474,6 +513,7 @@ export class ProxyEngine {
     // Bound work BEFORE body conversion, and serialize both halves of a flow.
     if ((!this.captureWork.has(id) && this.captureWork.size >= 100) || this.captureQueuedBytes + bytes > this.maxCaptureQueuedBytes) {
       this.captureDropped += 1;
+      increment('proxy.capture_dropped');
       return;
     }
     this.captureQueuedBytes += bytes;
@@ -493,6 +533,32 @@ export class ProxyEngine {
     this.captureWork.set(id, operation);
   }
 
+  #rememberRequest(id, data) {
+    if (!id) return;
+    let url;
+    try { url = new URL(data.url); } catch { /* head events provide hostname */ }
+    const previous = this.requestContexts.get(id);
+    this.requestContexts.set(id, {
+      method: data.method ?? previous?.method,
+      host: data.hostname ?? url?.hostname ?? previous?.host,
+      port: data.port ?? (url ? Number(url.port || (url.protocol === 'https:' ? 443 : 80)) : previous?.port),
+      startedAt: previous?.startedAt ?? Date.now(),
+      aborted: previous?.aborted ?? false,
+    });
+    if (this.requestContexts.size > 2048) this.requestContexts.delete(this.requestContexts.keys().next().value);
+  }
+
+  #requestAborted(id, data) {
+    if (!this.requestContexts.has(id)) this.#rememberRequest(id, data);
+    const context = this.requestContexts.get(id);
+    if (context?.aborted) return; // abort and passthrough-abort can describe the same failure
+    if (context) context.aborted = true;
+    increment('proxy.requests_aborted');
+    this.abortLog({ flow_id: id, method: context?.method, host: context?.host, port: context?.port,
+      error_code: data.error?.code ?? null, downstream_aborted: data.downstreamAborted ?? true,
+      elapsed_ms: Math.max(0, Date.now() - (context?.startedAt ?? Date.now())) });
+  }
+
   async #attachDiagnosticHandlers() {
     const push = (kind, evt) => {
       const rec = { kind, timestamp: Date.now(), ...evt };
@@ -502,6 +568,8 @@ export class ProxyEngine {
       }
     };
     await this.server.on('rule-event', (event) => {
+      if (event.eventType === 'passthrough-request-head') this.#rememberRequest(event.requestId, event.eventData);
+      if (event.eventType === 'passthrough-abort') this.#requestAborted(event.requestId, event.eventData);
       const diagnostic = upstreamErrorDiagnostic(event);
       if (diagnostic) push('upstream-error', {
         ...diagnostic, connection_attempt_timeout_ms: activeConnectionAttemptTimeout(),
@@ -535,6 +603,7 @@ export class ProxyEngine {
         error: e?.error && { message: e.error.message, code: e.error.code },
       }));
       await this.server.on('abort', (e) => {
+        this.#requestAborted(e?.id, e);
         try { this.webSocketStore.onError({ streamId: e?.id, error: e?.error, timingEvents: e?.timingEvents }); } catch { /* not a correlated WebSocket */ }
       });
     } catch { /* ignore */ }

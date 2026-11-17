@@ -1,3 +1,6 @@
+import { drainServer, defaultDrainMs, trackServer, limitedLog } from './drain.mjs';
+import { increment } from './metrics.mjs';
+import { logLine } from './log-line.mjs';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -19,6 +22,7 @@ function requestHead(request, url = request.url) {
 
 export class AppProxyGateway {
   constructor({ proxyPort, classify }) {
+    this.dropLog = limitedLog('gateway', 'connection dropped');
     this.proxyPort = proxyPort;
     this.classify = classify;
     this.server = null;
@@ -38,7 +42,9 @@ export class AppProxyGateway {
         response.end();
       });
     });
+    this.drainTracking = trackServer(server);
     server.maxConnections = 128;
+    server.on('drop', () => { increment('gateway.connections_dropped'); this.dropLog({}); });
     server.on('connection', (socket) => this.track(socket));
     server.on('connect', (request, socket, head) => {
       void this.forwardTunnel(request, socket, head).catch(() => socket.destroy());
@@ -148,16 +154,16 @@ export class AppProxyGateway {
       unknown_connections: 'Passed through without inspection or storage. These are capture omissions, not persistence drops.' };
   }
 
-  async stop() {
+  async stop({ graceMs = defaultDrainMs() } = {}) {
     if (!this.server) return;
     const server = this.server;
+    const summary = await drainServer(server, { graceMs, sockets: this.sockets, responses: this.drainTracking.responses });
+    logLine('gateway', 'drain completed', summary);
     this.server = null;
     this.port = null;
-    const closed = new Promise((resolve) => server.close(resolve));
-    for (const socket of this.sockets) socket.destroy();
+    this.drainTracking.dispose();
+    this.dropLog.flush();
     this.httpAgent.destroy();
     this.httpsAgent.destroy();
-    server.closeAllConnections();
-    await closed;
   }
 }

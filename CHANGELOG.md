@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Drain proxy and app gateway connections before shutdown; add contextual abort logs, progress/drop metrics, and actionable custom CA errors.
+
 ## 0.9.1 — 2026-11-16
 
 - Wait for npm's publish-time scanning and registry availability before completing a release. Keep verification bounded and reject integrity mismatches or registry errors without retrying the upload.
