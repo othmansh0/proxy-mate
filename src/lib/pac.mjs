@@ -344,7 +344,7 @@ export async function rearmRouting({ claims = createRoutingClaimsStore(), contro
   record = recordRuntimeEvent, now = Date.now, signal, deadline,
   wait = ms => delay(ms, undefined, { signal, ref: false }), retryDelays = [20000, 40000, 60000],
 } = {}) {
-  const emit = (event, details) => record(event, { details });
+  const emit = (event, details) => record(event, { reason: details.reason, code: details.code, details });
   for (let attempt = 0; ; attempt++) {
     if (signal?.aborted) return;
     const rows = await claims.listClaims({ now: now() });
@@ -393,7 +393,7 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
   const domainsOf = rows => [...new Set(rows.flatMap(c => c.domains))].sort();
   const trackedRun = (...args) => {
     inFlight = Promise.resolve().then(() => {
-      if (run === execFileP) assertRealNetworkCommandAllowed();
+      if (run === execFileP && NETWORKSETUP === '/usr/sbin/networksetup') assertRealNetworkCommandAllowed();
       args[2]?.signal?.throwIfAborted();
       return run(...args);
     });

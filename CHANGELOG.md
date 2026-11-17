@@ -5,6 +5,13 @@
 Multi-agent reliability release. Many agents can now share one daemon on a heavily loaded Mac. A slow daemon is no longer killed. Routing survives restarts. Each agent's evidence, routing, leases, rules and breakpoints are scoped to that agent by default. The root causes and load-test evidence are in `docs/RELIABILITY_AUDIT.md`.
 
 ### Upgrade notes (behaviour changes)
+- Allow gated fake network commands through the routing controller test guard, and retain re-arm failure reasons in runtime events and bridge warnings.
+
+- Enforce evidence scopes across flow/body exports, replay, WebSocket inspection and OpenAPI validation; protect shared import replacements and clarify resource-scoped leases.
+- Cancel in-flight routing safely during shutdown, journal suspension before restoration, preserve stopped and expired claims without reactivation, and honor custom daemon PAC ports.
+
+- Upgrade note: rule IDs now default to a caller namespace and rules persist ownership; live foreign mutations require `force`, while `clear_rules` defaults to caller-owned and legacy rules (`scope: "all"` requires `confirm_shared: true`). Rules keep matching all traffic by default because mocks usually target the app under test; opt into `match_scope: "mine"` for owner-device or uniquely claimed-host matching. Legacy saved rules remain unowned and mutable. Rule lists/exports hide foreign task ownership, and JSON mocks preserve `match_headers`.
+- Add isolated three-bridge multi-agent regression and JSON qualification evidence for scoped traffic, breakpoints, restart recovery, drain, union PAC routing on custom ports, per-client clear, restart re-arm, external PAC preservation and presence cleanup; record guardian policy decisions separately and retry load-harness port races.
 
 - **Per-agent routing claims.**
   - `set_proxy_routing` creates or updates the caller's claim. The PAC serves the union of every live claim, and system routing is cleared only when the last claim ends.
