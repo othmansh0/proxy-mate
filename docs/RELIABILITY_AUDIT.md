@@ -1,5 +1,34 @@
 # Reliability and replacement readiness
 
+## 17 November 2026 multi-agent reliability (0.10.0)
+
+Concurrent agent traffic and heavy build load exposed failures in the shared daemon, guardian probes and restart cleanup. The incident ran the installed 0.8.0 runtime; the relevant control/supervision paths were also present in develop 0.9.1. The evidence below covers the isolated load harness and component measurements. Native Simulator qualification of these changes is pending.
+
+### Confirmed causes and load results
+
+The 90-second harness used eight bridges, subscriptions and 140 busy-loop processes (10× CPU factor). Load peaked at 448–862. Routing and trust were disabled in a temporary state directory. Guardian decisions were recorded, not executed.
+
+- **N1, Background scheduling:** old code under `taskpolicy -b` completed 0/8,814 proxied requests, including 8,677 ECONNRESET failures. New control code still completed 0/6,377 in that band, including 6,243 resets. Changing code alone did not fix scheduling starvation. Installed jobs now use Interactive for the daemon and Standard for the guardian.
+- **N2, health rate limiting:** at default priority, old code served 9,110/9,110 requests (p99 419 ms), but 26 guardian probes received HTTP 429 and only four succeeded. The guardian requested a restart of a working proxy. The readiness probes also received 6,840 HTTP 429 responses.
+- **After control isolation, at default priority:** 9,080/9,080 proxied requests succeeded (p99 405 ms), all 30 guardian probes succeeded (p99 218 ms), all 30 decisions were healthy, and 5,185/5,185 readiness probes succeeded. This checkpoint used integration head `9006229`, before the later guardian policy changes. It does not qualify every final release path.
+
+### Changes by area
+
+- **Supervision:** an authenticated worker-thread endpoint reports main-loop heartbeat age and traffic progress. The guardian preserves slow owners below a load-scaled hang ceiling, scales probe/failure windows with load, verifies process identity, records shutdown intent, and allows 25 seconds before escalation. Failed recovery steps are logged and retried on later ticks.
+- **Control plane:** authenticated health checks precede shared rate and concurrency checks. Agent rate buckets are per client; long calls use a separate pool. Bridges reduce readiness/subscription polling and retain the no-replay rule for submitted mutations.
+- **Shutdown and drain:** restore owned routing before control/capture cleanup. Bound shutdown to 20 seconds, allow 30 seconds in launchd, and drain HTTP, gateway, upgraded and tunnel sockets before forced destruction. In-flight requests can still fail at the deadline; this is not zero-downtime restart.
+- **Routing:** durable per-client/task claims produce a union PAC served by the guardian in installed mode. Heartbeats renew deadlines without network churn. Shutdown suspends routing and retains claims; startup re-arms unexpired claims only if restored settings remain unchanged. External changes win. Owners receive expiry/suspension warnings.
+- **Isolation:** durable flow owner/device indexes support scoped reads and protected clears. Identified clients default to mine; legacy clients retain all scope. Per-task leases conflict on resources, retain orphans and permit cross-client breakpoint resolution. Breakpoints use claimed devices or unambiguous hosts by default; guarded global controls require force while other live clients hold claims. Rule/mock ownership work (WP21) remains outside this documentation snapshot.
+- **Observability and storage:** timestamped contextual abort/drop logs, bounded slow/hung diagnostics, event-loop delay/utilization, startup phase/port records, rotating append-only event journals, process identity checks and stale temporary-file sweeping improve diagnosis. Capture writes are batched, counts cached and WebSocket journals compacted within bounds. Large body work uses a lazy bounded worker pool, decodes text once and safely omits overloaded bodies.
+
+Component measurements recorded during this work reduced event-loop p99 from 142 to 5.6 ms for 2 MiB bodies and from 196 to 10.3 ms for 5 MiB bodies. Storage batching reduced 64-write bursts from 2,115 to 184 ms. These are component measurements, not end-to-end Simulator latency guarantees.
+
+### Hand-off spike and remaining limits
+
+The socket hand-off spike was **NO-GO for 0.10.0**. Nine configurations with three cutovers each tested Node 24.22.2 and mockttp 4.6.5 on macOS 27. Plain listening-handle transfer could deliver 0/6,480 failures, but mockttp's public startup API cannot accept that handle. Private integration required guards to avoid 18/6,480 HTTP 400s. A persistent front socket with a 250 ms rebind gap lost 3,188/6,480 requests. `reusePort` is unsupported on macOS; launchd socket activation needs native integration. Guardian parentage, locking, handshake and persistence still assume one daemon. Hand-off is deferred to a separate milestone.
+
+Open items are native Simulator restart/routing qualification, the transform sandbox wall-clock deadline test flake, and completion of rule/mock ownership and final multi-agent regression qualification. The isolated harness does not establish sleep/wake, VPN switching or a multi-day stability guarantee. PAC uses `PROXY; DIRECT`, but CFNetwork testing still showed no DIRECT fallback when a proxy accepted a connection and then hung. PAC caching can outlive the host. Guardian hosting and drain reduce disruption; they do not remove these client/runtime limits.
+
 ## 16 November 2026 public release and registry verification
 
 The source repository is public at `othmansh0/proxy-mate`. **`@othmansh01/proxy-mate@0.9.1` is published on npm**, with `latest` pointing to 0.9.1. The GitHub repository owner remains `othmansh0`; package manifests, examples, registry mapping and release guards use the npm scope `othmansh01`. The owner's email is verified and 2FA is enabled for authentication and writes. The initial 0.9.0 bootstrap used a passkey-approved manual upload; 0.9.1 was published by GitHub Actions through OIDC.
