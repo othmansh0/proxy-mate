@@ -129,7 +129,10 @@ const proxyStatusSchema = z.looseObject({
 const breakpointOwnerSchema = z.object({ client_id: z.string(), task_id: z.string().nullable() });
 const breakpointRecordSchema = z.looseObject({ owner: breakpointOwnerSchema.nullable().optional(), scope: z.enum(['mine', 'all']).optional() });
 const breakpointStatusSchema = z.looseObject({ skipped_out_of_scope: z.number().int().nonnegative() });
+const ruleOwnerSchema = z.union([breakpointOwnerSchema, z.object({ mine: z.literal(false) })]);
 const ruleSchema = z.looseObject({
+  owner: ruleOwnerSchema.nullable().optional(), mine: z.boolean().optional(),
+  match_scope: z.enum(['mine', 'all']).optional(),
   rule_id: z.string().optional(),
   id: z.string().optional(),
   type: z.string().optional(),
@@ -173,6 +176,10 @@ const leaseStatusSchema = z.object({
 });
 
 const typedToolOutputSchemas = Object.freeze({
+  ...Object.fromEntries(['create_map_local', 'mock_json_response', 'create_map_remote', 'create_blacklist', 'capture_to_mock'].map(name => [name, toolResultSchema(ruleSchema)])),
+  ...Object.fromEntries(['update_rule', 'set_rule_enabled', 'set_rule_priority', 'patch_mock_json', 'create_network_condition', 'create_no_cache_rule', 'create_transform_plugin_rule'].map(name => [name, toolResultSchema(z.looseObject({ rule: ruleSchema }))])),
+  reorder_rules: toolResultSchema(rulesSchema),
+
   create_breakpoint: toolResultSchema(z.looseObject({ rule: breakpointRecordSchema })),
   list_pending_breakpoints: toolResultSchema(z.looseObject({ breakpoints: z.array(breakpointRecordSchema), status: breakpointStatusSchema })),
   get_pending_breakpoint: toolResultSchema(z.looseObject({ breakpoint: breakpointRecordSchema })),
@@ -424,6 +431,16 @@ function toolGroup(name) {
 }
 
 function tool(name, description, inputSchema = {}, annotations = READ, options = {}) {
+  if (['create_map_local', 'mock_json_response', 'create_map_remote', 'create_blacklist', 'create_network_condition',
+    'create_no_cache_rule', 'capture_to_mock', 'create_transform_plugin_rule', 'import_rules'].includes(name)) {
+    inputSchema = { ...inputSchema, match_scope: z.enum(['mine', 'all']).optional() };
+    description += ' Rules default to match_scope=all because mocks usually target the app under test; choose mine to restrict matching to the owner’s device or uniquely claimed host. IDs are caller-namespaced by default; live foreign ID collisions return RULE_CONFLICT.';
+  }
+  if (['update_rule', 'set_rule_enabled', 'set_rule_priority', 'remove_rule', 'reorder_rules', 'patch_mock_json'].includes(name)) {
+    inputSchema = { ...inputSchema, force: z.boolean().optional() };
+    description += ' Live foreign rules require force=true; otherwise RULE_CONFLICT is returned.';
+  }
+
   const group = toolGroup(name);
   return Object.freeze({
     name,
@@ -660,6 +677,7 @@ export const MCP_TOOLS = Object.freeze([
     rule_id: z.string().regex(/^[A-Za-z0-9._-]+$/).max(128).optional(), url: z.string().url(),
     method: z.string().optional(), status: z.number().int().min(200).max(599).optional(),
     priority: z.number().int().min(-10000).max(10000).optional(), headers: headerSchema.optional(), json: z.any(),
+    match_headers: matchHeadersSchema.optional(),
   }, MUTATE),
   tool('patch_mock_json', 'Atomically update a JSON Map Local mock using JSON Merge Patch: nested objects merge, null deletes a member, arrays replace. Does not release pending breakpoints.', {
     rule_id: z.string().min(1), patch: z.any(),
@@ -764,14 +782,14 @@ export const MCP_TOOLS = Object.freeze([
   tool('test_rule', 'Explain whether one rule, or the ordered rule set, matches a synthetic request without sending it.', {
     rule_id: z.string().min(1).optional(),
     request: z.object({
-      method: z.string().optional(), url: z.string().optional(),
+      method: z.string().optional(), url: z.string().optional(), device_udid: z.string().optional(),
       headers: z.record(z.string(), z.string()).optional(), body: z.string().optional(),
     }),
   }),
-  tool('clear_rules', 'Remove all interception rules.', {}, MUTATE),
+  tool('clear_rules', 'Remove caller-owned and unowned legacy rules by default. scope=all requires confirm_shared=true; otherwise CONFIRM_SHARED_REQUIRED reports total, mine, foreign and unowned counts.', { scope: z.enum(['mine', 'all']).optional(), confirm_shared: z.boolean().optional() }, MUTATE),
   tool('export_rules', 'Export the current rule set to a JSON file.', { path: z.string().optional() }, NON_IDEMPOTENT, { longRunning: true }),
-  tool('import_rules', 'Import rules from a JSON file; replace=true removes existing rules first.', {
-    path: z.string().min(1), replace: z.boolean().optional(),
+  tool('import_rules', 'Import rules as caller-owned definitions; replace=true removes caller-owned and legacy rules first. Foreign live ID collisions return RULE_CONFLICT.', {
+    path: z.string().min(1), replace: z.boolean().optional(), scope: z.enum(['mine', 'all']).optional(), confirm_shared: z.boolean().optional(),
   }, NON_IDEMPOTENT, { longRunning: true }),
   tool('capture_to_mock', "Create a Map Local rule from a captured response. The mock is anchored on the captured URL and constrained to its query, so a flow captured from '/v1/orders?page=2' answers only page=2.", {
     flow_id: z.string().min(1), session_id: z.string().optional(), rule_id: z.string().optional(), method: z.string().optional(),

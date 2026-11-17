@@ -946,7 +946,16 @@ export class ProxyEngine {
     const normalizedRequest = normalizeDryRunRequest(request);
     const evaluations = this.listRuleConfigs()
       .filter((rule) => !onlyRuleId || rule.rule_id === onlyRuleId)
-      .map((rule) => evaluateRule(rule, normalizedRequest));
+      .map((rule) => {
+        const evaluation = evaluateRule(rule, normalizedRequest);
+        if (rule.match_scope === 'mine') {
+          const inScope = this.breakpointScope({ owner: rule.owner, hostname: new URL(normalizedRequest.url).hostname,
+            device_udid: request.device_udid ?? null });
+          evaluation.criteria.push(matchCriterion('match_scope', inScope, 'mine'));
+          evaluation.matched &&= inScope;
+        }
+        return evaluation;
+      });
     const selected = evaluations.find((evaluation) => evaluation.matched);
     return {
       dry_run: true,
@@ -1028,6 +1037,16 @@ export class ProxyEngine {
   async #registerEndpoint(rule, runtimePriority, ruleServer = this.server) {
     const regex = compileSafeRegex(rule.url_pattern, 'url_pattern');
     let builder = methodBuilder(ruleServer, rule.method, regex).asPriority(runtimePriority);
+    if (rule.match_scope === 'mine') builder = builder.matching(req => {
+      let device = null;
+      try {
+        const socket = this.captureSockets.get(req.remotePort ?? req.remote_port);
+        if (socket) device = this.deviceResolver(socket);
+      } catch { /* Best effort; use the same attribution hook as breakpoints. */ }
+      let hostname = req.hostname;
+      try { hostname ??= new URL(req.url).hostname; } catch { /* unknown */ }
+      return this.breakpointScope({ owner: rule.owner, hostname, device_udid: device });
+    });
     if (rule.match_headers) builder = builder.withHeaders(rule.match_headers);
     if (rule.match_query) builder = builder.withQuery(rule.match_query);
     if (rule.match_json_body_including) builder = builder.withJsonBodyIncluding(rule.match_json_body_including);
@@ -1133,6 +1152,7 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
   if (typeof ruleId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(ruleId)) {
     throw new Error('rule_id must contain only letters, numbers, dot, underscore, or hyphen (1-128 characters)');
   }
+  if (input.match_scope != null && !['mine', 'all'].includes(input.match_scope)) throw new Error('match_scope must be mine or all');
   const type = input.type ?? 'map_local';
   if (!['map_local', 'map_remote', 'blacklist', 'network_condition', 'breakpoint', 'plugin_transform'].includes(type)) {
     throw new Error(`unsupported rule type: ${type}`);
@@ -1266,6 +1286,8 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
     createdBody,
     config: {
       rule_id: ruleId,
+      owner: input.owner ?? existing?.owner ?? null,
+      match_scope: input.match_scope ?? existing?.match_scope ?? 'all',
       type,
       url_pattern: input.url_pattern,
       method,

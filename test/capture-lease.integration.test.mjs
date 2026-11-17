@@ -48,7 +48,7 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
     call(1, 'mock_json_response', { rule_id: 'b-own', url: 'http://fixture.invalid/b', json: {} }),
   ]);
   const rejected = await clients[0].callTool({ name: 'remove_rule', arguments: { rule_id: 'b-own' } });
-  assert.equal(rejected.structuredContent.error.code, 'CAPTURE_OWNED');
+  assert.equal(rejected.structuredContent.error.code, 'RULE_CONFLICT');
   await call(1, 'finish_capture_task');
   const sessionsBefore = (await call(0, 'list_capture_sessions')).sessions.length;
   const failedSwitch = await clients[0].callTool({ name: 'create_capture_session', arguments: { name: 'must-not-be-created', activate: true } });
