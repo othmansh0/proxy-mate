@@ -56,6 +56,7 @@ export class ControlServer {
   constructor({
     port = DEFAULT_CONTROL_PORT,
     tools,
+    clientRegistry, onHeartbeat = async () => {},
     scopes = ['observe', 'control', ...(readEnvironment('PROXY_MATE_ALLOW_SENSITIVE') === '1' ? ['sensitive'] : [])],
     maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS,
     maxLongConcurrentRequests = 16,
@@ -64,6 +65,8 @@ export class ControlServer {
   }) {
     this.port = port;
     this.tools = tools;
+    this.clientRegistry = clientRegistry;
+    this.onHeartbeat = onHeartbeat;
     this.server = null;
     this.token = null;
     this.queue = Promise.resolve();
@@ -178,7 +181,8 @@ export class ControlServer {
       res.end(body);
       return;
     }
-    if (req.method !== 'POST' || req.url !== '/rpc') {
+    const heartbeat = req.method === 'POST' && req.url === '/heartbeat';
+    if (req.method !== 'POST' || (req.url !== '/rpc' && !heartbeat)) {
       res.writeHead(404); res.end(); return;
     }
     const chunks = [];
@@ -187,10 +191,10 @@ export class ControlServer {
     req.on('data', (chunk) => {
       if (tooLarge) return;
       bytes += chunk.length;
-      if (bytes > MAX_RPC_BYTES) {
+      if (bytes > (heartbeat ? 4096 : MAX_RPC_BYTES)) {
         tooLarge = true;
         res.writeHead(413, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: { code: 'PAYLOAD_TOO_LARGE', message: `RPC body exceeds ${MAX_RPC_BYTES} bytes` } }));
+        res.end(JSON.stringify({ ok: false, error: { code: 'PAYLOAD_TOO_LARGE', message: `Control body exceeds ${heartbeat ? 4096 : MAX_RPC_BYTES} bytes` } }));
         req.destroy();
         return;
       }
@@ -201,6 +205,29 @@ export class ControlServer {
       let payload;
       try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
       catch { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'bad json' })); return; }
+      if (heartbeat) {
+        const identity = payload?.client ?? payload;
+        const id = identity?.client_id === undefined ? clientId : normalizeClientId(identity.client_id);
+        if (!identity || typeof identity !== 'object' || Array.isArray(identity) || !id || id === LEGACY_CLIENT_ID || (clientId && clientId !== id)) {
+          writeControlError(res, 400, 'INVALID_CLIENT', 'Heartbeat requires a valid matching client id.');
+          return;
+        }
+        // Headerless envelopes are charged to their client too. Header-bearing
+        // bridges already consumed that bucket before body parsing.
+        if (!clientId && !this.#consumeRate(`client:${id}`)) {
+          writeControlError(res, 429, 'RATE_LIMITED', 'Client heartbeat rate exceeded.'); return;
+        }
+        try {
+          this.clientRegistry?.touch({ ...identity, client_id: id });
+          await this.onHeartbeat(id);
+          if (res.destroyed) return;
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, server_time: Date.now(), interval_ms: this.clientRegistry?.intervalMs ?? 30000 }));
+        } catch {
+          if (!res.destroyed) writeControlError(res, 503, 'HEARTBEAT_FAILED', 'Heartbeat renewal failed.');
+        }
+        return;
+      }
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)
         || typeof payload.tool !== 'string'
         || (payload.args != null && (typeof payload.args !== 'object' || Array.isArray(payload.args)))) {
@@ -271,6 +298,7 @@ export class ControlServer {
         });
         const invoke = () => {
           if (controller.signal.aborted) throw controller.signal.reason ?? codedCancellation();
+          this.clientRegistry?.touch({ ...payload.client, client_id: normalizeClientId(payload.client?.client_id) ?? clientId });
           return fn(args ?? {}, { signal: controller.signal,
             client_id: normalizeClientId(payload.client?.client_id) ?? LEGACY_CLIENT_ID,
             task_id: normalizeTaskId(payload.client?.task_id),
@@ -288,6 +316,7 @@ export class ControlServer {
         // writeHead lands in the catch below, which would writeHead a second
         // time; that throws ERR_HTTP_HEADERS_SENT inside this async 'end'
         // handler, where nothing can catch it, and takes the daemon down.
+        this.clientRegistry?.touch({ ...payload.client, client_id: normalizeClientId(payload.client?.client_id) ?? clientId });
         const body = JSON.stringify({ ok: true, result });
         if (res.destroyed) return;
         res.writeHead(200, { 'content-type': 'application/json' });

@@ -53,6 +53,7 @@ async function cleanupFixture({ routingFails = false, queueMs = 0, stopCapture }
   const events = [], logs = [], state = { capture_lease: { expires_at: new Date(Date.now() + 60000).toISOString() } };
   const internal = Symbol();
   const deps = {
+    presenceTimer: undefined,
     stopLogMaintenance() {}, startupSettled: Promise.resolve(),
     ctrl: { stop: async () => { events.push('control'); await delay(queueMs); } },
     tools: { stop_operator_ui: async () => events.push('ui'), [internal]: {

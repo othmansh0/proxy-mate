@@ -400,8 +400,14 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
       await sweep();
       return syncInternal({}, 'claim_cleared');
     }),
-    renew: client_id => serialize(async () => {
+    renew: (client_id, { sync = true } = {}) => serialize(async () => {
       await claims.renewClaimsForClient(client_id, { now: now() });
+      if (!sync) {
+        // Heartbeats change deadlines only. The expiry timer owns pruning and
+        // union changes, so renewal never selects a service or runs networksetup.
+        arm(await claims.listClaims({ now: now(), includeExpired: true }));
+        return statusInternal();
+      }
       await sweep(); return syncInternal({}, 'claim_renewed');
     }),
     sync: () => serialize(async () => { await sweep(); return syncInternal(); }),

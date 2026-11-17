@@ -33,7 +33,8 @@ import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/net
 import { ProxyEngine, CA_CERT } from './lib/proxy.mjs';
 import { PacServer } from './lib/pac.mjs';
 import { createDaemonPacServer } from './lib/pac-host.mjs';
-import { makeTools, INTERNAL_ROUTING_CONTROL } from './lib/tools.mjs';
+import { createClientRegistry } from './lib/client-registry.mjs';
+import { makeTools, INTERNAL_PRESENCE_LOST, INTERNAL_ROUTING_CONTROL } from './lib/tools.mjs';
 import {
   readState, isStateStale, defensiveNetworkResetAllServices, sweepStaleTempFiles, readProcessIdentity,
   writePidFile, readPidFile, clearPidFile, clearState, patchState, readHandshake,
@@ -164,6 +165,8 @@ async function runDaemon(args) {
   configureConnectionAttempts();
   let releaseRuntime = async () => {}, stopLogMaintenance = () => {};
   let engine, tools, startupResourcesReady = false;
+  let presenceTimer;
+  const clientRegistry = createClientRegistry({ onPresenceLost: client => tools[INTERNAL_PRESENCE_LOST](client) });
   // Liveness answers from a worker thread so the guardian can tell a slow main
   // loop from a hung process; loop metrics feed /metrics and the liveness body.
   let liveness = null, loopMetrics = null;
@@ -203,6 +206,7 @@ async function runDaemon(args) {
     };
     stopLogMaintenance();
     await startupSettled;
+    clearInterval(presenceTimer);
     const routingDeadline = performance.now() + Math.min(6000, remaining());
     let routingRestored = false;
     await step('routing', 6000, async () => {
@@ -260,7 +264,7 @@ async function runDaemon(args) {
     catch (error) { engine.diagnostics.push({ kind: 'session-restore-failed', code: error.code ?? 'SESSION_RESTORE_FAILED' }); }
   }
   const pacServer = createDaemonPacServer();
-  tools = makeTools({ engine, pacServer, mode: 'daemon' });
+  tools = makeTools({ engine, pacServer, mode: 'daemon', clientRegistry });
 
   const { domains, tls_passthrough } = await loadDomainsConfig(args);
   if (!args.skipRouting && domains.length) validateRoutingDomains(domains, { allowBroad: args.allowBroadRouting === true });
@@ -365,7 +369,12 @@ async function runDaemon(args) {
   if (!args.skipTrust) await tools[INTERNAL_CAPTURE_CONTROL].start_sim_watcher({ interval: 5000 });
   phaseStart('control');
   // Publish readiness only after routing, trust and persisted rules are ready.
-  ctrl = new ControlServer({ port: controlPort, tools });
+  ctrl = new ControlServer({ port: controlPort, tools, clientRegistry,
+    onHeartbeat: client_id => tools[INTERNAL_ROUTING_CONTROL].renew(client_id, { sync: false }) });
+  presenceTimer = setInterval(() => clientRegistry.sweep().catch(error => {
+    logLine('daemon', 'presence sweep failed', { error_message: error.message });
+  }), 15000);
+  presenceTimer.unref();
   await writePidFile(process.pid);
   await patchState({ ...await readProcessIdentity(process.pid), control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
   await ctrl.start();
