@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Give guardian-initiated shutdowns 25 seconds before escalation, record shutdown intent and load-aware diagnostics, and retry failed recovery steps without blocking ticks.
+
 ## 0.9.1 — 2026-11-16
 
 - Wait for npm's publish-time scanning and registry availability before completing a release. Keep verification bounded and reject integrity mismatches or registry errors without retrying the upload.
