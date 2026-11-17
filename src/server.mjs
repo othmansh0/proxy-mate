@@ -38,6 +38,7 @@ import {
 } from './lib/state.mjs';
 import { ControlServer, callDaemon, probeDaemon, DEFAULT_CONTROL_PORT, SERIAL_TOOL_NAMES } from './lib/control.mjs';
 import { doctorSweep, PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT } from './lib/doctor.mjs';
+import { validateCustomCaPaths } from './lib/ca-paths.mjs';
 import { installLaunchAgent, uninstallLaunchAgent, launchAgentStatus } from './lib/launchagent.mjs';
 import { applyPacRouting, clearPacRouting, validateRoutingDomains } from './lib/pac.mjs';
 import { trustCaOnSimulators } from './lib/sim.mjs';
@@ -442,7 +443,15 @@ async function runDoctor() {
   process.stdout.write(JSON.stringify({ ...sweep, state_was_stale: stale, network_reset: networkReset }, null, 2) + '\n');
 }
 
-async function runInstall(args, { quiet = false } = {}) {
+async function runInstall(args, { quiet = false, stat = fs.stat } = {}) {
+  // Fail before generating/trusting a CA, staging a runtime or activating jobs.
+  try {
+    await validateCustomCaPaths({ keyPath: args.caKeyPath, certPath: args.caCertPath, stat });
+  } catch (error) {
+    process.stderr.write(JSON.stringify({ code: error.code, message: error.message,
+      details: error.details, recovery: error.recovery }) + '\n');
+    throw error;
+  }
   connectionAttemptTimeout();
   const serverPath = url.fileURLToPath(import.meta.url);
   const installRouting = await loadDomainsConfig(args);

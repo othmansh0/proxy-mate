@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep Simulator traffic responsive under build load with Interactive daemon and Standard guardian LaunchAgents; reject unusable custom CA paths before installation with coded diagnostics and recovery hints.
+
 ## 0.9.1 — 2026-11-16
 
 - Wait for npm's publish-time scanning and registry availability before completing a release. Keep verification bounded and reject integrity mismatches or registry errors without retrying the upload.
