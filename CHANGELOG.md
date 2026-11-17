@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve runtime history in rotating append-only journals, verify daemon process identity, sweep abandoned temp files, and attribute shutdowns and startup failures with phase timings and ports.
+
 ## 0.9.1 — 2026-11-16
 
 - Wait for npm's publish-time scanning and registry availability before completing a release. Keep verification bounded and reject integrity mismatches or registry errors without retrying the upload.
