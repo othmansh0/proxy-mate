@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { readEnvironment } from './environment.mjs';
 
 // A single overridable data root keeps runtime files consistent and makes the
@@ -8,6 +8,10 @@ import { readEnvironment } from './environment.mjs';
 export function resolveStateDirectory({ home = os.homedir(), env = process.env, exists = existsSync } = {}) {
   const explicit = readEnvironment('PROXY_MATE_HOME', env);
   if (explicit) return path.resolve(explicit);
+  // Under Node's test runner, never fall back to the developer's real state
+  // directory: a test once deleted ~/.proxy-mcp while a daemon was using it.
+  // Each test process gets its own private temporary home instead.
+  if (env.NODE_TEST_CONTEXT) return mkdtempSync(path.join(os.tmpdir(), 'proxy-mate-test-home-'));
   // Reuse existing installations in place: stored body paths, CA trust and
   // bridges may still refer to this directory. Never copy or rotate the CA.
   const legacy = path.join(home, '.proxy-mcp');

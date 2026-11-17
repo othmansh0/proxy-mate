@@ -24,3 +24,12 @@ test('sensitive access requires an explicit server-level grant', async () => {
   if (prior == null) delete process.env.PROXY_MATE_ALLOW_SENSITIVE;
   else process.env.PROXY_MATE_ALLOW_SENSITIVE = prior;
 });
+
+test('test runs never resolve the real state directory without an explicit home', async () => {
+  const { resolveStateDirectory } = await import('../src/lib/config.mjs');
+  const os = await import('node:os');
+  const resolved = resolveStateDirectory({ home: '/Users/someone', env: { NODE_TEST_CONTEXT: 'child-v8' }, exists: () => true });
+  assert.ok(resolved.startsWith(os.tmpdir()) && resolved.includes('proxy-mate-test-home-'), resolved);
+  assert.equal(resolveStateDirectory({ home: '/Users/someone', env: {}, exists: () => true }), '/Users/someone/.proxy-mcp');
+  assert.equal(resolveStateDirectory({ home: '/Users/someone', env: { NODE_TEST_CONTEXT: 'child-v8', PROXY_MATE_HOME: '/tmp/x' } }), '/tmp/x');
+});
