@@ -112,6 +112,7 @@ async function daemonFixture(failPhase) {
   const deps = {
     configureConnectionAttempts() {}, acquireRuntime: async () => { if (failPhase === 'lock') throw Object.assign(new Error('busy'), { code: 'RUNTIME_BUSY' }); return noOp; }, reconcileRuntime: async () => { if (failPhase === 'reconcile') throw Object.assign(new Error('stale'), { code: 'RECOVERY_FAILED' }); },
     sweepStaleTempFiles: noOp, STATE_DIR: home, startLogMaintenance: () => () => {},
+    startEventLoopMetrics: () => ({ stop() {} }), startLiveness: async () => ({ stop: noOp }),
     ProxyEngine: class { port = 123; sessionId = 'session'; diagnostics = []; start = noOp; },
     readState: async () => null, PacServer: class {}, makeTools: () => ({ stop_operator_ui: noOp, [internal]: { stop_proxy: async () => ({}) } }),
     loadDomainsConfig: async () => ({ domains: failPhase === 'routing' ? ['example.test'] : [], tls_passthrough: [] }),
