@@ -1,3 +1,5 @@
+import { createDeviceResolver } from './app-identity.mjs';
+import { createRoutingClaimsStore } from './routing-claims.mjs';
 import { BodyWorkerPool } from './body-worker-pool.mjs';
 import { drainServer, defaultDrainMs, trackServer, mockttpListener, limitedLog } from './drain.mjs';
 import { logLine } from './log-line.mjs';
@@ -153,7 +155,13 @@ export class ProxyEngine {
     logWrite,
     caStat,
     bodyWorkerOptions,
+    deviceResolver = createDeviceResolver(),
+    routingClaims = createRoutingClaimsStore(),
   } = {}) {
+    this.deviceResolver = deviceResolver;
+    this.captureSockets = new Map();
+    this.attributeFlow = createFlowAttributor({ listClaims: () => routingClaims.listClaims() });
+    this.attributeFlow('', null);
     this.logWrite = logWrite;
     this.caStat = caStat;
     this.bodyWorkers = new BodyWorkerPool(bodyWorkerOptions);
@@ -313,6 +321,13 @@ export class ProxyEngine {
     activeSocketSets.add(this.drainTracking.sockets);
     registerGauge('proxy.active_connections', activeConnections);
     listener.maxConnections = 128;
+    listener.on('connection', socket => {
+      this.captureSockets.set(socket.remotePort, socket);
+      try { this.deviceResolver(socket); } catch { increment('proxy.attribution_degraded'); }
+      socket.once('close', () => {
+        if (this.captureSockets.get(socket.remotePort) === socket) this.captureSockets.delete(socket.remotePort);
+      });
+    });
     listener.on('drop', () => { increment('proxy.connections_dropped'); this.dropLog({}); });
     this.port = server.port;
     this.socksEnabled = enableSocks === true;
@@ -436,6 +451,15 @@ export class ProxyEngine {
   // ---- capture ----
   async #attachCaptureHandlers() {
     await this.server.on('request', (req) => {
+      let attribution;
+      try {
+        const socket = this.captureSockets.get(req.remotePort ?? req.remote_port);
+        const device = socket ? this.deviceResolver(socket) : null;
+        attribution = this.attributeFlow(req.hostname ?? new URL(req.url).hostname, device);
+      } catch {
+        increment('proxy.attribution_degraded');
+        attribution = { owner_client: null, owner_task: null, device_udid: null, attribution: 'unknown' };
+      }
       this.#rememberRequest(req.id, req);
       increment('proxy.bytes', req.body?.buffer?.length ?? 0);
       return this.#queueCapture(req.id, async () => {
@@ -447,6 +471,7 @@ export class ProxyEngine {
         const flow = this.flows.get(req.id) ?? {
           id: req.id, timestamp: Date.now(), request: null, response: null,
         };
+        Object.assign(flow, attribution);
         flow.request = {
             method: req.method,
             url: rawCaptureEnabled ? req.url : redactUrl(req.url),
@@ -2227,4 +2252,24 @@ export async function removeOwnedMockBody(filePath) {
   const resolved = path.resolve(filePath);
   if (!resolved.startsWith(ownedRoot)) return;
   try { await fs.unlink(resolved); } catch { /* already absent */ }
+}
+
+// Refresh asynchronously at most once a second, with no I/O on the flow path.
+export function createFlowAttributor({ listClaims, now = Date.now } = {}) {
+  let snapshot = [], refreshedAt = -Infinity, refreshing = false;
+  return (hostname, device_udid = null) => {
+    const at = now();
+    if (!refreshing && at - refreshedAt >= 1000) {
+      refreshing = true; refreshedAt = at;
+      Promise.resolve().then(listClaims).then(claims => {
+        snapshot = claims.map(c => ({ ...c, hosts: c.domains.map(domain => new RegExp('^' + domain.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i')) }));
+      }).catch(() => { snapshot = []; increment('proxy.attribution_degraded'); }).finally(() => { refreshing = false; });
+    }
+    const active = snapshot.filter(c => Date.parse(c.expires_at) > at);
+    const devices = device_udid ? active.filter(c => c.device_udids?.some(id => id.toUpperCase() === device_udid.toUpperCase())) : [];
+    const matches = devices.length === 1 ? devices : active.filter(c => c.hosts.some(host => host.test(hostname ?? '')));
+    const owner = matches.length === 1 ? matches[0] : null;
+    return { owner_client: owner?.client_id ?? null, owner_task: owner?.task_id ?? null, device_udid,
+      attribution: owner ? devices.length === 1 ? 'device' : 'claim' : matches.length > 1 ? 'ambiguous' : 'unknown' };
+  };
 }

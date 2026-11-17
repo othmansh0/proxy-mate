@@ -10,6 +10,10 @@ import { validateRoutingDomains } from './pac.mjs';
 const fail = (code, message) => Object.assign(new Error(message), {
   code, retryable: false, recovery: 'Correct the routing claim and retry.',
 });
+export function validateDeviceUdids(value) {
+  if (!Array.isArray(value) || value.length > 8 || value.some(id => typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) throw fail('ROUTING_DEVICE_INVALID', 'Supply at most eight Simulator device UUIDs.');
+  return [...new Set(value.map(id => id.toUpperCase()))];
+}
 const time = value => new Date(value).getTime();
 export const unionDomains = claims => [...new Set(claims.flatMap(c => c.domains))].sort();
 export const nextExpiry = claims => claims.length ? new Date(Math.min(...claims.map(c => time(c.expires_at)))).toISOString() : null;
@@ -34,6 +38,7 @@ export function createRoutingClaimsStore({ directory = STATE_DIR, now = Date.now
             (c.task_id != null && !normalizeTaskId(c.task_id)) ||
             !Number.isInteger(c.requested_seconds) || c.requested_seconds < 1 || c.requested_seconds > 86400 ||
             !['created_at', 'renewed_at', 'expires_at'].every(k => typeof c[k] === 'string' && Number.isFinite(time(c[k])))) throw new Error('Invalid claim');
+        if (c.device_udids !== undefined) validateDeviceUdids(c.device_udids);
         validateRoutingDomains(c.domains, { allowBroad: true });
         const key = JSON.stringify([c.client_id, c.task_id ?? null]);
         if (keys.has(key) || ids.has(c.claim_id)) throw new Error('Duplicate claim');
@@ -68,13 +73,15 @@ export function createRoutingClaimsStore({ directory = STATE_DIR, now = Date.now
       if (data.corrupt) rows.corrupt = true;
       return rows;
     }),
-    upsertClaim: ({ client_id = LEGACY_CLIENT_ID, task_id, domains, durationSeconds, allowBroad = false, now: at = now() }) => mutate(data => {
+    upsertClaim: ({ client_id = LEGACY_CLIENT_ID, task_id, domains, device_udids, durationSeconds, allowBroad = false, now: at = now() }) => mutate(data => {
       if (typeof client_id !== 'string' || !client_id.trim() || (task_id != null && !normalizeTaskId(task_id))) throw fail('ROUTING_ID_INVALID', 'Supply a client id and a valid optional task id.');
       if (!Number.isInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 86400) throw fail('ROUTING_LEASE_INVALID', 'Routing duration must be 1-86400 seconds.');
       domains = validateRoutingDomains(domains, { allowBroad });
       const previous = data.claims.find(c => c.client_id === client_id && (c.task_id ?? null) === (task_id ?? null));
+      if (device_udids !== undefined) device_udids = validateDeviceUdids(device_udids);
       const stamp = new Date(at).toISOString();
       const claim = { claim_id: previous?.claim_id ?? randomUUID(), client_id, task_id: task_id ?? null, domains,
+        ...(device_udids !== undefined || previous?.device_udids ? { device_udids: device_udids ?? previous.device_udids } : {}),
         requested_seconds: durationSeconds, created_at: previous?.created_at ?? stamp, renewed_at: stamp,
         expires_at: new Date(time(at) + durationSeconds * 1000).toISOString() };
       const updated = [...data.claims.filter(c => c !== previous), claim];

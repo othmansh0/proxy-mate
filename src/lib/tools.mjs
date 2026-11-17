@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 
 import { CA_CERT, CA_DIR, ensureCA, rotateCA, removeOwnedMockBody } from './proxy.mjs';
 import { applyPacRouting, clearPacRouting, getAutoProxyState, validateRoutingDomains, createRoutingController, pickActiveNetworkService } from './pac.mjs';
-import { createRoutingClaimsStore } from './routing-claims.mjs';
+import { createRoutingClaimsStore, validateDeviceUdids } from './routing-claims.mjs';
 import { LEGACY_CLIENT_ID } from './client-identity.mjs';
 import { gettingStarted, searchHelp, setupWorkflows } from './guidance.mjs';
 import { runtimeIdentity, readRuntimeEvents, recordRuntimeEvent } from './runtime-identity.mjs';
@@ -143,6 +143,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   }
   async function applyClaim(args, context, preserveExpiry = false) {
     validateRoutingDomains(args.domains, { allowBroad: args.allow_broad_routing === true });
+    const device_udids = args.device_udid === undefined ? undefined : validateDeviceUdids(Array.isArray(args.device_udid) ? args.device_udid : [args.device_udid]);
     const duration = args.duration_seconds ?? 3600;
     if (!Number.isInteger(duration) || duration < 1 || duration > 86400) throw Object.assign(new Error('Routing duration must be 1-86400 seconds.'), { code: 'ROUTING_LEASE_INVALID' });
     routingOptions = { network_service: args.network_service, pac_port: args.pac_port };
@@ -166,10 +167,10 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
         // Store upsert accepts an explicit clock; anchoring it at the original
         // renewal preserves both requested duration and the exact expiry.
         const stored = (await claims.listClaims()).find(c => c.claim_id === previous.claim_id);
-        await claims.upsertClaim({ ...owner(context), domains: args.domains, allowBroad: args.allow_broad_routing === true,
+        await claims.upsertClaim({ ...owner(context), domains: args.domains, device_udids, allowBroad: args.allow_broad_routing === true,
           durationSeconds: stored.requested_seconds, now: Date.parse(stored.expires_at) - stored.requested_seconds * 1000 });
         status = await control.sync();
-      } else status = await control.set({ ...owner(context), domains: args.domains,
+      } else status = await control.set({ ...owner(context), domains: args.domains, device_udids,
         durationSeconds: args.duration_seconds ?? 3600, allowBroad: args.allow_broad_routing === true,
         replaceExisting: args.replace_existing_proxy === true });
     } catch (error) {
@@ -266,6 +267,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   function flowSummary(f, { includeSensitive = false, view = 'full' } = {}) {
     const summary = {
       id: f.id,
+      owner_client: f.owner_client ?? null, owner_task: f.owner_task ?? null,
+      device_udid: f.device_udid ?? null, attribution: f.attribution ?? 'unknown',
       method: f.request?.method,
       url: includeSensitive ? f.request?.url : redactUrl(f.request?.url),
       hostname: f.request?.hostname ?? safeHostname(f.request?.url),
@@ -297,6 +300,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     const resInline = full ? resRaw : resPreview.text;
     return {
       id: f.id,
+      owner_client: f.owner_client ?? null, owner_task: f.owner_task ?? null,
+      device_udid: f.device_udid ?? null, attribution: f.attribution ?? 'unknown',
       timestamp: f.timestamp,
       request: f.request && {
         method: f.request.method,

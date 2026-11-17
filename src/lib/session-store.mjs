@@ -16,7 +16,7 @@ let pendingRows = 0;
 
 const FORMAT = 'proxy-mate.session/v1';
 const SCHEMA_VERSION = 1;
-const DATABASE_SCHEMA_VERSION = 2;
+const DATABASE_SCHEMA_VERSION = 3;
 const DATABASE_FILE = 'sessions.sqlite3';
 const DEFAULT_RETENTION = Object.freeze({
   max_flows: 10_000,
@@ -124,12 +124,21 @@ export class SessionStore {
       `);
       const version = this.#prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get();
       if (version && Number(version.value) === 1) this.#migrateDatabaseV1ToV2();
-      else if (version && Number(version.value) !== DATABASE_SCHEMA_VERSION) {
+      else if (version && ![2, 3].includes(Number(version.value))) {
         throw new SessionStoreError(
           'UNSUPPORTED_DATABASE_SCHEMA',
           `Unsupported session database schema: ${version.value}`,
         );
       }
+      this.#transaction(() => {
+        const columns = new Set(this.#prepare('PRAGMA table_info(flows)').all().map(row => row.name));
+        for (const [name, type] of [['owner_client', 'TEXT'], ['owner_task', 'TEXT'], ['device_udid', 'TEXT'], ['attribution', "TEXT NOT NULL DEFAULT 'unknown'"]]) {
+          if (!columns.has(name)) this.db.exec(`ALTER TABLE flows ADD COLUMN ${name} ${type}`);
+        }
+        this.db.exec(`CREATE INDEX IF NOT EXISTS flows_owner_client ON flows(owner_client, session_id, sequence) WHERE owner_client IS NOT NULL;
+          CREATE INDEX IF NOT EXISTS flows_device_udid ON flows(device_udid, session_id, sequence) WHERE device_udid IS NOT NULL;`);
+        this.#prepare("UPDATE store_meta SET value = ? WHERE key = 'schema_version'").run(String(DATABASE_SCHEMA_VERSION));
+      });
       this.#prepare(`
         INSERT INTO store_meta(key, value) VALUES ('schema_version', ?)
         ON CONFLICT(key) DO NOTHING
@@ -317,11 +326,11 @@ export class SessionStore {
       const sizeDelta = sizes.totalBytes - Number(currentRow.total_bytes);
       this.#prepare(`
         UPDATE flows SET updated_at = ?, data_json = ?, data_bytes = ?,
-          spilled_body_bytes = ?, total_bytes = ?, method = ?, url = ?, hostname = ?, status_code = ?
+          spilled_body_bytes = ?, total_bytes = ?, method = ?, url = ?, hostname = ?, status_code = ?, owner_client = ?, owner_task = ?, device_udid = ?, attribution = ?
         WHERE session_id = ? AND id = ?
       `).run(
         entry.updated_at, sizes.json, sizes.dataBytes, sizes.spilledBytes, sizes.totalBytes,
-        indexed.method, indexed.url, indexed.hostname, indexed.statusCode, id, targetId,
+        indexed.method, indexed.url, indexed.hostname, indexed.statusCode, entry.owner_client ?? null, entry.owner_task ?? null, entry.device_udid ?? null, entry.attribution ?? 'unknown', id, targetId,
       );
       this.#prepare('UPDATE sessions SET updated_at = ?, total_bytes = total_bytes + ? WHERE id = ?')
         .run(entry.updated_at, sizeDelta, id);
@@ -330,12 +339,13 @@ export class SessionStore {
     }));
   }
 
-  async getFlow({ sessionId, flowId }) {
+  async getFlow({ sessionId, flowId, filters = {} }) {
     await this.init();
     await this.#readBarrier();
     const id = normalizeId(sessionId, 'session_id');
     this.#requireSessionRow(id);
-    const row = this.#prepare('SELECT * FROM flows WHERE session_id = ? AND id = ?').get(id, normalizeId(flowId, 'flow_id'));
+    const filtered = flowFilterSql(filters);
+    const row = this.#prepare(`SELECT * FROM flows WHERE session_id = ? AND id = ? ${filtered.sql}`).get(id, normalizeId(flowId, 'flow_id'), ...filtered.params);
     return row ? flowRow(row) : null;
   }
 
@@ -356,7 +366,7 @@ export class SessionStore {
     const after = Math.max(cursorValue, sinceSequence);
     const sqlFilters = flowFilterSql(filters);
     const rows = this.#prepare(`
-      SELECT * FROM flows WHERE session_id = ? AND sequence > ? ${sqlFilters.sql}
+      SELECT id, sequence, data_json, owner_client, owner_task, device_udid, attribution FROM flows WHERE session_id = ? AND sequence > ? ${sqlFilters.sql}
       ORDER BY sequence ASC LIMIT ?
     `).all(id, after, ...sqlFilters.params, pageSize + 1);
     const hasMore = rows.length > pageSize;
@@ -471,12 +481,12 @@ export class SessionStore {
       INSERT INTO flows(
         session_id, id, sequence, created_at, created_at_ms, updated_at,
         data_json, data_bytes, spilled_body_bytes, total_bytes,
-        method, url, hostname, status_code
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        method, url, hostname, status_code, owner_client, owner_task, device_udid, attribution
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       sessionId, entry.id, entry.sequence, entry.created_at, captureTime(entry), entry.updated_at,
       sizes.json, sizes.dataBytes, sizes.spilledBytes, sizes.totalBytes,
-      indexed.method, indexed.url, indexed.hostname, indexed.statusCode,
+      indexed.method, indexed.url, indexed.hostname, indexed.statusCode, entry.owner_client ?? null, entry.owner_task ?? null, entry.device_udid ?? null, entry.attribution ?? 'unknown',
     );
   }
 
@@ -808,6 +818,10 @@ function normalizeStoredFlow(flow, fallback, { stripPaths }) {
     if (output.request) delete output.request.body_path;
     if (output.response) delete output.response.body_path;
   }
+  // Keep legacy/unknown JSON compact; indexed columns supply explicit defaults.
+  if ((!output.attribution || output.attribution === 'unknown') && output.owner_client == null && output.owner_task == null && output.device_udid == null) {
+    for (const key of ['owner_client', 'owner_task', 'device_udid', 'attribution']) delete output[key];
+  }
   output.id = normalizeId(output.id ?? output.flow_id, 'flow_id');
   delete output.flow_id;
   if (!Number.isInteger(output.sequence) || output.sequence < 1) throw new SessionStoreError('INVALID_DATA', 'flow sequence must be a positive integer');
@@ -841,6 +855,16 @@ function indexedFlowFields(flow) {
 function flowFilterSql(filters = {}) {
   const clauses = [];
   const params = [];
+  const ownership = [], ownershipParams = [];
+  for (const key of ['owner_client', 'owner_task']) if (filters[key] != null) {
+    ownership.push(`${key} = ?`); ownershipParams.push(String(filters[key]));
+  }
+  if (ownership.length) {
+    clauses.push(`((${ownership.join(' AND ')})${filters.include_unknown === true ? " OR owner_client IS NULL" : ''})`);
+    params.push(...ownershipParams);
+  } else if (filters.include_unknown === false) clauses.push("owner_client IS NOT NULL");
+  // Device constraints always apply, including to unowned flows.
+  if (filters.device_udid != null) { clauses.push('device_udid = ?'); params.push(String(filters.device_udid)); }
   const addContains = (column, value) => {
     clauses.push(`${column} LIKE ? ESCAPE '\\'`);
     params.push(`%${escapeLike(String(value))}%`);
@@ -885,6 +909,8 @@ function flowRow(row) {
   if (flow.id !== row.id || Number(flow.sequence) !== Number(row.sequence)) {
     throw new SessionStoreError('CORRUPT_DATABASE', `Flow row identity mismatch: ${row.session_id}/${row.id}`);
   }
+  flow.owner_client = row.owner_client ?? null; flow.owner_task = row.owner_task ?? null;
+  flow.device_udid = row.device_udid ?? null; flow.attribution = row.attribution ?? 'unknown';
   return flow;
 }
 
@@ -915,6 +941,7 @@ function sanitizeForExport(session) {
   for (const flow of output.flows) {
     if (flow.request) delete flow.request.body_path;
     if (flow.response) delete flow.response.body_path;
+    for (const key of ['owner_client', 'owner_task', 'device_udid', 'attribution']) delete flow[key];
   }
   return output;
 }
