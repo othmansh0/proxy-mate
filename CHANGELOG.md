@@ -6,6 +6,7 @@
 - Add an isolated daemon load harness with real bridge and guardian probes, optional CPU starvation and background scheduling, JSON evidence, and owned-process cleanup.
 - Keep authenticated health probes available under agent load, isolate bridge rate and long-call budgets, expose control metrics, and reduce bridge readiness and subscription polling.
 - Add an authenticated worker-thread liveness probe with heartbeat age and traffic progress, plus event-loop delay and utilization gauges, so supervision can distinguish a slow main loop from a stalled process.
+- Keep Simulator traffic responsive under build load with Interactive daemon and Standard guardian LaunchAgents; reject unusable custom CA paths before installation with coded diagnostics and recovery hints.
 
 ## 0.9.1 — 2026-11-16
 
