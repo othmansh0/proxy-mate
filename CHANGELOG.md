@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Upgrade note: routing tools now manage per-agent/task claims; clear_proxy_routing clears only your claim (scope "all" clears everyone). SSL additions preserve expiry, status exposes the union and routing loss, and daemon results warn owners of expired or suspended claims. Active pre-claims legacy routing is left untouched until explicitly cleared.
+
 - Give guardian-initiated shutdowns 25 seconds before escalation, record shutdown intent and load-aware diagnostics, and retry failed recovery steps without blocking ticks.
 - Add an isolated daemon load harness with real bridge and guardian probes, optional CPU starvation and background scheduling, JSON evidence, and owned-process cleanup.
 - Keep authenticated health probes available under agent load, isolate bridge rate and long-call budgets, expose control metrics, and reduce bridge readiness and subscription polling.

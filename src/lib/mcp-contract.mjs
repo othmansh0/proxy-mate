@@ -74,6 +74,22 @@ const flowDetailSchema = z.looseObject({
   response: flowPartSchema.nullable().optional(),
   resource_uri: resourceUriSchema.optional(),
 });
+const routingLossReasonSchema = z.enum(['lease_expired', 'daemon_restart', 'external_change', 'guardian_recovery']);
+const routingClaimSchema = z.object({
+  claim_id: z.string(), client_id: z.string(), task_id: z.string().nullable(),
+  domains: z.array(z.string()), expires_at: z.string(),
+  state: z.enum(['active', 'suspended', 'expired']), mine: z.boolean().optional(),
+});
+const routingWarningSchema = z.object({
+  state: z.enum(['expired', 'suspended']), reason: routingLossReasonSchema,
+  claim_id: z.string(), recovery: z.string(),
+});
+const routingResultSchema = z.looseObject({
+  claim: routingClaimSchema.nullable().optional(), routing_union: z.array(z.string()).optional(),
+  routing_status: z.object({ active: z.boolean(), network_service: z.string().nullable(),
+    union_domains: z.array(z.string()), claims: z.array(routingClaimSchema), last_change: z.unknown().nullable() }).optional(),
+  removed_claims: z.array(routingClaimSchema).optional(), removed_other_claims: z.array(routingClaimSchema).optional(),
+});
 const proxyStatusSchema = z.looseObject({
   running: z.boolean().optional(),
   connection_attempt_timeout_ms: z.number().int().min(10).max(10000).optional(),
@@ -82,6 +98,10 @@ const proxyStatusSchema = z.looseObject({
   recording: z.boolean().optional(),
   mode: z.string().optional(),
   routing_active: z.boolean().optional(),
+  routing_claims: z.array(routingClaimSchema.extend({ mine: z.boolean() })).optional(),
+  routing_union: z.array(z.string()).optional(),
+  routing_lost_reason: routingLossReasonSchema.nullable().optional(),
+  routing_lost_at: z.string().nullable().optional(),
   network_service: z.string().nullable().optional(),
   pac_url: z.string().nullable().optional(),
   domains: z.array(z.string()).optional(),
@@ -111,13 +131,13 @@ const diagnosticsSchema = z.looseObject({
   persistence_health: z.unknown().optional(),
 });
 
-function toolResultSchema(dataSchema = z.unknown()) {
+function toolResultSchema(dataSchema = z.looseObject({})) {
   // Keep top-level legacy aliases pass-through while validating the canonical
   // `data` payload used by current clients.
   return z.looseObject({
     schema_version: z.literal(MCP_CONTRACT_VERSION),
     ok: z.boolean(),
-    data: dataSchema.nullable(),
+    data: dataSchema.extend({ routing_warning: routingWarningSchema.optional() }).nullable(),
     error: errorSchema.nullable(),
     warnings: z.array(z.string()),
     next_actions: z.array(z.string()),
@@ -131,6 +151,11 @@ function toolResultSchema(dataSchema = z.unknown()) {
 export const toolOutputSchema = toolResultSchema();
 
 const typedToolOutputSchemas = Object.freeze({
+  get_started: toolResultSchema(z.looseObject({ routing_guidance: z.string().optional() })),
+  set_proxy_routing: toolResultSchema(routingResultSchema),
+  clear_proxy_routing: toolResultSchema(routingResultSchema),
+  start_proxy: toolResultSchema(z.looseObject({ routing: routingResultSchema.optional() })),
+  enable_ssl_proxying: toolResultSchema(z.looseObject({ routing: routingResultSchema.optional() })),
   query_flow_json: toolResultSchema(z.looseObject({
     flow_id: z.string(), kind: z.enum(['req', 'res']), redacted: z.literal(true),
     results: z.array(z.looseObject({ pointer: z.string(), matched_count: z.number().int().nonnegative(),
@@ -226,7 +251,7 @@ const setRoutingSchema = {
   pac_port: z.number().int().min(1).max(65535).optional(),
   allow_broad_routing: z.boolean().optional(),
   replace_existing_proxy: z.boolean().optional(),
-  duration_seconds: z.number().int().min(1).max(86400).optional().describe('Routing lease in seconds; defaults to one hour, then owned PAC settings are restored.'),
+  duration_seconds: z.number().int().min(1).max(86400).optional().describe('Routing lease in seconds; defaults to one hour, then only your claim expires; other agents keep routing active.'),
 };
 
 // zod 4's z.record skips a '__proto__' key outright ("if (key === '__proto__')
@@ -441,8 +466,8 @@ export const MCP_TOOLS = Object.freeze([
     tls_passthrough: z.array(z.string().min(1).max(255)).max(256).optional(),
   }, OPEN_MUTATE, { longRunning: true }),
   tool('stop_proxy', 'Stop the proxy, restore recorded PAC routing, and stop background watchers. Durable captured flows remain available.', {}, OPEN_MUTATE, { longRunning: true }),
-  tool('set_proxy_routing', 'Apply PAC routing for the given host globs. Other hosts remain direct.', setRoutingSchema, OPEN_MUTATE, { longRunning: true }),
-  tool('clear_proxy_routing', 'Restore the previously recorded PAC configuration and stop the PAC server.', { network_service: z.string().optional() }, MUTATE, { longRunning: true }),
+  tool('set_proxy_routing', 'Set your agent/task routing claim. PAC serves the union of all active claims; default duration is one hour.', setRoutingSchema, OPEN_MUTATE, { longRunning: true }),
+  tool('clear_proxy_routing', 'Clear only your routing claim. Other agents keep routing active. Explicit scope all clears every claim.', { network_service: z.string().optional(), scope: z.enum(['mine', 'all']).optional() }, MUTATE, { longRunning: true }),
   tool('trust_ca_on_simulators', 'Import the proxy CA on every currently booted iOS Simulator.', {}, ADD, { longRunning: true }),
   tool('setup_simulator_certificate', 'Preflight Xcode and import the proxy CA on selected Simulators without erasing devices or resetting keychains.', {
     scope: z.enum(['booted', 'all_available']).optional(),

@@ -53,3 +53,13 @@ test('onboarding reuses active capture, exposes degraded coverage and respects a
   assert.deepEqual(help.next_calls.map((next) => next.tool), ['get_flows']);
   assert.equal(gettingStarted({}, null, { daemonReachable: true }).stage, 'daemon_status_unavailable');
 });
+
+test('routing guidance re-arms my claim while another agent keeps routing active', () => {
+  const help = gettingStarted({ url: 'https://api.test', capture_scope: 'domains' }, {
+    running: true, recording: true, routing_active: true,
+    routing_claims: [{ mine: false, state: 'active' }],
+  });
+  assert.ok(help.next_calls.some(c => c.tool === 'set_proxy_routing'));
+  assert.match(help.routing_guidance, /per agent/);
+  assert.match(help.routing_guidance, /clear_proxy_routing/);
+});
