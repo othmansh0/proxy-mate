@@ -26,7 +26,7 @@ import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
 import { SERVER_INSTRUCTIONS } from './lib/guidance.mjs';
 import { recordRuntimeEvent, recordPreviousExit } from './lib/runtime-identity.mjs';
-import { logLine } from './lib/log-line.mjs';
+import { logLine, errorFields } from './lib/log-line.mjs';
 import { rememberCaptureLease, INTERNAL_CAPTURE_CONTROL } from './lib/capture-lease.mjs';
 import { configureConnectionAttempts, connectionAttemptTimeout } from './lib/network-policy.mjs';
 
@@ -37,6 +37,8 @@ import {
   readState, isStateStale, defensiveNetworkResetAllServices, sweepStaleTempFiles, readProcessIdentity,
   writePidFile, readPidFile, clearPidFile, clearState, patchState, readHandshake,
 } from './lib/state.mjs';
+import { startLiveness } from './lib/liveness.mjs';
+import { startEventLoopMetrics } from './lib/event-loop-metrics.mjs';
 import { ControlServer, callDaemon, probeDaemon, DEFAULT_CONTROL_PORT, SERIAL_TOOL_NAMES } from './lib/control.mjs';
 import { doctorSweep, PROXY_PORT_DEFAULT, PAC_PORT_DEFAULT } from './lib/doctor.mjs';
 import { validateCustomCaPaths } from './lib/ca-paths.mjs';
@@ -161,6 +163,14 @@ async function runDaemon(args) {
   configureConnectionAttempts();
   let releaseRuntime = async () => {}, stopLogMaintenance = () => {};
   let engine, tools, startupResourcesReady = false;
+  // Liveness answers from a worker thread so the guardian can tell a slow main
+  // loop from a hung process; loop metrics feed /metrics and the liveness body.
+  let liveness = null, loopMetrics = null;
+  const stopObservability = async () => {
+    loopMetrics?.stop(); loopMetrics = null;
+    try { await liveness?.stop(); } catch { /* best effort */ }
+    liveness = null;
+  };
   const durations = Object.fromEntries(['lock', 'reconcile', 'session_restore', 'ca', 'host_trust', 'engine', 'routing', 'trust', 'rules', 'watcher', 'control'].map(name => [`${name}_ms`, 0]));
   let phase = 'lock', phaseAt = performance.now();
   const phaseStart = (next) => {
@@ -184,12 +194,14 @@ async function runDaemon(args) {
       await patchState({ active_session_id: engine.sessionId,
         ...(lease && Date.parse(lease.expires_at) > Date.now() ? { capture_lease: lease } : {}) });
     }
+    await stopObservability();
     await releaseRuntime();
   };
   const shutdown = installShutdownHandlers(async () => {
     await startupSettled;
     if (startupResourcesReady) return cleanup();
     stopLogMaintenance();
+    await stopObservability();
     await releaseRuntime();
   });
   try {
@@ -197,6 +209,9 @@ async function runDaemon(args) {
   phaseStart('reconcile');
   await sweepStaleTempFiles(STATE_DIR);
   await reconcileRuntime();
+  loopMetrics = startEventLoopMetrics();
+  try { liveness = await startLiveness(); }
+  catch (error) { logLine('daemon', 'liveness unavailable', errorFields(error)); }
   stopLogMaintenance = startLogMaintenance();
   phaseStart('session_restore');
   engine = new ProxyEngine();
