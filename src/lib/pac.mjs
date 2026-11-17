@@ -130,7 +130,7 @@ export class PacServer {
 }
 
 // Detect what (if anything) is already serving at http://127.0.0.1:<port>/proxy.pac.
-async function fetchExistingPac(port) {
+export async function fetchExistingPac(port, { maxBytes = 8192 } = {}) {
   return new Promise((resolve) => {
     let settled = false, deadline;
     const finish = (value) => { if (!settled) { settled = true; clearTimeout(deadline); resolve(value); } };
@@ -139,7 +139,7 @@ async function fetchExistingPac(port) {
       let bytes = 0;
       res.on('data', (c) => {
         bytes += c.length;
-        if (bytes > 8192) { req.destroy(); finish(null); }
+        if (bytes > maxBytes) { req.destroy(); finish(null); }
         else chunks.push(c);
       });
       res.on('error', () => finish(null));

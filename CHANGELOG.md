@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Preserve slow daemon owners using worker liveness, scale guardian probe and failure windows with load, and record bounded slow/hung diagnostics.
+- Serve the read-only union PAC from the guardian across daemon restarts, with explicit in-process fallback when the guardian host is unavailable.
 
 - Give guardian-initiated shutdowns 25 seconds before escalation, record shutdown intent and load-aware diagnostics, and retry failed recovery steps without blocking ticks.
 - Add an isolated daemon load harness with real bridge and guardian probes, optional CPU starvation and background scheduling, JSON evidence, and owned-process cleanup.

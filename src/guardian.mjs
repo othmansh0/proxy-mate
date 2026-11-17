@@ -4,13 +4,26 @@ import { realpathSync } from 'node:fs';
 import { createGuardian } from './lib/guardian.mjs';
 import { logLine, errorFields } from './lib/log-line.mjs';
 import os from 'node:os';
+import { createPacHost } from './lib/pac-host.mjs';
 
 export function startGuardian({ tick = createGuardian(), log = logLine,
   interval = setInterval, clear = clearInterval, timeout = setTimeout, clearTimeout: cancelTimeout = clearTimeout,
   exit = process.exit.bind(process), once = process.once.bind(process), now = Date.now,
   loadavg = os.loadavg, stopWaitMs = 10000,
+  env = process.env, pacHostOptions = {}, pacHostFactory = createPacHost,
 } = {}) {
   let busy = false, stopping = false, current = Promise.resolve(), stopped;
+  let pacHost;
+  const ready = Promise.resolve().then(async () => {
+    if (env.PROXY_MATE_PAC_HOST !== 'guardian') return;
+    try {
+      pacHost = pacHostFactory({ ...pacHostOptions, port: Number(env.PROXY_MATE_PAC_PORT ?? 8081) });
+      await pacHost.start();
+      log('guardian', 'PAC host started', { port: pacHost.port });
+    } catch (error) {
+      log('guardian', 'PAC host unavailable', errorFields(error));
+    }
+  });
   log('guardian', 'started', { tick_ms: 3000, stop_wait_ms: stopWaitMs });
   const timer = interval(() => {
     if (busy || stopping) return;
@@ -31,6 +44,8 @@ export function startGuardian({ tick = createGuardian(), log = logLine,
         exit(1);
       }, stopWaitMs);
       await current;
+      await ready;
+      await pacHost?.stop();
       cancelTimeout(deadline);
       log('guardian', 'stopped');
       exit(0);
@@ -39,7 +54,7 @@ export function startGuardian({ tick = createGuardian(), log = logLine,
   };
   once('SIGTERM', stop);
   once('SIGINT', stop);
-  return { stop };
+  return { stop, ready };
 }
 
 // Node resolves symlinks for the main module, so compare real paths: a
