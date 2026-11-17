@@ -67,6 +67,16 @@ npm run verify:simulator -- DEVICE_UDID
 
 Add `--install` to explicitly import the default CA into that one device before testing. This command uses the CA in `PROXY_MATE_HOME` (default `~/.proxy-mate`); use the MCP verifier for a daemon configured with a custom CA pair. The first check compiles a small Swift probe with your selected Xcode; subsequent checks use a private cached binary. It requires no third-party simulator driver.
 
+## Routing across agents and restarts
+
+`set_proxy_routing` owns one claim per bridge client/task. Pass `device_udid` with the UUID of the Simulator you drive, or an array of at most eight UUIDs, so flow and breakpoint attribution can use device identity. `domains` contains explicit host globs. The PAC routes the union of unexpired claims. `duration_seconds` defaults to 3600 (1–86400); bridge heartbeats renew the client's deadlines. Expiry or presence loss removes that client's routing without stopping other captures. `clear_proxy_routing` removes only the current task's claim; `scope: "all"` deliberately clears all claims, including legacy unclaimed routing.
+
+Installed daemon and guardian jobs use `PROXY_MATE_PAC_HOST=guardian` and a shared PAC port (8081 by default). The guardian serves a read-only union PAC from loopback HTTP independently of the daemon. If the host is unavailable on the daemon's first routing use, the daemon logs an in-process fallback. It cannot take over a port held by another listener. Foreground mode uses an in-process PAC unless guardian hosting is explicitly selected.
+
+Shutdown restores owned network settings first and retains routing claims. After readiness, unexpired claims re-arm only if the restored PAC URL and enabled state still match the saved snapshot. Retries recheck that comparison. VPN/user/external proxy changes are preserved; recovery never blindly replaces them. Check claims, routing loss and `routing_warning` in tool results. After inspecting current settings, call `set_proxy_routing` to re-arm explicitly if needed. `--no-routing` disables CLI startup domain routing; existing agent claims can still re-arm.
+
+The PAC is served over HTTP, never `file://`. Modern macOS/iOS reject file PAC URLs; writing a local file is not a supported routing alternative. PAC caches can also outlive their server. `PROXY; DIRECT` is not a deadline: a proxy that accepts a connection but hangs may time out without DIRECT fallback. Native Simulator qualification for the 0.10.0 restart/re-arm changes is still pending.
+
 ## What matches Proxyman, and what differs
 
 | Step | proxy-mate behavior |

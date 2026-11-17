@@ -2,6 +2,8 @@
 
 `proxy-mate` can decrypt local HTTPS traffic and its generated CA private key is security-sensitive. Use it only on a trusted development Mac and never publish or share `~/.proxy-mate/ca/key.pem`.
 
+Per-agent evidence scopes, routing claims and task leases coordinate processes running as the same macOS user. They are not a security boundary. Client IDs and task IDs are not authentication; daemon access still requires the local bearer token. Clients can explicitly read shared evidence with `scope: "all"`. Unknown or ambiguous traffic on shared claimed hosts may be visible to multiple agents.
+
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected vulnerability. Use the private security-advisory feature on the canonical source repository. If that is unavailable, contact the maintainer listed on the published npm package. Include affected versions, reproduction steps, impact, and any suggested mitigation. Please allow a reasonable remediation window before disclosure.
