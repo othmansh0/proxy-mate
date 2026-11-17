@@ -381,6 +381,60 @@ export class SessionStore {
     };
   }
 
+  // Scope selection and counts use indexed metadata only; bodies are fetched only
+  // for the selected page. The cursor remains a session sequence cursor.
+  async countScopedFlows({ sessionId, scope, filters = {} }) {
+    await this.init(); await this.#readBarrier();
+    const query = flowFilterSql(filters), visibility = scopeSql(scope);
+    const row = this.#prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN (${visibility.sql}) THEN 1 ELSE 0 END), 0) AS visible FROM flows WHERE session_id = ? ${query.sql}`)
+      .get(...visibility.params, sessionId, ...query.params);
+    return { total: Number(row.total), visible: Number(row.visible), hidden: Number(row.total) - Number(row.visible) };
+  }
+
+  async listScopedFlows({ sessionId, cursor = null, since_flow_id = null, limit = 100, filters = {}, scope } = {}) {
+    await this.init(); await this.#readBarrier();
+    const id = normalizeId(sessionId, 'session_id');
+    const session = this.#requireSessionRow(id);
+    let after = cursor ? decodeCursor(cursor, id) : 0;
+    if (since_flow_id) {
+      const row = this.#prepare('SELECT sequence FROM flows WHERE session_id = ? AND id = ?').get(id, since_flow_id);
+      if (!row) throw new SessionStoreError('FLOW_NOT_FOUND', `since_flow_id was not found: ${since_flow_id}`);
+      after = Math.max(after, Number(row.sequence));
+    }
+    const pageSize = normalizeLimit(limit);
+    const query = flowFilterSql(filters), visibility = scopeSql(scope);
+    const base = `session_id = ? AND sequence > ? ${query.sql}`;
+    const params = [id, after, ...query.params];
+    const rows = this.#prepare(`SELECT * FROM flows WHERE ${base} AND (${visibility.sql}) ORDER BY sequence LIMIT ?`)
+      .all(...params, ...visibility.params, pageSize + 1);
+    const hasMore = rows.length > pageSize;
+    const flows = rows.slice(0, pageSize).map(flowRow);
+    const end = hasMore ? flows.at(-1).sequence : Number(session.next_sequence) - 1;
+    const hidden = this.#prepare(`SELECT COUNT(*) AS n FROM flows WHERE ${base} AND sequence <= ? AND NOT (${visibility.sql})`)
+      .get(...params, end, ...visibility.params).n;
+    return { session: publicSessionRow(session), flows, has_more: hasMore,
+      next_cursor: hasMore ? encodeCursor(id, flows.at(-1).sequence) : null,
+      snapshot_id: `${id}:${Number(session.next_sequence) - 1}`, hidden_count: Number(hidden), scope_applied: scope.mode };
+  }
+
+  async deleteFlowsByScope({ sessionId, scope, before_sequence = null, older_than_ms = null, all = false }) {
+    await this.init();
+    const id = normalizeId(sessionId, 'session_id');
+    if (before_sequence != null && (!Number.isInteger(before_sequence) || before_sequence < 1)) throw new SessionStoreError('INVALID_PURGE', 'before_sequence must be positive');
+    if (older_than_ms != null && (!Number.isFinite(older_than_ms) || older_than_ms < 0)) throw new SessionStoreError('INVALID_PURGE', 'older_than_ms must be non-negative');
+    return this.#mutate(() => this.#transaction(() => {
+      this.#requireSessionRow(id);
+      const visibility = scopeSql(scope), clauses = [], params = [id, ...visibility.params];
+      if (before_sequence != null) { clauses.push('sequence < ?'); params.push(before_sequence); }
+      if (older_than_ms != null) { clauses.push('created_at_ms <= ?'); params.push(this.clock() - older_than_ms); }
+      const where = `session_id = ? AND (${visibility.sql}) AND (${all ? '1' : clauses.join(' OR ') || '0'})`;
+      const rows = this.#prepare(`SELECT id, total_bytes FROM flows WHERE ${where}`).all(...params);
+      this.#prepare(`DELETE FROM flows WHERE ${where}`).run(...params);
+      this.#adjustAggregates(id, -rows.length, -sumRowBytes(rows), iso(this.clock()));
+      return { purged: rows.length, purged_flow_ids: rows.map(r => r.id), remaining: this.#flowCount(id) };
+    }));
+  }
+
   async purgeFlows({ sessionId, before_sequence = null, older_than_ms = null } = {}) {
     const id = normalizeId(sessionId, 'session_id');
     if (before_sequence != null && (!Number.isInteger(before_sequence) || before_sequence < 1)) {
@@ -1048,4 +1102,15 @@ async function availableArchivePath(directory, name) {
     catch { return candidate; }
   }
   throw new SessionStoreError('LEGACY_ARCHIVE_FULL', `Could not archive migrated legacy session: ${name}`);
+}
+
+function scopeSql(scope) {
+  if (!scope || scope.mode === 'all') return { sql: '1', params: [] };
+  const clauses = ['owner_client = ?'], params = [scope.client_id];
+  if (scope.devices.length) { clauses.push(`device_udid IN (${scope.devices.map(() => '?').join(',')})`); params.push(...scope.devices); }
+  if (scope.domains.length) {
+    clauses.push(`(attribution IN ('unknown', 'ambiguous') AND (${scope.domains.map(() => 'LOWER(hostname) GLOB ?').join(' OR ')}))`);
+    params.push(...scope.domains);
+  }
+  return { sql: `COALESCE((${clauses.join(' OR ')}), 0)`, params };
 }

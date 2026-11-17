@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Upgrade note: identified clients now read and clear only their evidence by default (`scope: "mine"`); use `scope: "all"` for shared reads and add `confirm_shared: true` for shared wipes. Legacy bridges retain all-scope defaults. Results report hidden or retained evidence counts.
+
 - Preserve routing suspension and re-arm active agent claims after daemon restarts only while restored PAC settings remain unchanged, with bounded retries and retained expiry metadata. `--no-routing` disables CLI domain routing; existing agent claims may still re-arm.
 - Track bridge presence with quiet heartbeats, renew only the caller’s routing deadlines without network churn, and release absent clients’ claims while preserving other captures.
 

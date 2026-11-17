@@ -167,7 +167,7 @@ test('captures traffic, redacts secrets, exports curl, and clears session', asyn
     conditions: [{ field: 'status', operator: 'equals', value: 201 }],
   });
   assert.equal(filtered.flows.length, 1);
-  await tools.clear_session();
+  await tools.clear_session({ scope: "all", confirm_shared: true });
   assert.equal((await tools.get_flows()).flows.length, 0);
 });
 

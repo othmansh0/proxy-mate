@@ -403,6 +403,17 @@ function toolGroup(name) {
 }
 
 function tool(name, description, inputSchema = {}, annotations = READ, options = {}) {
+  const scopedReads = new Set(['get_flows', 'get_flow_detail', 'filter_flows', 'wait_for_flow', 'export_har', 'export_capture_session', 'analyze_capture', 'assert_capture', 'compare_flows', 'list_websocket_connections', 'get_websocket_messages']);
+  const scopedWrites = new Set(['clear_session', 'purge_capture_session', 'update_capture_session']);
+  if (scopedReads.has(name) || scopedWrites.has(name)) inputSchema = { ...inputSchema,
+    scope: z.enum(['mine', 'all']).optional().describe('Identified clients default to mine; legacy clients default to all. All reads are explicitly available.'),
+    ...(scopedWrites.has(name) ? { confirm_shared: z.boolean().optional().describe('Required with scope all for shared deletion or retention.') } : {}) };
+  const readData = typedToolOutputSchemas[name]?.shape.data.unwrap() ?? z.looseObject({});
+  const scopedOutput = scopedReads.has(name) ? toolResultSchema(readData.extend({
+    scope_applied: z.enum(['mine', 'all']), hidden_count: z.number().int().nonnegative(),
+  })) : scopedWrites.has(name) ? toolResultSchema(z.looseObject({
+    removed_count: z.number().int().nonnegative(), kept_other_clients_count: z.number().int().nonnegative(),
+  })) : null;
   const group = toolGroup(name);
   return Object.freeze({
     name,
@@ -410,7 +421,7 @@ function tool(name, description, inputSchema = {}, annotations = READ, options =
     description,
     inputSchema: LEASE_PROTECTED_TOOLS.has(name) ? { ...inputSchema,
       capture_lease_id: z.string().uuid().optional().describe('Required while a task holds the shared capture lease; the thin bridge remembers an acquired lease.') } : inputSchema,
-    outputSchema: typedToolOutputSchemas[name] ?? toolOutputSchema,
+    outputSchema: scopedOutput ?? typedToolOutputSchemas[name] ?? toolOutputSchema,
     annotations,
     // Namespaced metadata is advisory. Hosts that do not recognize it simply
     // retain the standard title, description, and annotations above.
