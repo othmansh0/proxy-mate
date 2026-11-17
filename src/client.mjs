@@ -4,7 +4,7 @@ import { readEnvironment } from './lib/environment.mjs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { callDaemon } from './lib/control.mjs';
-import { waitForReadyDaemon } from './lib/daemon-connection.mjs';
+import { createDaemonReadiness } from './lib/daemon-connection.mjs';
 import { readHandshake } from './lib/state.mjs';
 import { rememberCaptureLease } from './lib/capture-lease.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
@@ -13,6 +13,10 @@ import { SERVER_INSTRUCTIONS, gettingStarted, searchHelp, setupWorkflows } from 
 import { registerMcpTools, registerMcpResources, registerMcpPrompts,
   registerMcpResourceSubscriptions } from './lib/mcp-contract.mjs';
 
+import { newClientId, normalizeTaskId } from './lib/client-identity.mjs';
+
+const client = { client_id: newClientId(), task_id: null };
+const readiness = createDaemonReadiness({ client });
 const mcp = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, {
   capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS,
 });
@@ -20,18 +24,22 @@ let closing = false;
 let stopMonitor = () => {};
 const subscriptions = registerMcpResourceSubscriptions(mcp);
 const dispatch = rememberCaptureLease(async (tool, args, context = {}) => {
+  if (['get_started', 'acquire_capture_lease', 'finish_capture_task'].includes(tool) && args?.task_id !== undefined) {
+    client.task_id = normalizeTaskId(args.task_id);
+  }
   if (tool === 'search_docs') return searchHelp(args.query, args.limit);
   if (tool === 'list_setup_workflows') return setupWorkflows();
-  const handshake = await waitForReadyDaemon({ timeoutMs: tool === 'get_started' ? (await readHandshake() ? 3000 : 0) : 15_000, signal: context.signal });
+  const handshake = await readiness.waitForReady({ timeoutMs: tool === 'get_started' ? (await readHandshake() ? 3000 : 0) : 15_000, signal: context.signal });
   if (tool === 'get_started') {
     let status = null;
-    if (handshake) try { status = await callDaemon({ ...handshake, tool: 'get_proxy_status', timeoutMs: 5000, signal: context.signal }); } catch { /* actionable recovery help */ }
+    if (handshake) try { status = await callDaemon({ ...handshake, client, tool: 'get_proxy_status', timeoutMs: 5000, signal: context.signal }); readiness.recordSuccess(handshake); } catch { /* actionable recovery help */ }
     return gettingStarted(args, status, { daemonReachable: Boolean(handshake) });
   }
   if (!handshake) throw Object.assign(new Error('The shared daemon is unavailable. This MCP bridge remains connected; use get_started or search_docs for recovery.'), {
     code: 'DAEMON_UNAVAILABLE', retryable: true, recovery: ['Run proxy-mate status and inspect its daemon log.', 'Retry after recovery; no MCP restart is needed.'],
   });
-  const result = await callDaemon({ ...handshake, tool, args, signal: context.signal });
+  const result = await callDaemon({ ...handshake, client, tool, args, signal: context.signal });
+  readiness.recordSuccess(handshake);
   if (!/^get_|^list_|^search_|^wait_/.test(tool)) void subscriptions.notifyStatus().catch(() => {});
   const flowId = result?.flow?.id ?? result?.flow_id ?? result?.id;
   if (flowId && /flow|request|curl/.test(tool)) void subscriptions.notifyLiveFlow(flowId).catch(() => {});

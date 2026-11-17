@@ -195,13 +195,15 @@ test('control plane validates Host and Origin before accepting authenticated req
 });
 
 test('control plane bounds request rate and concurrent work', async (t) => {
+  const { snapshotMetrics } = await import('../src/lib/metrics.mjs');
+  const before = snapshotMetrics().counters;
   const rateLimited = new ControlServer({ port: 0, tools: {}, rateLimit: 2, rateWindowMs: 60_000 });
   await rateLimited.start();
   const rateHandshake = await readHandshake();
   const headers = { authorization: `Bearer ${rateHandshake.token}` };
-  assert.equal((await rawControlRequest({ port: rateLimited.port, headers })).status, 200);
-  assert.equal((await rawControlRequest({ port: rateLimited.port, headers })).status, 200);
-  const third = await rawControlRequest({ port: rateLimited.port, headers });
+  assert.equal((await rawControlRequest({ port: rateLimited.port, path: "/missing", headers })).status, 404);
+  assert.equal((await rawControlRequest({ port: rateLimited.port, path: "/missing", headers })).status, 404);
+  const third = await rawControlRequest({ port: rateLimited.port, path: "/missing", headers });
   assert.equal(third.status, 429);
   await rateLimited.stop();
 
@@ -225,4 +227,80 @@ test('control plane bounds request rate and concurrent work', async (t) => {
   );
   release();
   assert.equal(await first, true);
+  assert.equal(snapshotMetrics().counters['control.rate_limited'], (before['control.rate_limited'] ?? 0) + 1);
+  assert.equal(snapshotMetrics().counters['control.busy'], (before['control.busy'] ?? 0) + 1);
+});
+
+test('health bypasses exhausted rate buckets and general slots', async (t) => {
+  let entered, release;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const control = new ControlServer({ port: 0, rateLimit: 1, maxConcurrentRequests: 1,
+    tools: { hold: async () => { entered(); await held; return true; } } });
+  await control.start();
+  t.after(() => control.stop());
+  const handshake = await readHandshake();
+  const pending = callDaemon({ ...handshake, tool: 'hold' });
+  await started;
+  try {
+    assert.equal(await probeDaemon(handshake.controlUrl, handshake.token, 1000), true);
+    assert.equal((await rawControlRequest({ port: control.port, headers: { authorization: 'Bearer wrong' } })).status, 401);
+  } finally { release(); await pending; }
+});
+
+test('rate buckets isolate client ids and preserve legacy address limits', async (t) => {
+  const control = new ControlServer({ port: 0, rateLimit: 1, tools: { echo: async (args, context) => context } });
+  await control.start(); t.after(() => control.stop());
+  const handshake = await readHandshake();
+  const first = await callDaemon({ ...handshake, tool: 'echo', client: { client_id: 'client-one', task_id: 'task:1' } });
+  assert.equal(first.client_id, 'client-one'); assert.equal(first.task_id, 'task:1');
+  await assert.rejects(callDaemon({ ...handshake, tool: 'echo', client: { client_id: 'client-one' } }), { code: 'RATE_LIMITED' });
+  assert.equal((await callDaemon({ ...handshake, tool: 'echo', client: { client_id: 'client-two' } })).client_id, 'client-two');
+  assert.equal((await callDaemon({ ...handshake, tool: 'echo' })).client_id, 'legacy');
+  await assert.rejects(callDaemon({ ...handshake, tool: 'echo' }), { code: 'RATE_LIMITED' });
+});
+
+test('long calls have an independent pool and metrics require observe authentication', async (t) => {
+  const { snapshotMetrics } = await import('../src/lib/metrics.mjs');
+  const before = snapshotMetrics().counters;
+  let entered, release;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const control = new ControlServer({ port: 0, maxConcurrentRequests: 1, maxLongConcurrentRequests: 1,
+    tools: { curl_test: async () => { entered(); await held; return true; }, echo: async () => true,
+      wait_for_flow: async () => true, repeat_test: async () => true, request_test: async () => true, setup_host_certificate: async () => true } });
+  await control.start(); t.after(() => control.stop());
+  const handshake = await readHandshake();
+  const pending = callDaemon({ ...handshake, tool: 'curl_test' }); await started;
+  try {
+    assert.equal(await callDaemon({ ...handshake, tool: 'echo' }), true);
+    for (const tool of ['curl_test', 'wait_for_flow', 'repeat_test', 'request_test', 'setup_host_certificate']) {
+      await assert.rejects(callDaemon({ ...handshake, tool }), { code: 'CONTROL_LONG_BUSY' });
+    }
+    assert.equal((await rawControlRequest({ port: control.port, path: '/metrics' })).status, 401);
+    const response = await rawControlRequest({ port: control.port, path: '/metrics', headers: { authorization: `Bearer ${handshake.token}` } });
+    assert.equal(response.status, 200);
+    assert.equal(JSON.parse(response.body).counters['control.long_busy'], (before['control.long_busy'] ?? 0) + 5);
+    assert.ok(response.body.length < 65536);
+    control.server.emit('drop');
+    assert.equal(snapshotMetrics().counters['control.connections_dropped'], (before['control.connections_dropped'] ?? 0) + 1);
+  } finally { release(); await pending; }
+});
+
+test('metrics enforce observe scope and bound snapshots, and rate buckets are pruned', async (t) => {
+  const { registerGauge } = await import('../src/lib/metrics.mjs');
+  const control = new ControlServer({ port: 0, tools: {} });
+  await control.start(); t.after(() => control.stop());
+  const headers = { authorization: `Bearer ${control.token}` };
+  control.scopes.delete('observe');
+  assert.equal((await rawControlRequest({ port: control.port, path: '/metrics', headers })).status, 403);
+  control.scopes.add('observe');
+  const unregister = registerGauge('test.large', () => 'x'.repeat(65536));
+  try {
+    const response = await rawControlRequest({ port: control.port, path: '/metrics', headers });
+    assert.equal(response.status, 503); assert.ok(response.body.length < 4096);
+  } finally { unregister(); }
+  control.rateBuckets.set('expired', { startedAt: 0, count: 999 });
+  await rawControlRequest({ port: control.port, path: '/missing', headers });
+  assert.equal(control.rateBuckets.has('expired'), false);
 });

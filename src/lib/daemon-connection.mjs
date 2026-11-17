@@ -1,23 +1,44 @@
 import { readHandshake } from './state.mjs';
 import { probeDaemon } from './control.mjs';
 
+// Keep cache ownership per bridge, never across unrelated callers.
+export function createDaemonReadiness(options = {}) {
+  const cache = { handshake: null, succeededAt: -Infinity };
+  const now = options.now ?? Date.now;
+  return {
+    waitForReady: (overrides = {}) => waitForReadyDaemon({ ...options, ...overrides, cache }),
+    recordSuccess(handshake) {
+      cache.handshake = { token: handshake.token, controlUrl: handshake.controlUrl };
+      cache.succeededAt = now();
+    },
+  };
+}
+
 // Wait only before dispatching an RPC. Never replay a submitted mutation: a
 // dropped connection cannot establish whether the daemon committed it.
 export async function waitForReadyDaemon({
   timeoutMs = 0, signal, read = readHandshake, probe = probeDaemon,
+  now = Date.now, random = Math.random, delay = abortableDelay, cache, client,
 } = {}) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = now() + timeoutMs;
+  let backoffMs = 100;
   for (;;) {
     if (signal?.aborted) throw cancellationError();
     const handshake = await read();
-    const remaining = Math.max(0, deadline - Date.now());
+    if (signal?.aborted) throw cancellationError();
+    if (cache?.handshake?.token === handshake?.token
+      && cache?.handshake?.controlUrl === handshake?.controlUrl
+      && handshake && now() - cache.succeededAt < 2000) return handshake;
+    const remaining = Math.max(0, deadline - now());
     const probeTimeout = timeoutMs === 0 ? 1500 : Math.min(1500, Math.max(1, remaining));
-    if (handshake && await probe(handshake.controlUrl, handshake.token, probeTimeout)) {
+    if (handshake && await probe(handshake.controlUrl, handshake.token, probeTimeout, client)) {
       if (signal?.aborted) throw cancellationError();
       return handshake;
     }
-    if (Date.now() >= deadline) return null;
-    await abortableDelay(Math.min(100, deadline - Date.now()), signal);
+    if (cache) { cache.handshake = null; cache.succeededAt = -Infinity; }
+    if (now() >= deadline) return null;
+    await delay(Math.min(backoffMs * (0.8 + random() * 0.4), deadline - now()), signal);
+    backoffMs = Math.min(1000, backoffMs * 2);
   }
 }
 
