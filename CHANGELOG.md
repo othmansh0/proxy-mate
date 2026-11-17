@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Preserve routing suspension and re-arm active agent claims after daemon restarts only while restored PAC settings remain unchanged, with bounded retries and retained expiry metadata. `--no-routing` disables CLI domain routing; existing agent claims may still re-arm.
+- Track bridge presence with quiet heartbeats, renew only the caller’s routing deadlines without network churn, and release absent clients’ claims while preserving other captures.
+
 - Preserve slow daemon owners using worker liveness, scale guardian probe and failure windows with load, and record bounded slow/hung diagnostics.
 - Serve the read-only union PAC from the guardian across daemon restarts, with explicit in-process fallback when the guardian host is unavailable.
 - Upgrade note: routing tools now manage per-agent/task claims; clear_proxy_routing clears only your claim (scope "all" clears everyone). SSL additions preserve expiry, status exposes the union and routing loss, and daemon results warn owners of expired or suspended claims. Active pre-claims legacy routing is left untouched until explicitly cleared.

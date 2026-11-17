@@ -110,6 +110,8 @@ async function daemonFixture(failPhase) {
   const noOp = async () => {};
   const internal = Symbol();
   const deps = {
+    createClientRegistry: () => ({ sweep: async () => {} }),
+    INTERNAL_PRESENCE_LOST: Symbol(),
     readEnvironment: () => undefined,
     configureConnectionAttempts() {}, acquireRuntime: async () => { if (failPhase === 'lock') throw Object.assign(new Error('busy'), { code: 'RUNTIME_BUSY' }); return noOp; }, reconcileRuntime: async () => { if (failPhase === 'reconcile') throw Object.assign(new Error('stale'), { code: 'RECOVERY_FAILED' }); },
     sweepStaleTempFiles: noOp, STATE_DIR: home, startLogMaintenance: () => () => {},
@@ -126,7 +128,7 @@ async function daemonFixture(failPhase) {
     writePidFile: noOp, readProcessIdentity: async () => ({ boot_session: 'boot', pid_started_at: 'start' }),
     recordPreviousExit: noOp, recordRuntimeEvent: async (event, data) => events.push({ event, ...data }),
     logLine() {}, errorFields: e => ({ error_code: e.code, error_message: e.message }),
-    process: { pid: 42, stderr: { write() {} } }, performance, setInterval() {}, url: { fileURLToPath: () => 'fake' },
+    process: { pid: 42, stderr: { write() {} } }, performance, setInterval() { return { unref() {} }; }, url: { fileURLToPath: () => 'fake' },
   };
   const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
   await new AsyncFunction(...Object.keys(deps), `${body.replaceAll('import.meta.url', "'file:///fake'")}\nawait runDaemon({skipRouting:${failPhase !== 'routing'},skipTrust:true,skipHostTrust:true});`)(...Object.values(deps));

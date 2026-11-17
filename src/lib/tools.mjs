@@ -3,6 +3,7 @@
 // JSON-serializable data; the MCP transport layer wraps that into MCP content.
 
 import path from 'node:path';
+import { logLine } from './log-line.mjs';
 import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
@@ -77,8 +78,10 @@ function resourceRevision(config) {
 // owns lifecycle helpers (sim watcher stop fn, etc.).
 // Non-enumerable integration hook: tools[INTERNAL_ROUTING_CONTROL] exposes the
 // single lazily constructed controller (after the engine has bound its port).
+export const INTERNAL_PRESENCE_LOST = Symbol('presence-lost');
 export const INTERNAL_ROUTING_CONTROL = Symbol('routing-control');
 export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
+  clientRegistry,
   pacPort = PAC_PORT_DEFAULT, now = Date.now, setTimer, clearTimer,
   hostCertificateStatus = getHostCertificateStatus,
 }) {
@@ -781,12 +784,31 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return await restartSimApps({ udid: args.udid, bundle_id: args.bundle_id });
   }
 
+  async function presenceLost(client) {
+    if (client.client_id === LEGACY_CLIENT_ID) return;
+    const rows = (await claims.listClaims({ includeExpired: true })).filter(c => c.client_id === client.client_id);
+    for (const c of rows) {
+      await routingController().clear({ claim_id: c.claim_id });
+      claimDetails.delete(c.claim_id);
+    }
+    invalidateRouting();
+    const details = { client_id: client.client_id, task_id: client.task_id, claims_removed: rows.length };
+    await recordRuntimeEvent('client_presence_lost', { details });
+    logLine('daemon', 'client presence lost', details);
+  }
+  function clientsStatus(context) {
+    const rows = clientRegistry?.list() ?? [];
+    const me = rows.find(c => c.client_id === context.client_id);
+    return { count: rows.length, alive: rows.filter(c => c.alive).length,
+      me: me ? { client_id: me.client_id, task_id: me.task_id, last_seen: me.last_seen } : null };
+  }
   async function get_proxy_status(_args = {}, context = {}) {
     const [state, pid, storage, runtime, events, guardianEvents, routingStatus] = await Promise.all([
       readState(), readPidFile(), engine.sessionStore.storageStatus(), runtimeIdentity(), readRuntimeEvents(), readRuntimeEvents('guardian'), routingSnapshot(true),
     ]);
     return {
       running: engine.isRunning(),
+      clients: clientsStatus(context),
       capture_lease: captureLease.status(state),
       active_session_id: engine.sessionId,
       connection_attempt_timeout_ms: activeConnectionAttemptTimeout(),
@@ -2452,6 +2474,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   // The daemon must still release sockets/routing on SIGTERM while a task
   // holds a lease. Symbols are never addressable through JSON-RPC tool names.
   Object.defineProperty(tools, INTERNAL_CAPTURE_CONTROL, { value: { stop_proxy, start_sim_watcher } });
+  Object.defineProperty(tools, INTERNAL_PRESENCE_LOST, { value: presenceLost });
   Object.defineProperty(tools, INTERNAL_ROUTING_CONTROL, { get: routingController });
   if (mode === 'daemon') for (const [name, fn] of Object.entries(tools)) {
     tools[name] = async (args = {}, context = {}) => {

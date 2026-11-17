@@ -91,6 +91,9 @@ const routingResultSchema = z.looseObject({
   removed_claims: z.array(routingClaimSchema).optional(), removed_other_claims: z.array(routingClaimSchema).optional(),
 });
 const proxyStatusSchema = z.looseObject({
+  clients: z.object({ count: z.number().int().nonnegative(), alive: z.number().int().nonnegative(),
+    me: z.object({ client_id: z.string(), task_id: z.string().nullable(), last_seen: z.number() }).nullable(),
+  }).optional(),
   running: z.boolean().optional(),
   connection_attempt_timeout_ms: z.number().int().min(10).max(10000).optional(),
   port: z.number().int().nullable().optional(),
