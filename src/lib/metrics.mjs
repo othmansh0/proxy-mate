@@ -1,6 +1,13 @@
 // In-process counters and gauges for diagnostics. Deliberately tiny: no
 // labels, no exporters. Each subsystem increments named counters; status and
 // /health read one snapshot. Names are dotted, e.g. 'control.rate_limited'.
+//
+// Agreed names (keep them stable; the liveness worker and harness read them):
+//   proxy.flows_completed, proxy.bytes (counters), proxy.active_connections (gauge),
+//   proxy.requests_aborted, proxy.connections_dropped, proxy.capture_dropped,
+//   gateway.connections_dropped, control.rate_limited, control.busy,
+//   control.connections_dropped, loop.lag_p50_ms, loop.lag_p99_ms, loop.lag_max_ms,
+//   loop.elu (gauges).
 
 const counters = new Map();
 const gauges = new Map();

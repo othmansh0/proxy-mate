@@ -23,11 +23,24 @@ export async function readRuntimeEvents(source = 'daemon') {
   } catch { return []; }
 }
 
+// `details` carries extra scalar diagnostics (load, timings, ports, step).
+// Reserved keys and non-scalar values are dropped so events stay small.
+const RESERVED_EVENT_KEYS = new Set(['event', 'reason', 'code', 'pid', 'node', 'at']);
+export function eventDetails(details) {
+  const out = {};
+  for (const [key, value] of Object.entries(details ?? {})) {
+    if (RESERVED_EVENT_KEYS.has(key) || !/^[a-z][a-z0-9_]{0,63}$/.test(key)) continue;
+    if (value === null || ['number', 'boolean'].includes(typeof value)) out[key] = value;
+    else if (typeof value === 'string') out[key] = value.slice(0, 300);
+  }
+  return out;
+}
+
 let mutation = Promise.resolve();
-export function recordRuntimeEvent(event, { source = 'daemon', reason, code, pid = process.pid } = {}) {
+export function recordRuntimeEvent(event, { source = 'daemon', reason, code, pid = process.pid, details } = {}) {
   const operation = mutation.then(async () => {
     const events = await readRuntimeEvents(source);
-    events.push({ event, reason, code, pid, node: process.version, at: new Date().toISOString() });
+    events.push({ event, reason, code, pid, node: process.version, at: new Date().toISOString(), ...eventDetails(details) });
     await atomicWriteJson(path.join(STATE_DIR, `${source}.events.json`), events.slice(-64));
   });
   mutation = operation.catch(() => {});

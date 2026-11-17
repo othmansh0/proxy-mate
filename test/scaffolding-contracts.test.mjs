@@ -48,3 +48,28 @@ test('shutdown intent is scoped to one pid and expires', async () => {
   await clearShutdownIntent({ directory });
   assert.equal(await readShutdownIntent(1473, { directory }), null);
 });
+
+test('runtime events keep only scalar, non-reserved details', async () => {
+  const { eventDetails } = await import('../src/lib/runtime-identity.mjs');
+  assert.deepEqual(eventDetails({ load1: 307.3, step: 'probe', pid: 1, nested: { a: 1 }, 'Bad': 1, ok: true, none: null }),
+    { load1: 307.3, step: 'probe', ok: true, none: null });
+});
+
+test('custom CA validation names the path, errno and a fix', async () => {
+  const { validateCustomCaPaths } = await import('../src/lib/ca-paths.mjs');
+  assert.equal(await validateCustomCaPaths({}), null);
+  await assert.rejects(validateCustomCaPaths({ keyPath: '/k' }), { code: 'CUSTOM_CA_INCOMPLETE' });
+  const stat = async (p) => {
+    if (p === '/Users/me/Documents/ca.key') throw Object.assign(new Error('denied'), { code: 'EPERM' });
+    return { isFile: () => p !== '/dir' };
+  };
+  await assert.rejects(validateCustomCaPaths({ keyPath: '/Users/me/Documents/ca.key', certPath: '/dir', stat }), (error) => {
+    assert.equal(error.code, 'CUSTOM_CA_UNREADABLE');
+    assert.equal(error.details.key_problem, 'permission_denied');
+    assert.equal(error.details.key_errno, 'EPERM');
+    assert.equal(error.details.cert_problem, 'not_regular_file');
+    assert.match(error.recovery[0], /Full Disk Access/);
+    return true;
+  });
+  assert.deepEqual(await validateCustomCaPaths({ keyPath: '/a', certPath: '/b', stat }), { keyPath: '/a', certPath: '/b' });
+});
