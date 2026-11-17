@@ -53,7 +53,7 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
   await call(0, 'update_capture_session', { name: 'QA capture, still running' });
   assert.equal((await call(1, 'get_proxy_status')).running, true);
   const url = 'http://fixture.invalid/leased-breakpoint';
-  await call(0, 'create_breakpoint', { rule_id: 'qa-a-pause', url, direction: 'request', timeout_ms: 5000 });
+  await call(0, 'create_breakpoint', { rule_id: 'qa-a-pause', url, direction: 'request', scope: 'all', timeout_ms: 5000 });
   const request = new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port: engine.port, path: url }, (res) => {
       const chunks = []; res.on('data', (chunk) => chunks.push(chunk));

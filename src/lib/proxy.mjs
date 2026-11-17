@@ -23,7 +23,7 @@ import { atomicWriteFile } from './state.mjs';
 import { commitCaPair, recoverCaPair } from './ca-transaction.mjs';
 import { SessionStore } from './session-store.mjs';
 import { JsonlWebSocketStoreBackend, WebSocketStore, mockttpWebSocketHandlers } from './websocket-store.mjs';
-import { BreakpointManager, createMockttpBreakpointCallbacks } from './breakpoints.mjs';
+import { BreakpointManager, createMockttpBreakpointCallbacks, createBreakpointScope } from './breakpoints.mjs';
 import { redactBody, redactHeaders, redactUrl } from './redaction.mjs';
 import { PluginStore } from './plugin-store.mjs';
 import { activeConnectionAttemptTimeout } from './network-policy.mjs';
@@ -158,6 +158,8 @@ export class ProxyEngine {
     deviceResolver = createDeviceResolver(),
     routingClaims = createRoutingClaimsStore(),
   } = {}) {
+    this.breakpointScope = createBreakpointScope({ listClaims: () => routingClaims.listClaims() });
+    this.breakpointScope({});
     this.deviceResolver = deviceResolver;
     this.captureSockets = new Map();
     this.attributeFlow = createFlowAttributor({ listClaims: () => routingClaims.listClaims() });
@@ -1054,6 +1056,17 @@ export class ProxyEngine {
         ...proxyPassThroughOptions(this.upstreamProxyConfig),
         ...createMockttpBreakpointCallbacks(this.breakpoints, {
           ruleId: rule.rule_id,
+          owner: rule.owner, scope: rule.scope ?? 'all',
+          inScope: req => {
+            let device = null;
+            try {
+              const socket = this.captureSockets.get(req.remotePort ?? req.remote_port);
+              if (socket) device = this.deviceResolver(socket);
+            } catch { /* Device discovery is best effort; claims remain available. */ }
+            let hostname = req.hostname;
+            try { hostname ??= new URL(req.url).hostname; } catch { /* unknown host */ }
+            return this.breakpointScope({ owner: rule.owner, hostname, device_udid: device });
+          },
           ...directions,
           timeoutMs: rule.breakpoint_timeout_ms,
           defaultAction: rule.breakpoint_default_action,
@@ -1278,6 +1291,8 @@ async function prepareRuleConfig(input, { existing, nextOrder }) {
       delay_ms: delayMs,
       fault,
       ...(type === 'breakpoint' ? {
+        owner: input.owner ?? existing?.owner ?? null,
+        scope: input.scope ?? existing?.scope ?? 'all',
         breakpoint_direction: breakpointDirection,
         breakpoint_timeout_ms: breakpointTimeoutMs,
         breakpoint_default_action: breakpointDefaultAction,
