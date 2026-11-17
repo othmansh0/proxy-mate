@@ -3,7 +3,7 @@
 // can also be used by another proxy implementation or a future durable store.
 
 import crypto from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, truncate, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 const DEFAULT_MAX_CONNECTIONS = 500;
@@ -51,6 +51,10 @@ export class WebSocketStore {
     this.persistenceScheduled = false;
     this.persistenceDirty = false;
     this.persistenceError = null;
+    this.dirtyConnections = new Set();
+    this.resetConnections = new Set();
+    this.persistedSequences = new Map();
+    this.resetPersistence = false;
   }
 
   // Mockttp event adapter methods. They intentionally accept the source event
@@ -60,7 +64,7 @@ export class WebSocketStore {
     const connection = this.#ensure(event);
     connection.request = normalizeRequest(event, this.clock);
     connection.updated_at = nowIso(this.clock);
-    this.#persist();
+    this.#persist(connection);
     return publicConnection(connection);
   }
 
@@ -70,7 +74,7 @@ export class WebSocketStore {
     connection.state = 'open';
     connection.opened_at ??= connection.accepted.timestamp;
     connection.updated_at = nowIso(this.clock);
-    this.#persist();
+    this.#persist(connection);
     return publicConnection(connection);
   }
 
@@ -89,7 +93,7 @@ export class WebSocketStore {
     connection.state = 'closed';
     connection.closed_at = timestamp;
     connection.updated_at = timestamp;
-    this.#persist();
+    this.#persist(connection);
     return publicConnection(connection);
   }
 
@@ -106,7 +110,7 @@ export class WebSocketStore {
     // detail, as most transport failures produce both events.
     if (connection.state !== 'closed') connection.state = 'error';
     connection.updated_at = timestamp;
-    this.#persist();
+    this.#persist(connection);
     return publicConnection(connection);
   }
 
@@ -238,7 +242,7 @@ export class WebSocketStore {
     }
     connection.updated_at = timestamp;
     this.#limitBytes();
-    this.#persist();
+    this.#persist(connection);
     return publicMessage(message);
   }
 
@@ -263,11 +267,13 @@ export class WebSocketStore {
       messages: [],
     };
     this.connections.set(id, connection);
+    if (this.backend?.save) this.resetConnections.add(id);
     this.connectionOrder.push(id);
     while (this.connectionOrder.length > this.maxConnections) {
       const staleId = this.connectionOrder.shift();
       for (const message of this.connections.get(staleId)?.messages ?? []) this.retainedMessageBytes -= messageStorageBytes(message);
       this.connections.delete(staleId);
+      if (this.backend?.save) this.dirtyConnections.add(staleId);
     }
     return connection;
   }
@@ -307,23 +313,60 @@ export class WebSocketStore {
       while (connection?.messages.length && this.retainedMessageBytes > this.maxTotalMessageBytes) {
         this.retainedMessageBytes -= messageStorageBytes(connection.messages.shift());
         connection.dropped_message_count += 1;
+        if (this.backend?.save) this.dirtyConnections.add(id);
       }
     }
   }
-  #persist() {
+  #persist(connection = null) {
     if (!this.backend?.save) return;
+    if (connection) this.dirtyConnections.add(connection.id);
+    else this.resetPersistence = true;
     this.persistenceDirty = true;
     if (this.persistenceScheduled) return;
     this.persistenceScheduled = true;
-    // Previously every frame eagerly copied the entire store and queued it
-    // behind disk IO. A fast socket could retain thousands of full snapshots.
-    this.persistence = Promise.resolve().then(async () => {
+    this.persistence = new Promise(resolve => setImmediate(resolve)).then(async () => {
       while (this.persistenceDirty) {
         this.persistenceDirty = false;
-        await this.backend.save(this.exportSnapshot({ includeSensitive: true }));
-        this.persistenceError = null;
+        const reset = this.resetPersistence;
+        this.resetPersistence = false;
+        const ids = reset ? this.connectionOrder.slice() : [
+          ...[...this.dirtyConnections].filter(id => !this.connections.has(id)),
+          ...this.connectionOrder.filter(id => this.dirtyConnections.has(id)),
+        ];
+        this.dirtyConnections.clear();
+        const records = reset ? [{ op: 'reset' }] : [];
+        const sequences = new Map();
+        for (const id of ids) {
+          const current = this.connections.get(id);
+          if (!current) { records.push({ op: 'delete', id }); sequences.set(id, null); continue; }
+          const fresh = reset || this.resetConnections.has(id);
+          if (fresh && !reset) records.push({ op: 'delete', id });
+          const after = fresh ? 0 : (this.persistedSequences.get(id) ?? 0);
+          const { messages, ...metadata } = current;
+          records.push({ op: 'upsert', connection: structuredClone(metadata),
+            first_sequence: messages[0]?.sequence ?? current.next_message_sequence,
+            messages: messages.filter(message => message.sequence > after).map(message => publicMessage(message, true)) });
+          sequences.set(id, current.next_message_sequence - 1);
+        }
+        this.resetConnections.clear();
+        try {
+          if (this.backend.append) await this.backend.append(records);
+          else await this.backend.save(this.exportSnapshot({ includeSensitive: true }));
+          if (reset) this.persistedSequences.clear();
+          for (const [id, sequence] of sequences) {
+            if (sequence === null) this.persistedSequences.delete(id);
+            else this.persistedSequences.set(id, sequence);
+          }
+          this.persistenceError = null;
+        } catch (error) {
+          // A later event retries a full snapshot; a failed append may have
+          // reached disk, so deltas alone cannot safely infer its boundary.
+          this.resetPersistence = true;
+          throw error;
+        }
+        if (this.persistenceDirty) await new Promise(resolve => setImmediate(resolve));
       }
-    }).catch((error) => { this.persistenceError = error; }).finally(() => {
+    }).catch(error => { this.persistenceError = error; }).finally(() => {
       this.persistenceScheduled = false;
       if (this.persistenceDirty && !this.persistenceError) this.#persist();
     });
@@ -334,17 +377,140 @@ function messageStorageBytes(message) {
   return 256 + 2 * ((message.data.text?.length ?? 0) + (message.data.base64?.length ?? 0));
 }
 
-/** Portable one-line JSON snapshot backend. Writes are private (0600) and atomic. */
+/** Append-only private JSONL journal. Legacy snapshot lines remain readable.
+ * Compaction rewrites at most the bounded live store, yielding every 64 rows.
+ */
 export class JsonlWebSocketStoreBackend {
-  constructor(path) { if (!path || typeof path !== 'string') throw new WebSocketStoreError('INVALID_CONFIGURATION', 'JSONL backend path is required'); this.path = path; }
-  async load() {
-    try { const text = await readFile(this.path, 'utf8'); const line = text.trim().split(/\r?\n/).at(-1); return line ? JSON.parse(line) : null; }
-    catch (error) { if (error?.code === 'ENOENT') return null; throw new WebSocketStoreError('WEBSOCKET_PERSISTENCE_READ_FAILED', error.message); }
+  constructor(path) {
+    if (!path || typeof path !== 'string') throw new WebSocketStoreError('INVALID_CONFIGURATION', 'JSONL backend path is required');
+    this.path = path;
+    this.live = new Map();
+    this.bytes = 0;
+    this.liveBytes = 0;
+    this.sizes = new Map();
+    this.metadataSizes = new Map();
+    this.messageSizes = new WeakMap();
+    this.loaded = false;
+    this.tornTail = false;
   }
+
+  #apply(record) {
+    if (record.op === 'batch') {
+      for (const item of record.records) this.#apply(item);
+    } else if (record.connections) {
+      this.live.clear(); this.sizes.clear(); this.metadataSizes.clear(); this.liveBytes = 0;
+      for (const connection of record.connections) this.#apply({ op: 'upsert', connection, first_sequence: 0, messages: connection.messages ?? [] });
+    } else if (record.op === 'reset') {
+      this.live.clear(); this.sizes.clear(); this.metadataSizes.clear(); this.liveBytes = 0;
+    } else if (record.op === 'delete') {
+      this.live.delete(record.id);
+      this.liveBytes -= this.sizes.get(record.id) ?? 0;
+      this.sizes.delete(record.id);
+      this.metadataSizes.delete(record.id);
+    } else if (record.op === 'upsert') {
+      const id = record.connection.id;
+      const previous = this.live.get(id);
+      const oldMessages = previous?.messages ?? [];
+      const messages = [];
+      let removedBytes = 0;
+      for (const message of oldMessages) {
+        if (message.sequence >= record.first_sequence) messages.push(message);
+        else removedBytes += this.messageSizes.get(message) ?? 0;
+      }
+      const after = messages.at(-1)?.sequence ?? 0;
+      let addedBytes = 0;
+      for (const message of record.messages) {
+        if (message.sequence <= after) continue;
+        const size = Buffer.byteLength(JSON.stringify(message)) + 1;
+        this.messageSizes.set(message, size);
+        addedBytes += size;
+        messages.push(message);
+      }
+      const { messages: ignored, ...metadata } = record.connection;
+      const metadataSize = Buffer.byteLength(JSON.stringify(metadata)) + 16;
+      const size = (this.sizes.get(id) ?? 0) - (this.metadataSizes.get(id) ?? 0)
+        + metadataSize - removedBytes + addedBytes;
+      this.live.set(id, { ...metadata, messages });
+      this.liveBytes += size - (this.sizes.get(id) ?? 0);
+      this.metadataSizes.set(id, metadataSize);
+      this.sizes.set(id, size);
+    } else throw new Error('Unknown WebSocket journal record');
+  }
+
+  async load() {
+    try {
+      const text = await readFile(this.path, 'utf8');
+      this.live.clear(); this.sizes.clear(); this.metadataSizes.clear(); this.liveBytes = 0;
+      const lines = text.split('\n');
+      let validText = text;
+      this.tornTail = false;
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        if (!line.trim()) continue;
+        let record;
+        try { record = JSON.parse(line); }
+        catch (error) {
+          // An interrupted append has no newline. Corruption in any complete
+          // record is still reported; only the incomplete final batch is lost.
+          if (index !== lines.length - 1 || text.endsWith('\n')) throw error;
+          validText = text.slice(0, text.lastIndexOf('\n') + 1);
+          this.tornTail = true;
+          break;
+        }
+        this.#apply(record);
+      }
+      this.needsNewline = validText.length > 0 && !validText.endsWith('\n');
+      this.bytes = Buffer.byteLength(validText);
+      this.loaded = true;
+      return { format: 'proxy-mate.websocket-store/v1', connections: [...this.live.values()] };
+    } catch (error) {
+      if (error?.code === 'ENOENT') { this.loaded = true; return null; }
+      throw new WebSocketStoreError('WEBSOCKET_PERSISTENCE_READ_FAILED', error.message);
+    }
+  }
+
+  async append(records) {
+    try {
+      if (!this.loaded) await this.load();
+      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+      if (this.tornTail) { await truncate(this.path, this.bytes); this.tornTail = false; }
+      const text = (this.needsNewline ? '\n' : '') + JSON.stringify({ op: 'batch', records }) + '\n';
+      this.needsNewline = false;
+      await appendFile(this.path, text, { mode: 0o600 });
+      this.bytes += Buffer.byteLength(text);
+      for (const record of records) this.#apply(record);
+      // The small floor avoids compacting on every tiny metadata update.
+      if (this.bytes > Math.max(4096, 2 * this.liveBytes)) await this.#compact();
+    } catch (error) {
+      this.loaded = false;
+      throw new WebSocketStoreError('WEBSOCKET_PERSISTENCE_WRITE_FAILED', error.message);
+    }
+  }
+
   async save(snapshot) {
+    await this.append([{ op: 'reset' }, ...snapshot.connections.map(connection => ({
+      op: 'upsert', connection, first_sequence: 0, messages: connection.messages ?? [],
+    }))]);
+  }
+
+  async #compact() {
     const temporary = `${this.path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    try { await mkdir(dirname(this.path), { recursive: true, mode: 0o700 }); await writeFile(temporary, `${JSON.stringify(snapshot)}\n`, { mode: 0o600, flag: 'wx' }); await rename(temporary, this.path); }
-    catch (error) { try { await unlink(temporary); } catch {} throw new WebSocketStoreError('WEBSOCKET_PERSISTENCE_WRITE_FAILED', error.message); }
+    try {
+      await writeFile(temporary, JSON.stringify({ op: 'reset' }) + '\n', { mode: 0o600, flag: 'wx' });
+      let chunk = [], bytes = Buffer.byteLength(JSON.stringify({ op: 'reset' }) + '\n');
+      for (const connection of this.live.values()) {
+        chunk.push(JSON.stringify({ op: 'upsert', connection: { ...connection, messages: undefined }, first_sequence: 0, messages: connection.messages }) + '\n');
+        if (chunk.length === 64) {
+          const text = chunk.join(''); bytes += Buffer.byteLength(text);
+          await appendFile(temporary, text); chunk = [];
+          await new Promise(resolve => setImmediate(resolve));
+        }
+      }
+      const text = chunk.join(''); bytes += Buffer.byteLength(text);
+      await appendFile(temporary, text);
+      await rename(temporary, this.path);
+      this.bytes = bytes;
+    } catch (error) { try { await unlink(temporary); } catch { /* preserve original error */ } throw error; }
   }
 }
 

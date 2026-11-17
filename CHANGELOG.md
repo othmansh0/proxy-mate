@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Batch capture writes, cache storage counts, and append WebSocket journals with bounded compaction to reduce event-loop stalls under concurrent captures.
+
 ## 0.9.1 — 2026-11-16
 
 - Wait for npm's publish-time scanning and registry availability before completing a release. Keep verification bounded and reject integrity mismatches or registry errors without retrying the upload.
