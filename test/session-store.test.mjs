@@ -215,7 +215,8 @@ test('counts and incremental budgets match a full-scan model after random update
       await store.purgeFlows({ sessionId: 'model', before_sequence: before });
       model = model.filter(f => f.sequence >= before);
     }
-    assert.deepEqual((await store.listFlows({ sessionId: 'model' })).flows, model);
+    const actual = (await store.listFlows({ sessionId: 'model' })).flows.map(({ owner_client, owner_task, device_udid, attribution, ...flow }) => flow);
+    assert.deepEqual(actual, model);
     assert.equal((await store.storageStatus()).flows, model.length);
     assert.equal((await store.getSession('model')).total_bytes, model.reduce((n, f) => n + Buffer.byteLength(JSON.stringify(f)), 0));
   }

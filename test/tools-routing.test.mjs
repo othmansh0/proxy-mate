@@ -136,3 +136,15 @@ test('in-process callers serialize simultaneous independent claims and SSL merge
   await tools.clear_proxy_routing({}, a);
   assert.deepEqual((await tools.get_proxy_status({}, b)).routing_union, ['b.test']);
 });
+test('routing devices are validated before side effects and retained on the caller claim', async t => {
+  const { tools } = await fixture(t);
+  const udid = 'AAAAAAAA-1111-2222-3333-444444444444';
+  await assert.rejects(tools.set_proxy_routing({ domains: ['a.test'], device_udid: 'invalid' }, a), { code: 'ROUTING_DEVICE_INVALID' });
+  const { createRoutingClaimsStore } = await import('../src/lib/routing-claims.mjs');
+  const claims = createRoutingClaimsStore();
+  assert.equal((await claims.listClaims()).length, 0);
+  for (const device_udid of [udid, [udid]]) {
+    await tools.set_proxy_routing({ domains: ['a.test'], device_udid }, a);
+    assert.deepEqual((await claims.listClaims()).find(c => c.client_id === a.client_id).device_udids, [udid]);
+  }
+});

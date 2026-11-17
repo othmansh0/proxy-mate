@@ -47,7 +47,13 @@ const flowPartSchema = z.looseObject({
   body_omission_reason: z.string().nullish(),
   body_resource_uri: resourceUriSchema.nullish(),
 });
+const deviceUdidSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+const attributionFields = {
+  owner_client: z.string().nullish(), owner_task: z.string().nullish(),
+  device_udid: deviceUdidSchema.nullish(), attribution: z.enum(['device', 'claim', 'ambiguous', 'unknown']).optional(),
+};
 const flowSummarySchema = z.looseObject({
+  ...attributionFields,
   id: z.string().optional(),
   upstream_error: upstreamErrorSchema.nullable().optional(),
   request: flowPartSchema.nullable().optional(),
@@ -69,6 +75,7 @@ const flowListSchema = z.looseObject({
   order: z.enum(['newest_first', 'oldest_first']).optional(),
 });
 const flowDetailSchema = z.looseObject({
+  ...attributionFields,
   id: z.string().optional(),
   request: flowPartSchema.nullable().optional(),
   response: flowPartSchema.nullable().optional(),
@@ -77,6 +84,7 @@ const flowDetailSchema = z.looseObject({
 const routingLossReasonSchema = z.enum(['lease_expired', 'daemon_restart', 'external_change', 'guardian_recovery']);
 const routingClaimSchema = z.object({
   claim_id: z.string(), client_id: z.string(), task_id: z.string().nullable(),
+  device_udids: z.array(deviceUdidSchema).max(8).optional(),
   domains: z.array(z.string()), expires_at: z.string(),
   state: z.enum(['active', 'suspended', 'expired']), mine: z.boolean().optional(),
 });
@@ -249,6 +257,7 @@ const startProxySchema = {
 };
 
 const setRoutingSchema = {
+  device_udid: z.union([deviceUdidSchema, z.array(deviceUdidSchema).max(8)]).optional().describe("Pass the UDID of the Simulator you drive for flow attribution."),
   domains: z.array(z.string()).min(1),
   network_service: z.string().optional(),
   pac_port: z.number().int().min(1).max(65535).optional(),

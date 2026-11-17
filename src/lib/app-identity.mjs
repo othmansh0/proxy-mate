@@ -115,3 +115,50 @@ export function createAppClassifier({
   });
   return classify;
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function simulatorDeviceUdid(executable) {
+  const value = String(executable ?? '').match(/\/CoreSimulator\/Devices\/([^/]+)\//)?.[1];
+  return value && UUID.test(value) ? value.toUpperCase() : null;
+}
+
+// Returns cached data immediately; subprocesses never hold up capture. Cache
+// entries belong to live socket objects (not reusable ephemeral port numbers).
+export function createDeviceResolver({ execute = executeFile, maxPending = 128 } = {}) {
+  const cache = new WeakMap();
+  let queue = [], running = false, pending = 0, degraded = 0;
+  async function drain() {
+    while (queue.length) {
+      const batch = queue; queue = [];
+      const groups = Map.groupBy(batch, socket => socket.localPort);
+      for (const [port, sockets] of groups) {
+        try {
+          const { stdout } = await execute('/usr/sbin/lsof', ['-nP', '-a', `-iTCP:${port}`, '-sTCP:ESTABLISHED', '-Fpn'], { timeout: 2000, maxBuffer: 256 * 1024 });
+          const processes = new Map();
+          await Promise.all(sockets.map(async socket => {
+            const pid = findConnectionOwner(stdout, socket.remotePort, port);
+            if (!pid) { degraded++; return; }
+            if (!processes.has(pid)) processes.set(pid, execute('/bin/ps', ['-p', String(pid), '-o', 'comm='], { timeout: 1000, maxBuffer: 16 * 1024 })
+              .then(result => simulatorDeviceUdid(result.stdout.trim())).catch(() => null));
+            const udid = await processes.get(pid);
+            cache.set(socket, udid);
+            if (!udid) degraded++;
+          }));
+        } catch { degraded += sockets.length; }
+        pending -= sockets.length;
+      }
+    }
+    running = false;
+  }
+  const resolve = socket => {
+    if (!socket || typeof socket !== 'object') { degraded++; return null; }
+    if (cache.has(socket)) return cache.get(socket);
+    cache.set(socket, null);
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(socket.remoteAddress) || !socket.localPort || !socket.remotePort || pending >= maxPending) { degraded++; return null; }
+    pending++; queue.push(socket);
+    if (!running) { running = true; queueMicrotask(() => void drain()); }
+    return null;
+  };
+  resolve.status = () => ({ pending, degraded });
+  return resolve;
+}
