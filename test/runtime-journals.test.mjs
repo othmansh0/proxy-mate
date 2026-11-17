@@ -114,7 +114,7 @@ async function daemonFixture(failPhase) {
     sweepStaleTempFiles: noOp, STATE_DIR: home, startLogMaintenance: () => () => {},
     startEventLoopMetrics: () => ({ stop() {} }), startLiveness: async () => ({ stop: noOp }),
     ProxyEngine: class { port = 123; sessionId = 'session'; diagnostics = []; start = noOp; },
-    readState: async () => null, PacServer: class {}, makeTools: () => ({ stop_operator_ui: noOp, [internal]: { stop_proxy: async () => ({}) } }),
+    readState: async () => null, PacServer: class {}, createDaemonPacServer: () => ({}), makeTools: () => ({ stop_operator_ui: noOp, [internal]: { stop_proxy: async () => ({}) } }),
     loadDomainsConfig: async () => ({ domains: failPhase === 'routing' ? ['example.test'] : [], tls_passthrough: [] }),
     applyPacRouting: async () => { throw Object.assign(new Error('routing failed'), { code: 'ROUTING_FAILED' }); }, validateRoutingDomains() {},
     PROXY_PORT_DEFAULT: 123, PAC_PORT_DEFAULT: 124, DEFAULT_CONTROL_PORT: 125,

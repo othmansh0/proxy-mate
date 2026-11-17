@@ -14,8 +14,11 @@ const a = { client_id: 'client-a', task_id: 'one' }, b = { client_id: 'client-b'
 async function fixture(t, mode = 'daemon') {
   await clearState();
   await fs.rm(path.join(STATE_DIR, 'routing-claims.json'), { force: true });
-  await fs.rm(path.join(STATE_DIR, 'daemon.events.json'), { force: true });
-  await fs.rm(path.join(STATE_DIR, 'guardian.events.json'), { force: true });
+  for (const source of ['daemon', 'guardian']) {
+    for (const suffix of ['.events.json', '.events.jsonl', '.events.jsonl.1']) {
+      await fs.rm(path.join(STATE_DIR, `${source}${suffix}`), { force: true });
+    }
+  }
   let clock = Date.now(), actual = { enabled: false, url: '' }, fire;
   const run = async (_file, [cmd, _service, value]) => {
     if (cmd === '-getautoproxyurl') return { stdout: `URL: ${actual.url}\nEnabled: ${actual.enabled ? 'Yes' : 'No'}\n` };
