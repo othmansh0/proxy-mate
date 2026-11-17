@@ -431,6 +431,18 @@ function toolGroup(name) {
 }
 
 function tool(name, description, inputSchema = {}, annotations = READ, options = {}) {
+  // Evidence consumers share the same mine/all input, including replay and body exports.
+  const evidenceConsumers = [
+    'export_flow_curl', 'export_flow_code', 'export_flow_swift', 'repeat_flow', 'edit_and_repeat_flow',
+    'save_body_to_file', 'query_flow_json', 'inspect_flow_protocol', 'validate_flow_openapi',
+    'capture_to_mock', 'validate_capture_openapi', 'import_capture_session', 'import_har',
+    'get_websocket_connection', 'import_websocket_transcript', 'export_websocket_transcript',
+    'plan_websocket_replay', 'transform_websocket_transcript',
+  ];
+  if (evidenceConsumers.includes(name)) inputSchema = { ...inputSchema,
+    scope: z.enum(['mine', 'all']).optional().describe('Identified clients default to mine; pass all to read shared evidence.') };
+  if (['import_capture_session', 'import_har'].includes(name)) inputSchema = { ...inputSchema,
+    confirm_shared: z.boolean().optional().describe('Replacing other clients’ evidence requires scope all and confirm_shared true. Active-session replacement is refused; import into a new session ID.') };
   const scopedReads = new Set(['get_flows', 'get_flow_detail', 'filter_flows', 'wait_for_flow', 'export_har', 'export_capture_session', 'analyze_capture', 'assert_capture', 'compare_flows', 'list_websocket_connections', 'get_websocket_messages']);
   const scopedWrites = new Set(['clear_session', 'purge_capture_session', 'update_capture_session']);
   if (scopedReads.has(name) || scopedWrites.has(name)) inputSchema = { ...inputSchema,
@@ -458,7 +470,7 @@ function tool(name, description, inputSchema = {}, annotations = READ, options =
     title: toolTitle(name),
     description,
     inputSchema: LEASE_PROTECTED_TOOLS.has(name) ? { ...inputSchema,
-      capture_lease_id: z.string().uuid().optional().describe('Required while a task holds the shared capture lease; the thin bridge remembers an acquired lease.') } : inputSchema,
+      capture_lease_id: z.string().uuid().optional().describe('Identifies this task’s resource-scoped lease; the thin bridge remembers an acquired lease.') } : inputSchema,
     outputSchema: scopedOutput ?? typedToolOutputSchemas[name] ?? toolOutputSchema,
     annotations,
     // Namespaced metadata is advisory. Hosts that do not recognize it simply
