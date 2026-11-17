@@ -188,7 +188,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return routingResult(status, context);
   }
 
-  const captureLease = new CaptureLease();
+  const captureLease = new CaptureLease({ registry: clientRegistry, clock: now });
   let simWatchStop = null;
   let appGateway = null;
   let appScope = null;
@@ -2141,8 +2141,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       ...inspectJson(document, args) };
   }
 
-  async function finish_capture_task(args = {}) {
-    const lease = await captureLease.assert(args.capture_lease_id);
+  async function finish_capture_task(args = {}, context = {}) {
+    const lease = await captureLease.assert(args.capture_lease_id, context, [], args.task_id);
     if (!lease) throw Object.assign(new Error('Acquire the task lease before using task cleanup. Legacy fixtures must be removed by their explicit IDs.'), {
       code: 'TASK_LEASE_REQUIRED', recovery: ['Use acquire_capture_lease for new task resources; never infer ownership from a broad ID prefix.'],
     });
@@ -2164,8 +2164,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       else await reverseProxies.remove(resource.id);
       removed.push({ kind: resource.kind, id: resource.id });
     }
-    await captureLease.release(args);
-    return { status: 'finished', task_id: lease.task_id, removed, retained, lease_released: true,
+    const lease_status = await captureLease.finish(lease.lease_id, retained, context);
+    return { kept: retained, orphaned: lease_status.orphaned_resources, lease_status, status: 'finished', task_id: lease.task_id, removed, retained, lease_released: true,
       capture_continues: engine.isRunning(), evidence_preserved: true, stored_rules_updated: storedChanged,
       next_actions: retained.length ? ['Retained resources were explicitly kept or changed since this task owned them. Inspect before removing them.'] : [] };
   }
@@ -2441,8 +2441,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     kill_orphan_proxy, reconcile_state, export_har, import_har,
     // sim
     start_sim_watcher, stop_sim_watcher,
-    acquire_capture_lease: (args) => captureLease.acquire(args),
-    release_capture_lease: (args) => captureLease.release(args),
+    acquire_capture_lease: (args, context) => captureLease.acquire(args, context),
+    release_capture_lease: (args, context) => captureLease.release(args, context),
     finish_capture_task,
   };
   // Also serialize direct/in-process callers, which do not use control.mjs's
@@ -2456,11 +2456,36 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       return result;
     };
   }
+  let resourceMutation = Promise.resolve();
   for (const name of LEASE_PROTECTED_TOOLS) {
     const fn = tools[name];
     if (!fn) continue;
-    tools[name] = async (args = {}, context = {}) => {
-      const lease = await captureLease.assert(args.capture_lease_id);
+    const mutateResource = async (args = {}, context = {}) => {
+      // Only resource mutations participate; global controls belong to their own policy.
+      if (['finish_capture_task', 'resolve_breakpoint', 'cancel_breakpoint'].includes(name)) return fn(args, context);
+      const defaults = {
+        create_map_local: () => stableRuleId('map-local', args.url_pattern ?? args.url),
+        mock_json_response: () => stableRuleId('map-local', args.url),
+        create_map_remote: () => stableRuleId('map-remote', `${args.from_url ?? args.url}->${args.to_url}`),
+        create_blacklist: () => stableRuleId('blacklist', args.url ?? args.url_pattern),
+        create_network_condition: () => stableRuleId('network', `${args.url ?? '*'}:${args.profile ?? args.delay_ms ?? args.fault}`),
+        create_no_cache_rule: () => stableRuleId('no-cache', args.url ?? '*'),
+        create_breakpoint: () => stableRuleId('breakpoint', `${args.url ?? args.url_pattern}:${args.direction ?? 'request'}`),
+        capture_to_mock: () => `capture-${args.flow_id}`,
+        create_transform_plugin_rule: () => stableRuleId('plugin', `${args.plugin_id}:${args.url ?? args.url_pattern}`),
+      };
+      if (defaults[name] && !args.rule_id) args = { ...args, rule_id: defaults[name]() };
+      const resources = [];
+      if (args.rule_id) resources.push({ kind: 'rule', id: args.rule_id });
+      if (name === 'reorder_rules') for (const id of args.rule_ids ?? []) resources.push({ kind: 'rule', id });
+      if (name === 'import_rules' && args.path) {
+        const imported = await importRulesFrom(await authorizeReadPath(args.path));
+        for (const rule of imported) if (rule.rule_id) resources.push({ kind: 'rule', id: rule.rule_id });
+        if (args.replace) for (const rule of engine.listRuleConfigs()) resources.push({ kind: 'rule', id: rule.rule_id });
+      }
+      if (['create_reverse_proxy', 'remove_reverse_proxy'].includes(name) && args.id) resources.push({ kind: 'reverse_proxy', id: args.id });
+      if (!resources.length && !RULE_CREATORS.has(name) && name !== 'create_reverse_proxy') return fn(args, context);
+      const lease = await captureLease.assert(args.capture_lease_id, context, resources);
       const priorRules = lease && RULE_CREATORS.has(name) ? new Set(engine.mockRules.keys()) : null;
       const result = await fn(args, context);
       if (lease && name !== 'finish_capture_task') {
@@ -2473,6 +2498,11 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
         if (name === 'create_reverse_proxy') await captureLease.trackResource(lease.lease_id,
           { kind: 'reverse_proxy', id: result.id, revision: resourceRevision(result) });
       }
+      return result;
+    };
+    tools[name] = (args = {}, context = {}) => {
+      const result = resourceMutation.then(() => mutateResource(args, context));
+      resourceMutation = result.catch(() => {});
       return result;
     };
   }

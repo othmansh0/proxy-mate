@@ -17,7 +17,8 @@ for (const entry of [['src/client.mjs'], ['src/server.mjs', '--require-daemon']]
       [name, async (_args, context) => {
         contexts.push({ name, client_id: context.client_id, task_id: context.task_id });
         return { status: name === 'finish_capture_task' ? 'finished' : 'acquired', task_id: context.task_id,
-          expires_at: '2099-01-01T00:00:00Z', removed: [], retained: [], capture_continues: true, evidence_preserved: true,
+          expires_at: '2099-01-01T00:00:00Z', removed: [], retained: [], kept: [], orphaned: [],
+          lease_status: { active: false, task_id: null, expires_at: null, owned_resource_count: 0, other_lease_count: 0, orphaned_resource_count: 0, orphaned_resources: [] }, capture_continues: true, evidence_preserved: true,
           running: false, capture_lease_id: '68b5c887-19e6-48fd-856b-7d1da62e6816', lease_released: true };
       }]));
     const control = new ControlServer({ port: 0, tools });

@@ -57,6 +57,9 @@ export async function reconcileRuntime(options = {}) {
       const { recordRoutingSuspension } = await import('./pac.mjs');
       await recordRoutingSuspension({ ...options, state, reason: 'daemon_restart' });
     }
+    // Persist legacy ownership before discarding stale crash-recovery state.
+    const { CaptureLease } = await import('./capture-lease.mjs');
+    await new CaptureLease().summary();
     await clearState();
   }
 }

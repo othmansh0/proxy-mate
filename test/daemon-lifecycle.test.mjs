@@ -93,8 +93,9 @@ test('real daemon owns one runtime and recovers after SIGKILL and an extended ou
   assert.equal((await callDaemon({ ...restarted, tool: 'get_proxy_status' })).connection_attempt_timeout_ms, 1250);
   const restoredStatus = await callDaemon({ ...restarted, tool: 'get_proxy_status' });
   assert.equal(restoredStatus.active_session_id, 'persistent-active');
-  assert.equal(restoredStatus.capture_lease.task_id, 'survive-restart');
-  await assert.rejects(callDaemon({ ...restarted, tool: 'stop_proxy' }), { code: 'CAPTURE_OWNED' });
+  // Global controls no longer reveal or require another task's resource lease.
+  assert.equal(restoredStatus.capture_lease.task_id, null);
+  assert.equal((await callDaemon({ ...restarted, tool: 'toggle_recording', args: { enabled: true } })).recording, true);
   assert.equal((await callDaemon({ ...restarted, tool: 'acquire_capture_lease', args: { task_id: 'survive-restart', capture_lease_id: lease.capture_lease_id } })).status, 'renewed');
   second.kill('SIGKILL');
   await second.finished;
@@ -109,6 +110,9 @@ test('real daemon owns one runtime and recovers after SIGKILL and an extended ou
   const recovered = start();
   const finalHandshake = await ready(recovered, restarted.token);
   assert.notEqual(finalHandshake.token, restarted.token);
+  const crashLease = await callDaemon({ ...finalHandshake, tool: 'acquire_capture_lease', args: { task_id: 'survive-restart' } });
+  assert.equal(crashLease.status, 'renewed');
+  assert.equal(crashLease.capture_lease_id, lease.capture_lease_id);
   const resumed = await clients[1].callTool({ name: 'get_proxy_status', arguments: {} });
   assert.equal(resumed.isError, undefined, JSON.stringify(resumed.content));
   assert.equal(resumed.structuredContent.data.daemon_pid, recovered.pid);

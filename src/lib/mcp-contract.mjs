@@ -161,6 +161,14 @@ function toolResultSchema(dataSchema = z.looseObject({})) {
 // New clients should read only the versioned envelope fields.
 export const toolOutputSchema = toolResultSchema();
 
+const leaseStatusSchema = z.object({
+  active: z.boolean(), task_id: z.string().nullable(), expires_at: z.string().nullable(),
+  owned_resource_count: z.number().int().nonnegative(), other_lease_count: z.number().int().nonnegative(),
+  orphaned_resource_count: z.number().int().nonnegative(),
+  orphaned_resources: z.array(z.object({ kind: z.string(), id: z.string(), revision: z.string(),
+    last_owner_client: z.string(), last_owner_task: z.string(), orphaned_at: z.string() })),
+});
+
 const typedToolOutputSchemas = Object.freeze({
   get_started: toolResultSchema(z.looseObject({ routing_guidance: z.string().optional() })),
   set_proxy_routing: toolResultSchema(routingResultSchema),
@@ -174,14 +182,17 @@ const typedToolOutputSchemas = Object.freeze({
     scanned_nodes: z.number().int().nonnegative(), scan_limit: z.number().int().positive(),
   })),
   finish_capture_task: toolResultSchema(z.looseObject({
+    kept: z.array(z.unknown()), orphaned: z.array(z.unknown()), lease_status: leaseStatusSchema,
     status: z.literal('finished'), task_id: z.string(), removed: z.array(z.unknown()), retained: z.array(z.unknown()),
     lease_released: z.literal(true), capture_continues: z.boolean(), evidence_preserved: z.literal(true),
   })),
   acquire_capture_lease: toolResultSchema(z.looseObject({
+    lease_status: leaseStatusSchema,
     status: z.enum(['acquired', 'renewed']), capture_lease_id: z.string().uuid(),
     task_id: z.string(), expires_at: z.string(),
   })),
   release_capture_lease: toolResultSchema(z.looseObject({
+    lease_status: leaseStatusSchema,
     status: z.enum(['released', 'not_held']), task_id: z.string().optional(), capture_continues: z.boolean().optional(),
   })),
   list_simulator_apps: toolResultSchema(z.looseObject({
@@ -433,7 +444,7 @@ export const MCP_TOOLS = Object.freeze([
   }),
   tool('list_setup_workflows', 'List supported capture workflows and automation limits, including local-backend capture without system proxy changes.'),
   tool('get_version', 'Return proxy-mate, runtime, and execution-mode versions.'),
-  tool('acquire_capture_lease', 'Lease shared capture, routing and mock mutations for one task. Reads, exports and replay stay available to other agents. Renew with the current capture_lease_id; never take over another task.', {
+  tool('acquire_capture_lease', 'Lease resources for one client task. Independent tasks may run in parallel. Heartbeats renew the TTL; presence loss retains resources as orphans.', {
     task_id: z.string().regex(/^[A-Za-z0-9._-]{1,96}$/),
     capture_lease_id: z.string().uuid().optional(),
     ttl_seconds: z.number().int().min(30).max(3600).optional(),
@@ -442,6 +453,7 @@ export const MCP_TOOLS = Object.freeze([
     capture_lease_id: z.string().uuid().optional().describe('May be omitted on the thin bridge that acquired this lease.'),
   }, MUTATE),
   tool('finish_capture_task', 'Finish a leased task: remove only unchanged rules/reverse listeners created by this lease, release paused requests through normal rule cleanup, then release its lease. Keep shared capture, durable evidence and other tasks\' fixtures. keep_resources=true explicitly leaves QA fixtures installed.', {
+    task_id: z.string().regex(/^[A-Za-z0-9._-]{1,96}$/).optional().describe('Defaults to the caller task.'),
     keep_resources: z.boolean().optional(),
   }, NON_IDEMPOTENT),
   tool('start_operator_ui', 'Start the optional read-only loopback dashboard and return its bearer access code.', {
