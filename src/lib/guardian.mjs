@@ -2,8 +2,10 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import os from 'node:os';
+import { stat } from 'node:fs/promises';
 import { readState, readPidFile, readHandshake } from './state.mjs';
 import { probeDaemon } from './control.mjs';
+import { probeLiveness } from './liveness.mjs';
 import { clearPacRouting } from './pac.mjs';
 import { acquireRuntime } from './runtime.mjs';
 import { recordRuntimeEvent } from './runtime-identity.mjs';
@@ -17,7 +19,16 @@ const alive = (pid) => {
   catch (error) { if (error.code === 'ESRCH') return false; if (error.code === 'EPERM') return true; throw error; }
 };
 const coreCount = () => os.cpus().length;
-export const healthTimeoutPolicy = ({ failingForMs, unhealthyMs }) => failingForMs >= unhealthyMs;
+export const healthTimeoutPolicy = ({ decision, failingForMs, unhealthyMs, unreachableForMs, unreachableMs }) => {
+  if (decision === 'hung') return true;
+  if (decision === 'unreachable') return unreachableForMs >= unreachableMs;
+  if (decision === 'slow') return false;
+  return failingForMs >= unhealthyMs;
+};
+const hasLivenessFile = async (directory) => {
+  try { await stat(path.join(directory, 'liveness.json')); return true; }
+  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false; throw error; }
+};
 
 // Three outcomes distinguish an exited process from a live, unrelated owner.
 export async function verifyOwnedDaemon(pid, { readPid = readPidFile, state = readState, run = exec,
@@ -49,14 +60,19 @@ export async function terminateOwnedDaemon(pid, { signal = process.kill.bind(pro
 }
 
 export function createGuardian({ read = readState, readPid = readPidFile, handshake = readHandshake,
-  probe = probeDaemon, isAlive = alive, acquire = acquireRuntime, restore = clearPacRouting,
+  probe = probeDaemon, liveness = probeLiveness, livenessExists = hasLivenessFile, directory = STATE_DIR,
+  isAlive = alive, acquire = acquireRuntime, restore = clearPacRouting,
   run = exec, signal = process.kill.bind(process), intent = writeShutdownIntent,
   record = recordRuntimeEvent, log = logLine, now = Date.now, loadavg = os.loadavg, cores = coreCount,
   unhealthyMs = 30000, killAfterMs = 25000, shouldTerminate = healthTimeoutPolicy,
 } = {}) {
   let failingPid = null, failureSince = null, termination = null;
+  let unreachableSince = null, livenessSeen = false, previousFlows = null, lastSlowAt = null;
   const lastFailureEvent = new Map();
-  const resetFailure = () => { failingPid = null; failureSince = null; };
+  const resetFailure = () => {
+    failingPid = null; failureSince = null; unreachableSince = null;
+    livenessSeen = false; previousFlows = null;
+  };
   const reportFailure = async (step, error, started) => {
     const details = { step, ...errorFields(error), elapsed_ms: now() - started, load1: loadavg()[0] };
     log('guardian', 'step failed', details);
@@ -129,13 +145,51 @@ export function createGuardian({ read = readState, readPid = readPidFile, handsh
         } finally { await step('release', release); }
       }
       if (await step('read_pid', readPid) !== state.pid) { resetFailure(); return { action: 'startup_in_progress' }; }
+      const load1 = loadavg()[0], coreTotal = Math.max(1, cores());
+      const lf = Math.max(1, load1 / coreTotal);
+      const probeTimeoutMs = Math.min(5000, 1000 * lf);
+      const unreachableMs = Math.min(120000, 30000 * lf);
+      const hangCeilingMs = Math.min(180000, 60000 * lf);
       const auth = await step('handshake', handshake);
-      if (auth && await step('probe', () => probe(auth.controlUrl, auth.token, 1000))) {
+      if (auth && await step('probe', () => probe(auth.controlUrl, auth.token, probeTimeoutMs, { client_id: 'guardian-probe' }))) {
         resetFailure(); return { action: 'healthy' };
       }
-      if (failingPid !== state.pid) { failingPid = state.pid; failureSince = now(); }
+      if (failingPid !== state.pid) { resetFailure(); failingPid = state.pid; failureSince = now(); }
       const failingForMs = now() - failureSince;
-      if (!await step('decision', () => shouldTerminate({ failingForMs, unhealthyMs, state }))) return { action: 'waiting_for_health' };
+      const answer = await step('liveness', () => liveness({ directory, timeoutMs: Math.min(3000, 750 * lf) }));
+      // A stale discovery file must not let another process vouch for this owner.
+      const live = answer?.pid === state.pid && Number.isFinite(answer.heartbeat_age_ms) ? answer : null;
+      let decision, flowsDelta = 0;
+      if (live) {
+        livenessSeen = true;
+        const flows = live.progress?.flows_completed;
+        if (Number.isFinite(flows)) {
+          flowsDelta = previousFlows === null ? 0 : Math.max(0, flows - previousFlows);
+          previousFlows = flows;
+        }
+        // Any answer breaks continuous unreachability, including renewed progress.
+        unreachableSince = null;
+        decision = live.heartbeat_age_ms >= hangCeilingMs ? 'hung' : 'slow';
+        if (decision === 'slow' && (lastSlowAt === null || now() - lastSlowAt >= 60000)) {
+          lastSlowAt = now();
+          const details = { probe_failing_for_ms: failingForMs, heartbeat_age_ms: live.heartbeat_age_ms,
+            verdict: live.verdict ?? null, lag_p99_ms: live.lag_p99_ms ?? null, elu: live.elu ?? null,
+            load1, cores: coreTotal, flows_completed: flows ?? null, flows_delta: flowsDelta };
+          log('guardian', 'slow owner kept', details);
+          await event('slow_owner_observed', state.pid, details);
+        }
+      } else {
+        livenessSeen = await step('liveness_file', () => livenessExists(directory)) || livenessSeen;
+        if (livenessSeen) {
+          unreachableSince ??= now();
+          decision = 'unreachable';
+        } else decision = 'legacy_timeout';
+      }
+      const unreachableForMs = unreachableSince === null ? 0 : now() - unreachableSince;
+      if (!await step('decision', () => shouldTerminate({ failingForMs, unhealthyMs: Math.min(120000, unhealthyMs * lf),
+        state, decision, liveness: live, flowsDelta, unreachableForMs, unreachableMs, hangCeilingMs, load1, cores: coreTotal }))) {
+        return { action: 'waiting_for_health' };
+      }
       const ownership = await verify(state.pid);
       if (ownership === 'unverified') return { action: 'unverified_owner_preserved' };
       if (ownership === 'gone') {
@@ -143,7 +197,9 @@ export function createGuardian({ read = readState, readPid = readPidFile, handsh
         return await exited();
       }
       await step('intent', () => intent({ targetPid: state.pid, reason: 'guardian_health_timeout', by: 'guardian' }));
-      await event('terminating_unresponsive_owner', state.pid, { failing_for_ms: failingForMs, load1: loadavg()[0], cores: cores(), probe_timeout_ms: 1000 });
+      await event('terminating_unresponsive_owner', state.pid, { failing_for_ms: failingForMs, decision,
+        heartbeat_age_ms: live?.heartbeat_age_ms ?? null, unreachable_for_ms: unreachableForMs,
+        load1, cores: coreTotal, hang_ceiling_ms: hangCeilingMs, probe_timeout_ms: probeTimeoutMs });
       const sent = await send(state.pid, 'SIGTERM');
       termination = { pid: state.pid, sigtermAt: now(), gone: !sent };
       if (!sent) return await exited();
