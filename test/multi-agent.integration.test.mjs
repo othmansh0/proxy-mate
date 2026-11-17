@@ -6,7 +6,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 // Run in a fresh process: src modules capture PROXY_MATE_HOME at import time.
-test('three real MCP bridges isolate evidence and survive daemon restarts', { timeout: 90000 }, async () => {
+let qualification;
+const qualify = () => qualification ??= runQualification();
+async function runQualification() {
   const home = await mkdtemp(path.join(os.tmpdir(), 'multi-test-'));
   const child = spawn(process.execPath, ['scripts/qualify-multi-agent.mjs', '--seconds', '1', '--cpu-factor', '1'], { env: { ...process.env, PROXY_MATE_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
@@ -16,8 +18,14 @@ test('three real MCP bridges isolate evidence and survive daemon restarts', { ti
   try {
     const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
     assert.equal(code, 0, output);
-    assert.match(output, /"passed":true/);
+    const report = JSON.parse(output.trim());
+    assert.equal(report.passed, true);
+    return report;
   } finally { clearTimeout(timer); await rm(home, { recursive: true, force: true }); }
+}
+
+test('three real MCP bridges isolate evidence and survive daemon restarts', { timeout: 90000 }, async () => {
+  await qualify();
 });
 
 import { fakeHostTrust, networksetupBinary, testTiming } from '../src/lib/test-hooks.mjs';
@@ -32,8 +40,14 @@ test('test-only overrides are inert without their explicit gate', () => {
   }
 });
 
-test('union PAC, per-client routing clear, restart re-arm and routing presence cleanup', t => {
-  t.skip('pending FIX-A pacPort wiring');
+test('union PAC, per-client routing clear, restart re-arm and routing presence cleanup', { timeout: 90000 }, async () => {
+  const report = await qualify();
+  for (const name of ['union PAC and ownership', 'per-client routing clear', 'hard restart and routing re-arm',
+    'external PAC preserved and routing warning', 'presence and guardian']) {
+    assert.ok(report.phases.some(p => p.name === name), name);
+  }
+  assert.deepEqual(report.routing, { claims_survived_restart: 2, vpn_preserved: true, presence_remaining: 1 });
+  assert.deepEqual(report.policy_decisions, []);
 });
 
 import { failsQualification } from '../scripts/lib/load-support.mjs';
