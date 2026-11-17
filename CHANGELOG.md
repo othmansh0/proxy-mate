@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Restore system routing before daemon shutdown work, bound control and drain waits within a 20-second deadline, and give launchd 30 seconds while preserving routing claims.
+
 - Give guardian-initiated shutdowns 25 seconds before escalation, record shutdown intent and load-aware diagnostics, and retry failed recovery steps without blocking ticks.
 - Add an isolated daemon load harness with real bridge and guardian probes, optional CPU starvation and background scheduling, JSON evidence, and owned-process cleanup.
 - Keep authenticated health probes available under agent load, isolate bridge rate and long-call budgets, expose control metrics, and reduce bridge readiness and subscription polling.

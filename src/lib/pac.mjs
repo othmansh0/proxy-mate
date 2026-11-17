@@ -20,9 +20,11 @@ import { selectNetworkService } from './network-service.mjs';
 const execFileP = promisify(execFile);
 const NETWORKSETUP = '/usr/sbin/networksetup';
 // Sample host load for every command, including rollback commands.
-async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.availableParallelism() } = {}) {
+async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.availableParallelism(), timeoutCapMs = Infinity } = {}) {
   const load = Number(loadavg()[0]);
-  const timeout = Math.min(20000, Math.ceil(5000 * Math.max(1, (Number.isFinite(load) ? load : 0) / Math.max(1, cores))));
+  const cap = typeof timeoutCapMs === 'function' ? timeoutCapMs() : timeoutCapMs;
+  if (cap <= 0) throw Object.assign(new Error('Routing budget exhausted.'), { code: 'ROUTING_COMMAND_TIMEOUT' });
+  const timeout = Math.max(1, Math.min(Math.ceil(cap), 20000, Math.ceil(5000 * Math.max(1, (Number.isFinite(load) ? load : 0) / Math.max(1, cores)))));
   try { return await run(NETWORKSETUP, args, { timeout, maxBuffer: 1024 * 1024 }); }
   catch (error) {
     if (error?.killed || error?.code === 'ETIMEDOUT' || error?.code === 'ERR_CHILD_PROCESS_TIMEOUT') {
@@ -281,9 +283,9 @@ async function applyValidatedPacRouting({ domains, networkService, pacPort, prox
   }
 }
 
-export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP, loadavg, cores } = {}) {
+export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP, loadavg, cores, timeoutCapMs } = {}) {
   const rawRun = run;
-  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores });
+  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores, timeoutCapMs });
   const persisted = await readState();
   if (!persisted?.routing_active) {
     await pacServer?.stop();

@@ -59,7 +59,7 @@ export async function reconcileRuntime(options = {}) {
 
 // Register before startup. Cleanup waits for startup to settle, so a signal
 // during a slow certificate operation cannot race new listeners into existence.
-export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 18_000,
+export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 20_000,
   eventTimeoutMs = 1000, process: proc = process, recordEvent = recordRuntimeEvent,
   readIntent = readShutdownIntent, clearIntent = clearShutdownIntent } = {}) {
   let stopping = null;

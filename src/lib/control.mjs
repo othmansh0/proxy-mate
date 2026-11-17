@@ -111,15 +111,23 @@ export class ControlServer {
     return this.port;
   }
 
-  async stop() {
+  async stop({ queueTimeoutMs = 3000 } = {}) {
     if (!this.server) return;
     const closed = new Promise((resolve) => this.server.close(() => resolve()));
     for (const controller of this.controllers) controller.abort(codedCancellation('Daemon is shutting down.'));
     for (const socket of this.sockets) socket.destroy();
     await closed;
-    await this.queue;
-    this.server = null;
-    await clearHandshake(this.token);
+    let timer, queueDrained = false;
+    try {
+      await Promise.race([this.queue.then(() => { queueDrained = true; }), new Promise((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, queueTimeoutMs));
+      })]);
+    } finally {
+      clearTimeout(timer);
+      this.server = null;
+      await clearHandshake(this.token);
+    }
+    return { queue_drained: queueDrained };
   }
 
   #handle(req, res) {

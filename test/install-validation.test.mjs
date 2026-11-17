@@ -11,7 +11,7 @@ for (const [label, processType] of priorities) {
   test(`plist preserves service settings with ${processType} priority for ${label}`, () => {
     const xml = plistXml({ programArgs: ['/node', '/runtime/src/server.mjs'], label, processType });
     assert.match(xml, new RegExp(`<key>ProcessType</key>\\s*<string>${processType}</string>`));
-    for (const [key, value] of [['ExitTimeOut', 20], ['ThrottleInterval', 10]]) {
+    for (const [key, value] of [['ExitTimeOut', label === LABEL ? 30 : 20], ['ThrottleInterval', 10]]) {
       assert.match(xml, new RegExp(`<key>${key}</key>\\s*<integer>${value}</integer>`));
     }
     for (const key of ['KeepAlive', 'RunAtLoad']) assert.match(xml, new RegExp(`<key>${key}</key>\\s*<true/>`));
