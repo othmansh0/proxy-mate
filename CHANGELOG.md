@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Upgrade note: new clients create breakpoints scoped to their claimed devices or unambiguous hosts by default (`scope: "all"` restores shared matching); skipped traffic is counted in breakpoint history/status. Global capture controls and Simulator app restarts now require `force: true` while other live clients hold routing claims. App restarts default to the caller’s claimed devices.
+- Upgrade note: capture leases now protect individual task resources and persist across crashes in leases.json. Heartbeats renew leases; expired or absent owners leave visible orphan resources. Independent tasks and cross-client breakpoint resolution can proceed; finish_capture_task accepts task_id and cleans only that task’s unchanged resources.
 
 - Preserve routing suspension and re-arm active agent claims after daemon restarts only while restored PAC settings remain unchanged, with bounded retries and retained expiry metadata. `--no-routing` disables CLI domain routing; existing agent claims may still re-arm.
 - Track bridge presence with quiet heartbeats, renew only the caller’s routing deadlines without network churn, and release absent clients’ claims while preserving other captures.
