@@ -38,14 +38,19 @@ export class CaptureLease {
     Object.assign(this, { read, clock, registry, recordEvent });
     this.file = path.join(directory, 'leases.json');
     this.snapshot = emptyStore();
-    if (registry) {
-      const touch = registry.touch.bind(registry), sweep = registry.sweep.bind(registry);
+    // Registries may be partial (presence-only callers and tests); hook only
+    // the methods that exist.
+    if (typeof registry?.touch === 'function') {
+      const touch = registry.touch.bind(registry);
       registry.touch = (client) => {
         const result = touch(client), at = this.clock();
         // Queue immediately: a subsequent mutation observes the renewal first.
         this.renew(client?.client_id, at).catch(error => console.error('Lease renewal failed:', error.code ?? error.message));
         return result;
       };
+    }
+    if (typeof registry?.sweep === 'function') {
+      const sweep = registry.sweep.bind(registry);
       registry.sweep = async () => { await sweep(); await this.summary(); };
     }
   }
