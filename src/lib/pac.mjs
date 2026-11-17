@@ -15,6 +15,8 @@ import { promisify } from 'node:util';
 
 import { patchState, readState, isStateStale } from './state.mjs';
 import { STATE_DIR } from './config.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createRoutingClaimsStore } from './routing-claims.mjs';
 import { selectNetworkService } from './network-service.mjs';
 
 const execFileP = promisify(execFile);
@@ -310,6 +312,48 @@ export async function clearPacRouting({ pacServer, networkService, recoverStale 
   return { networkService: service ?? null, status: stillOwned ? 'restored' : 'changed_externally' };
 }
 
+// Persist independently of state.json so reconciliation cannot erase intent.
+export async function recordRoutingSuspension({ state, reason, claims = createRoutingClaimsStore(),
+  now = Date.now, record = recordRuntimeEvent } = {}) {
+  if (!state?.network_service) return;
+  const suspension = { reason, at: new Date(now()).toISOString(), network_service: state.network_service,
+    restored_auto_proxy: state.prior_auto_proxy ?? { enabled: false, url: '' }, pac_url: state.pac_url };
+  await claims.setSuspension(suspension);
+  await record('routing_suspended', { details: suspension });
+}
+
+// Each retry repeats the comparison: a VPN change during backoff wins too.
+export async function rearmRouting({ claims = createRoutingClaimsStore(), controller, run = execFileP,
+  record = recordRuntimeEvent, now = Date.now, signal,
+  wait = ms => delay(ms, undefined, { signal, ref: false }), retryDelays = [20000, 40000, 60000],
+} = {}) {
+  const emit = (event, details) => record(event, { details });
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) return;
+    const rows = await claims.listClaims({ now: now() });
+    if (!rows.length) { await claims.setSuspension(null); return; }
+    const suspension = await claims.getSuspension();
+    if (!suspension) return;
+    try {
+      const current = await getAutoProxyState(suspension.network_service, run);
+      if (current.unreadable || current.enabled !== suspension.restored_auto_proxy.enabled || current.url !== suspension.restored_auto_proxy.url) {
+        await emit('routing_not_rearmed', { reason: 'external_change' }); return;
+      }
+      if (signal?.aborted) return;
+      await controller.sync({ networkService: suspension.network_service, replaceExisting: true });
+    } catch (error) {
+      await emit('routing_not_rearmed', { reason: 'rearm_failed', code: error.code ?? 'ROUTING_REARM_FAILED' });
+      if (attempt >= retryDelays.length || signal?.aborted) return;
+      try { await wait(retryDelays[attempt]); } catch (error) { if (!signal?.aborted) throw error; return; }
+      continue;
+    }
+    await claims.setSuspension(null);
+    await emit('routing_rearmed', { claims: rows.length, domains: [...new Set(rows.flatMap(c => c.domains))].sort(),
+      downtime_ms: Math.max(0, new Date(now()).getTime() - Date.parse(suspension.at)) });
+    return;
+  }
+}
+
 // Explicit sync is the startup hook. Later runtime wiring owns when it is safe
 // to re-arm persisted intent; construction alone never changes system routing.
 export function createRoutingController({ claims, pacServer, proxyPort, pacPort, networkService,
@@ -352,16 +396,17 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
     try {
       const state = await readState();
       if (domains.length) {
-        const service = await select(networkService);
+        const service = options.networkService ?? await select(networkService);
+        const targetPort = typeof proxyPort === 'function' ? proxyPort() : proxyPort;
         if (state?.routing_active && state.pid !== process.pid) throw routingError('ROUTING_OWNED', 'Routing is owned by another runtime.');
         if (state?.routing_active && state.network_service === service && pacServer.port != null) {
           clearTimeout(pacServer.leaseTimer); pacServer.leaseTimer = null;
-          const body = buildPacText(domains, '127.0.0.1', proxyPort);
+          const body = buildPacText(domains, '127.0.0.1', targetPort);
           await fs.writeFile(PAC_FILE, body);
           pacServer.setBody(body);
           await patchState({ domains, routing_expires_at: rows.map(c => c.expires_at).sort()[0] });
         } else {
-          await applyValidatedPacRouting({ ...commandOptions, domains, proxyPort, pacPort,
+          await applyValidatedPacRouting({ ...commandOptions, domains, proxyPort: targetPort, pacPort,
             select: async () => service, replaceExisting: options.replaceExisting, manageLease: false });
           // Retire any old single-owner timer when adopting routing.
           clearTimeout(pacServer.leaseTimer); pacServer.leaseTimer = null;
@@ -404,7 +449,7 @@ export function createRoutingController({ claims, pacServer, proxyPort, pacPort,
       await claims.renewClaimsForClient(client_id, { now: now() });
       await sweep(); return syncInternal({}, 'claim_renewed');
     }),
-    sync: () => serialize(async () => { await sweep(); return syncInternal(); }),
+    sync: (options = {}) => serialize(async () => { await sweep(); return syncInternal(options); }),
     status: () => serialize(statusInternal),
     stop: () => { stopped = true; if (timer !== null) clearTimer(timer); timer = null; },
   };

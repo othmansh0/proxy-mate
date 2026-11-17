@@ -11,17 +11,19 @@ const fail = (code, message) => Object.assign(new Error(message), {
   code, retryable: false, recovery: 'Correct the routing claim and retry.',
 });
 const time = value => new Date(value).getTime();
-export const unionDomains = claims => [...new Set(claims.flatMap(c => c.domains))].sort();
+const queues = new Map();
+export const unionDomains = claims => [...new Set(claims.filter(c => !c.expired || (c.expired_at && c.expired_at !== c.expires_at)).flatMap(c => c.domains))].sort();
 export const nextExpiry = claims => claims.length ? new Date(Math.min(...claims.map(c => time(c.expires_at)))).toISOString() : null;
 
 export function createRoutingClaimsStore({ directory = STATE_DIR, now = Date.now, fs = nodeFs,
-  writeJson = fs === nodeFs ? atomicWriteJson : undefined,
+  writeJson = fs === nodeFs ? atomicWriteJson : undefined, retentionMs = 3600000,
 } = {}) {
   const file = path.join(directory, 'routing-claims.json');
-  let queue = Promise.resolve();
   function serialized(fn) {
-    const result = queue.then(fn);
-    queue = result.catch(() => {});
+    const result = (queues.get(file) ?? Promise.resolve()).then(fn);
+    const tail = result.catch(() => {});
+    queues.set(file, tail);
+    void tail.then(() => { if (queues.get(file) === tail) queues.delete(file); });
     return result;
   }
   async function read() {
@@ -51,7 +53,7 @@ export function createRoutingClaimsStore({ directory = STATE_DIR, now = Date.now
       await fs.copyFile(file, backup);
       await fs.chmod(backup, 0o600);
     }
-    const value = { version: 1, claims: data.claims };
+    const value = { version: 1, claims: data.claims, ...(data.suspension ? { suspension: data.suspension } : {}) };
     if (writeJson) return writeJson(file, value, 0o600);
     const temp = `${file}.${randomUUID()}.tmp`;
     try {
@@ -62,9 +64,16 @@ export function createRoutingClaimsStore({ directory = STATE_DIR, now = Date.now
   }
   const mutate = fn => serialized(async () => { const data = await read(); const result = fn(data); await write(data); return result; });
   return {
+    getSuspension: () => serialized(async () => (await read()).suspension ?? null),
+    setSuspension: suspension => mutate(data => { data.suspension = suspension; }),
     listClaims: ({ now: at = now(), includeExpired = false } = {}) => serialized(async () => {
       const data = await read();
-      const rows = data.claims.filter(c => includeExpired || time(c.expires_at) > time(at));
+      const rows = data.claims.filter(c => includeExpired || time(c.expires_at) > time(at)).map(c => {
+        const row = { ...c };
+        if (time(c.expires_at) <= time(at)) row.expired = true;
+        else { delete row.expired; delete row.expired_at; }
+        return row;
+      });
       if (data.corrupt) rows.corrupt = true;
       return rows;
     }),
@@ -97,8 +106,12 @@ export function createRoutingClaimsStore({ directory = STATE_DIR, now = Date.now
     }),
     removeAllClaims: () => mutate(data => { const removed = data.claims; data.claims = []; return removed; }),
     sweepExpired: ({ now: at = now() } = {}) => mutate(data => {
-      const expired = data.claims.filter(c => time(c.expires_at) <= time(at));
-      data.claims = data.claims.filter(c => !expired.includes(c)); return { expired };
+      const expired = data.claims.filter(c => time(c.expires_at) <= time(at) && c.expired_at !== c.expires_at);
+      for (const c of expired) { c.expired = true; c.expired_at = c.expires_at; }
+      const active = data.claims.filter(c => time(c.expires_at) > time(at));
+      const retained = data.claims.filter(c => time(c.expires_at) <= time(at) && time(at) - time(c.expires_at) <= retentionMs)
+        .sort((a, b) => time(b.expires_at) - time(a.expires_at)).slice(0, 256);
+      data.claims = [...active, ...retained]; return { expired };
     }),
   };
 }
