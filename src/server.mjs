@@ -64,6 +64,10 @@ const STATUS_MUTATION_TOOLS = new Set([
 
 // ---- run modes ----
 async function runStdio({ requireDaemon = false } = {}) {
+  const { createDaemonReadiness } = await import('./lib/daemon-connection.mjs');
+  const { newClientId, normalizeTaskId } = await import('./lib/client-identity.mjs');
+  const client = { client_id: newClientId(), task_id: null };
+  const readiness = createDaemonReadiness({ client });
   let localReady = null, localTools = null, releaseRuntime = null;
   let daemonSeen = false, closing = false;
   let stopResourceMonitor = () => {};
@@ -80,18 +84,23 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (releaseRuntime) await releaseRuntime();
   }, { stdin: true });
   const dispatch = async (tool, args, context = {}) => {
+    if (['get_started', 'acquire_capture_lease', 'finish_capture_task'].includes(tool) && args?.task_id !== undefined) {
+      client.task_id = normalizeTaskId(args.task_id);
+    }
     if (closing) throw new Error('proxy-mate is shutting down.');
     // Resolve the handshake for EVERY call: launchd restarts rotate the token
     // and can change the port. Never retry a mutation after an ambiguous error.
     if (!localReady) {
       const state = await readState();
       const daemonExpected = requireDaemon || daemonSeen || (state?.pid && !await isStateStale());
-      const handshake = await waitForReadyDaemon({
+      const handshake = await readiness.waitForReady({
         timeoutMs: daemonExpected ? 15_000 : 0, signal: context.signal,
       });
       if (handshake) {
         daemonSeen = true;
-        return callDaemon({ ...handshake, tool, args, signal: context.signal });
+        const result = await callDaemon({ ...handshake, client, tool, args, signal: context.signal });
+        readiness.recordSuccess(handshake);
+        return result;
       }
       if (daemonExpected) {
         throw Object.assign(new Error('The shared daemon is unavailable after a bounded readiness wait. This MCP connection remains open.'), {
