@@ -47,14 +47,15 @@ export async function reconcileRuntime(options = {}) {
     });
   }
   if (stale) {
-    const reset = await defensiveNetworkResetAllServices(options);
+    const { recordRoutingSuspension } = await import('./pac.mjs');
+    if (state?.routing_active) await recordRoutingSuspension({ ...options, state, reason: 'daemon_restart', phase: 'pending' });
+    const reset = await defensiveNetworkResetAllServices({ ...options, verifyRestore: true });
     if (reset.failed?.length) {
       throw Object.assign(new Error('Could not restore routing from the previous runtime. Recovery state has been retained.'), {
         code: 'ROUTING_RECOVERY_FAILED', details: reset,
       });
     }
     if (state?.routing_active) {
-      const { recordRoutingSuspension } = await import('./pac.mjs');
       await recordRoutingSuspension({ ...options, state, reason: 'daemon_restart' });
     }
     // Persist legacy ownership before discarding stale crash-recovery state.

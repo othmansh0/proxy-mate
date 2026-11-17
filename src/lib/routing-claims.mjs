@@ -100,7 +100,7 @@ export function createRoutingClaimsStore({ directory = STATE_DIR, now = Date.now
     }),
     renewClaimsForClient: (client_id, { now: at = now() } = {}) => mutate(data => {
       const renewed = [];
-      for (const c of data.claims) if (c.client_id === client_id) {
+      for (const c of data.claims) if (c.client_id === client_id && time(c.expires_at) > time(at)) {
         c.renewed_at = new Date(at).toISOString();
         c.expires_at = new Date(time(at) + c.requested_seconds * 1000).toISOString(); renewed.push(c);
       }

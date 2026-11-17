@@ -63,6 +63,7 @@ async function cleanupFixture({ routingFails = false, queueMs = 0, stopCapture }
         events.push('drain'); assert.ok(options.graceMs >= 0); return stopCapture ? stopCapture(_args, options) : {};
       },
     } },
+    INTERNAL_ROUTING_CONTROL: Symbol(), recordRoutingSuspension: async () => {},
     INTERNAL_CAPTURE_CONTROL: internal, engine: { sessionId: 'active' },
     clearPidFile: async () => events.push('pid'), readState: async () => state,
     clearState: async () => {}, patchState: async patch => Object.assign(state, patch),
@@ -123,7 +124,7 @@ test('internal routing suspension marks state after safe restore', async () => {
   const source = await fs.readFile(new URL('../src/lib/tools.mjs', import.meta.url), 'utf8');
   const body = source.slice(source.indexOf('  async function stop_proxy('), source.indexOf('  async function set_proxy_routing'));
   const state = {}; let restored = false;
-  const stop = new Function('clearPacRouting', 'patchState', 'pacServer', `${body}; return stop_proxy;`)(
+  const stop = new Function('clearPacRouting', 'patchState', 'pacServer', 'run', `${body}; return stop_proxy;`)(
     async options => { restored = true; assert.equal(options.timeoutCapMs(), 123); },
     async patch => Object.assign(state, patch), {},
   );

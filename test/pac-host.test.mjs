@@ -131,3 +131,11 @@ test('host caches briefly, expires claims promptly and fails closed on read exce
   clock = 1700; fail = true;
   assert.equal(resolvePac(await get(), 'api.example'), 'DIRECT');
 });
+
+test('claims-managed state never resurrects expired domains', async t => {
+  const f = await fixture(t);
+  await f.claimsStore.upsertClaim({ client_id: 'a', domains: ['expired.example'], durationSeconds: 1 });
+  await f.state({ routing_active: true, routing_mode: 'claims', domains: ['expired.example'], proxy_port: 4567 });
+  f.advance(); f.advance();
+  assert.equal(resolvePac(await (await f.get()).text(), 'expired.example'), 'DIRECT');
+});

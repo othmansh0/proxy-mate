@@ -9,7 +9,7 @@ import { STATE_DIR, patchState, readState, clearState } from '../src/lib/state.m
 import { reconcileRuntime } from '../src/lib/runtime.mjs';
 import { createGuardian } from '../src/lib/guardian.mjs';
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   // Only ever reset a temporary state directory, never a real installation.
   const real = ['.proxy-mcp', '.proxy-mate'].map((name) => path.join(os.homedir(), name));
   assert.ok(!real.includes(path.resolve(STATE_DIR)), `refusing to reset a real state directory: ${STATE_DIR}`);
@@ -26,7 +26,7 @@ async function fixture(t) {
   const record = async (event, fields) => events.push({ event, ...fields });
   const claims = createRoutingClaimsStore();
   const server = { port: null, setBody(body) { this.body = body; }, async start() { this.port = 8081; }, async stop() { this.port = null; } };
-  const controller = pac.createRoutingController({ claims, pacServer: server, proxyPort: () => port, pacPort: 8081, run, select: async s => s ?? 'Wi-Fi', record });
+  const controller = pac.createRoutingController({ claims, pacServer: server, proxyPort: () => port, pacPort: 8081, run, select: async s => s ?? 'Wi-Fi', record, ...options });
   t.after(() => controller.stop());
   const suspend = (reason, state) => pac.recordRoutingSuspension({ claims, reason, state, record });
   const rearm = (options = {}) => pac.rearmRouting({ claims, controller, run, record, ...options });
@@ -159,4 +159,151 @@ test('VPN change during backoff stops re-arm retries', async t => {
     wait: async () => f.external({ enabled: true, url: 'https://vpn.test/pac' }) });
   assert.equal(attempts, 1);
   assert.equal(f.events.at(-1).details.reason, 'external_change');
+});
+
+test('cancelled re-arm cannot begin a later network mutation', async t => {
+  const abort = new AbortController();
+  let release, entered;
+  const gate = new Promise(r => { release = r; });
+  const started = new Promise(r => { entered = r; });
+  const f = await fixture(t);
+  await f.claims.upsertClaim({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  await f.suspend('daemon_restart', { network_service: 'Wi-Fi', pac_url: 'local' });
+  const mutations = [];
+  const controller = pac.createRoutingController({ claims: f.claims, pacServer: f.server, proxyPort: 9000, pacPort: 9001,
+    select: async () => 'Wi-Fi', run: async (file, args, options) => {
+      if (args[0] === '-getwebproxy') { entered(); await gate; }
+      if (args[0].startsWith('-set')) mutations.push(args);
+      return f.run(file, args, options);
+    } });
+  t.after(() => controller.stop());
+  const rearm = f.rearm({ controller, signal: abort.signal });
+  await started; abort.abort(); release(); await rearm;
+  assert.deepEqual(mutations, []);
+});
+
+test('stopped controller keeps claims and refuses timer sync with null engine port', async t => {
+  let fire;
+  const f = await fixture(t, { setTimer: fn => { fire = fn; return 1; }, clearTimer() {} });
+  await f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 1 });
+  await f.controller.set({ client_id: 'b', domains: ['b.test'], durationSeconds: 300 });
+  await f.controller.stop();
+  await pac.clearPacRouting({ run: f.run });
+  f.port(null);
+  const before = f.calls.length;
+  await fire(); await f.controller.sync();
+  assert.equal(f.calls.length, before);
+  assert.equal((await f.controller.status()).claims.length, 2);
+});
+
+test('controller refuses routing when engine has no listening port', async t => {
+  const f = await fixture(t); f.port(null);
+  await assert.rejects(f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 }), { code: 'PROXY_NOT_RUNNING' });
+  assert.ok(f.calls.every(c => !c[0].startsWith('-set')));
+});
+
+test('recovery journals pending suspension before restoring system settings', async t => {
+  const f = await fixture(t);
+  await f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  await patchState({ pid: 2147483647 });
+  let pending;
+  await reconcileRuntime({ claims: f.claims, record: async () => {}, run: async (file, args, options) => {
+    if (args[0].startsWith('-set')) pending = await f.claims.getSuspension();
+    return f.run(file, args, options);
+  } });
+  assert.equal(pending?.phase, 'pending');
+  assert.equal((await f.claims.getSuspension()).phase, 'complete');
+});
+
+test('pending suspension re-arms only restored settings or the recorded PAC', async t => {
+  const f = await fixture(t);
+  await f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  const state = await readState();
+  await f.suspend('daemon_restart', state);
+  await f.claims.setSuspension({ ...await f.claims.getSuspension(), phase: 'pending' });
+  await patchState({ routing_active: false });
+  await f.rearm();
+  assert.equal(await f.claims.getSuspension(), null);
+  assert.equal(f.events.at(-1).event, 'routing_rearmed');
+});
+
+test('heartbeat cannot revive retained expired claims', async t => {
+  const f = await fixture(t);
+  await f.claims.upsertClaim({ client_id: 'a', domains: ['a.test'], durationSeconds: 1, now: 1000 });
+  assert.deepEqual(await f.claims.renewClaimsForClient('a', { now: 2000 }), []);
+  assert.equal((await f.claims.listClaims({ now: 2000 })).length, 0);
+});
+
+
+test('stop waits only for the abortable command and forwards a bounded kill policy', async t => {
+  const f = await fixture(t);
+  await f.claims.upsertClaim({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  let entered;
+  const started = new Promise(r => { entered = r; });
+  let commandOptions;
+  const controller = pac.createRoutingController({ claims: f.claims, pacServer: f.server, proxyPort: 9000, pacPort: 9001,
+    select: async () => 'Wi-Fi', run: async (_file, _args, options) => {
+      commandOptions = options; entered();
+      await new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+    } });
+  const syncing = controller.sync({ deadline: performance.now() + 500 });
+  const rejected = assert.rejects(syncing);
+  await started;
+  assert.ok(commandOptions.timeout <= 500);
+  assert.equal(commandOptions.killSignal, 'SIGKILL');
+  await controller.stop(); await rejected;
+  assert.equal(commandOptions.signal.aborted, true);
+});
+
+test('failed restoration verification retains pending suspension for recovery', async t => {
+  const f = await fixture(t);
+  await f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  await patchState({ pid: 2147483647 });
+  await assert.rejects(reconcileRuntime({ claims: f.claims, record: async () => {},
+    run: async (file, args, options) => args[0].startsWith('-set') ? { stdout: '' } : f.run(file, args, options),
+  }), { code: 'ROUTING_RECOVERY_FAILED' });
+  assert.equal((await f.claims.getSuspension()).phase, 'pending');
+  assert.equal((await readState()).routing_active, true);
+});
+
+test('pending suspension preserves VPN changes and the prior restoration target', async t => {
+  const f = await fixture(t);
+  await f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  const state = await readState();
+  await pac.recordRoutingSuspension({ state, claims: f.claims, phase: 'pending', record: async () => {} });
+  f.external({ enabled: true, url: 'https://vpn.test/pac' });
+  const before = f.calls.length;
+  await f.rearm();
+  assert.ok(f.calls.slice(before).every(c => c[0].startsWith('-get')));
+  assert.equal((await f.claims.getSuspension()).phase, 'pending');
+  f.external({ enabled: true, url: state.pac_url });
+  await patchState({ routing_active: false });
+  await f.rearm();
+  assert.deepEqual((await readState()).prior_auto_proxy, { enabled: false, url: '' });
+});
+
+test('guardian persists pending intent before invoking dead-owner restoration', async t => {
+  const f = await fixture(t);
+  await f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  await patchState({ pid: 2147483647, runtime_role: 'daemon' });
+  const tick = createGuardian({ read: readState, isAlive: () => false, acquire: async () => async () => {}, record: async () => {},
+    restore: async options => {
+      assert.equal((await f.claims.getSuspension()).phase, 'pending');
+      return pac.clearPacRouting({ ...options, run: f.run });
+    } });
+  assert.equal((await tick()).action, 'dead_owner_recovered');
+  assert.equal((await f.claims.getSuspension()).phase, 'complete');
+});
+
+test('pending suspension respects an externally disabled recorded PAC', async t => {
+  const f = await fixture(t);
+  await f.controller.set({ client_id: 'a', domains: ['a.test'], durationSeconds: 300 });
+  const state = await readState();
+  await pac.recordRoutingSuspension({ state, claims: f.claims, phase: 'pending', record: async () => {} });
+  await patchState({ routing_active: false });
+  f.external({ enabled: false, url: state.pac_url });
+  const before = f.calls.length;
+  await f.rearm();
+  assert.ok(f.calls.slice(before).every(c => c[0].startsWith('-get')));
+  assert.equal((await f.claims.getSuspension()).phase, 'pending');
 });

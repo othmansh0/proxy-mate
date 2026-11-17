@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Enforce evidence scopes across flow/body exports, replay, WebSocket inspection and OpenAPI validation; protect shared import replacements and clarify resource-scoped leases.
+- Cancel in-flight routing safely during shutdown, journal suspension before restoration, preserve stopped and expired claims without reactivation, and honor custom daemon PAC ports.
 
 - Upgrade note: rule IDs now default to a caller namespace and rules persist ownership; live foreign mutations require `force`, while `clear_rules` defaults to caller-owned and legacy rules (`scope: "all"` requires `confirm_shared: true`). Rules keep matching all traffic by default because mocks usually target the app under test; opt into `match_scope: "mine"` for owner-device or uniquely claimed-host matching. Legacy saved rules remain unowned and mutable. Rule lists/exports hide foreign task ownership, and JSON mocks preserve `match_headers`.
 
