@@ -8,6 +8,7 @@ import { AppProxyGateway } from '../src/lib/app-gateway.mjs';
 import { snapshotMetrics, resetMetrics } from '../src/lib/metrics.mjs';
 import { validateCustomCaPaths } from '../src/lib/ca-paths.mjs';
 import { limitedLog } from '../src/lib/drain.mjs';
+import { STATE_DIR } from '../src/lib/config.mjs';
 
 async function listen(server) { server.listen(0, '127.0.0.1'); await once(server, 'listening'); return server.address().port; }
 for (const gatewayMode of [false, true]) test(`slow upstream completes during ${gatewayMode ? 'gateway' : 'proxy'} drain`, async t => {
@@ -53,7 +54,7 @@ for (const mode of ['proxy','gateway']) test(`${mode} connection drops are count
 });
 
 test('custom CA missing and directory errors propagate with recovery', async () => {
-  for (const file of [`${process.env.PROXY_MATE_HOME}/missing`, process.env.PROXY_MATE_HOME]) {
+  for (const file of [`${STATE_DIR}/missing`, STATE_DIR]) {
     const engine = new ProxyEngine();
     await assert.rejects(engine.start({port:0,caKeyPath:file,caCertPath:file}), error => error.code === 'CUSTOM_CA_UNREADABLE' && error.details.key_path === file && error.recovery.length > 0);
   }

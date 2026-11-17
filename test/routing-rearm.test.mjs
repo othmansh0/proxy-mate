@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import * as pac from '../src/lib/pac.mjs';
 import { createRoutingClaimsStore } from '../src/lib/routing-claims.mjs';
 import { STATE_DIR, patchState, readState, clearState } from '../src/lib/state.mjs';
@@ -8,6 +10,9 @@ import { reconcileRuntime } from '../src/lib/runtime.mjs';
 import { createGuardian } from '../src/lib/guardian.mjs';
 
 async function fixture(t) {
+  // Only ever reset a temporary state directory, never a real installation.
+  const real = ['.proxy-mcp', '.proxy-mate'].map((name) => path.join(os.homedir(), name));
+  assert.ok(!real.includes(path.resolve(STATE_DIR)), `refusing to reset a real state directory: ${STATE_DIR}`);
   await fs.rm(STATE_DIR, { recursive: true, force: true });
   let auto = { enabled: false, url: '' }, port = 8000;
   const calls = [], events = [];

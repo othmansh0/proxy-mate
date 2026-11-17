@@ -10,6 +10,7 @@ import { ProxyEngine } from '../src/lib/proxy.mjs';
 import { makeTools } from '../src/lib/tools.mjs';
 import { INTERNAL_CAPTURE_CONTROL } from '../src/lib/capture-lease.mjs';
 import { plistXml, GUARDIAN_LABEL } from '../src/lib/launchagent.mjs';
+import { STATE_DIR } from '../src/lib/config.mjs';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 test('control stop bounds an uncooperative serial queue at three seconds', { timeout: 5000 }, async () => {
@@ -134,7 +135,7 @@ test('internal routing suspension marks state after safe restore', async () => {
 
 test('routing suspension preserves durable claims and its state marker', async () => {
   await clearState();
-  const claimsPath = `${process.env.PROXY_MATE_HOME}/routing-claims.json`;
+  const claimsPath = `${STATE_DIR}/routing-claims.json`;
   const claims = JSON.stringify({ claims: [{ claim_id: 'keep-for-restart' }] });
   await fs.writeFile(claimsPath, claims);
   const tools = makeTools({ engine: {}, pacServer: { stop: async () => {} }, mode: 'daemon' });
