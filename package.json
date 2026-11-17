@@ -37,6 +37,7 @@
     "start": "node src/server.mjs",
     "doctor": "node src/server.mjs doctor",
     "verify:simulator": "node scripts/verify-simulator.mjs",
+    "test:load": "node scripts/load-qualify.mjs",
     "test:soak": "node scripts/soak-proxy.mjs",
     "analyze:capture": "node scripts/analyze-capture.mjs",
     "benchmark:storage": "node scripts/benchmark-session-store.mjs",
