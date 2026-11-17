@@ -8,6 +8,7 @@
 - Add an authenticated worker-thread liveness probe with heartbeat age and traffic progress, plus event-loop delay and utilization gauges, so supervision can distinguish a slow main loop from a stalled process.
 - Keep Simulator traffic responsive under build load with Interactive daemon and Standard guardian LaunchAgents; reject unusable custom CA paths before installation with coded diagnostics and recovery hints.
 - Drain proxy and app gateway connections before shutdown; add contextual abort logs, progress/drop metrics, and actionable custom CA errors.
+- Add durable per-client routing claims and a union PAC controller so clearing or expiring one claim preserves other captures; scale network command deadlines with host load.
 
 ## 0.9.1 — 2026-11-16
 

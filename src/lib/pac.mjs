@@ -8,6 +8,8 @@
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import os from 'node:os';
+import { recordRuntimeEvent } from './runtime-identity.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -17,7 +19,21 @@ import { selectNetworkService } from './network-service.mjs';
 
 const execFileP = promisify(execFile);
 const NETWORKSETUP = '/usr/sbin/networksetup';
-const COMMAND_OPTIONS = { timeout: 5_000, maxBuffer: 1024 * 1024 };
+// Sample host load for every command, including rollback commands.
+async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.availableParallelism() } = {}) {
+  const load = Number(loadavg()[0]);
+  const timeout = Math.min(20000, Math.ceil(5000 * Math.max(1, (Number.isFinite(load) ? load : 0) / Math.max(1, cores))));
+  try { return await run(NETWORKSETUP, args, { timeout, maxBuffer: 1024 * 1024 }); }
+  catch (error) {
+    if (error?.killed || error?.code === 'ETIMEDOUT' || error?.code === 'ERR_CHILD_PROCESS_TIMEOUT') {
+      throw Object.assign(new Error(`Routing command timed out after ${timeout} ms.`, { cause: error }), {
+        code: 'ROUTING_COMMAND_TIMEOUT', retryable: true,
+        recovery: 'Inspect routing status and retry when host load subsides.',
+      });
+    }
+    throw error;
+  }
+}
 
 const PAC_FILE = path.join(STATE_DIR, 'proxy.pac');
 
@@ -144,8 +160,8 @@ async function fetchExistingPac(port) {
   });
 }
 
-export async function listEnabledNetworkServices() {
-  const { stdout } = await execFileP(NETWORKSETUP, ['-listallnetworkservices'], COMMAND_OPTIONS);
+export async function listEnabledNetworkServices({ run = execFileP, ...options } = {}) {
+  const { stdout } = await routingCommand(run, ['-listallnetworkservices'], options);
   return stdout
     .split('\n')
     .slice(1)
@@ -165,38 +181,45 @@ export function validateRoutingDomains(domains, { allowBroad = false } = {}) {
   return [...new Set(normalized)];
 }
 
-function routingError(code, message) { return Object.assign(new Error(message), { code, retryable: false }); }
+function routingError(code, message) { return Object.assign(new Error(message), { code, retryable: false, recovery: 'Inspect the routing configuration and correct the request before retrying.' }); }
 
-export async function setAutoProxyOn(networkService, pacUrl, run = execFileP) {
-  await run(NETWORKSETUP, ['-setautoproxyurl', networkService, pacUrl], COMMAND_OPTIONS);
-  await run(NETWORKSETUP, ['-setautoproxystate', networkService, 'on'], COMMAND_OPTIONS);
+export async function setAutoProxyOn(networkService, pacUrl, run = execFileP, options = {}) {
+  await routingCommand(run, ['-setautoproxyurl', networkService, pacUrl], options);
+  await routingCommand(run, ['-setautoproxystate', networkService, 'on'], options);
 }
 
-export async function getAutoProxyState(networkService, run = execFileP) {
+export async function getAutoProxyState(networkService, run = execFileP, options = {}) {
   try {
-    const { stdout } = await run(NETWORKSETUP, ['-getautoproxyurl', networkService], COMMAND_OPTIONS);
+    const { stdout } = await routingCommand(run, ['-getautoproxyurl', networkService], options);
     const rawUrl = stdout.match(/^URL:[ \t]*([^\r\n]*)/mi)?.[1]?.trim() ?? '';
     const url = rawUrl === '(null)' ? '' : rawUrl;
     const enabled = /^Enabled:[ \t]*Yes[ \t]*$/mi.test(stdout);
     return { enabled, url };
   } catch (error) {
+    if (error?.code === 'ROUTING_COMMAND_TIMEOUT') throw error;
     return { enabled: false, url: '', unreadable: error?.message ?? String(error) };
   }
 }
 
-export async function setAutoProxyOff(networkService, run = execFileP) {
-  await run(NETWORKSETUP, ['-setautoproxystate', networkService, 'off'], COMMAND_OPTIONS);
-  await run(NETWORKSETUP, ['-setautoproxyurl', networkService, ''], COMMAND_OPTIONS);
+export async function setAutoProxyOff(networkService, run = execFileP, options = {}) {
+  await routingCommand(run, ['-setautoproxystate', networkService, 'off'], options);
+  await routingCommand(run, ['-setautoproxyurl', networkService, ''], options);
 }
 
 // Compose a full PAC setup: writes the PAC file, starts the PAC server, applies
 // networksetup. **Records state.json BEFORE touching networksetup** so dirty
 // kills can be reconciled on next boot.
-export async function applyPacRouting({ domains, networkService, pacPort, proxyPort, pacServer,
+export async function applyPacRouting(options) {
+  const domains = validateRoutingDomains(options.domains, { allowBroad: options.allowBroad });
+  return applyValidatedPacRouting({ ...options, domains });
+}
+
+async function applyValidatedPacRouting({ domains, networkService, pacPort, proxyPort, pacServer,
   allowBroad = false, replaceExisting = false, durationSeconds = 3600,
-  run = execFileP, select = pickActiveNetworkService,
+  run = execFileP, select = pickActiveNetworkService, loadavg, cores, manageLease = true,
 }) {
-  domains = validateRoutingDomains(domains, { allowBroad });
+  const rawRun = run;
+  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores });
   if (!Number.isInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 86400) throw routingError('ROUTING_LEASE_INVALID', 'Routing duration must be 1-86400 seconds.');
   const service = await select(networkService);
   let currentState = await readState();
@@ -214,7 +237,7 @@ export async function applyPacRouting({ domains, networkService, pacPort, proxyP
   if (priorAutoProxy?.unreadable) throw Object.assign(new Error('Cannot snapshot the current PAC configuration; routing was not changed.'), { code: 'ROUTING_SNAPSHOT_FAILED' });
   if (actualBefore.enabled && !ownedBefore && !replaceExisting) throw routingError('ROUTING_CONFLICT', 'Another automatic proxy is enabled. Inspect it first; replacing it requires replace_existing_proxy=true.');
   for (const command of ['-getwebproxy', '-getsecurewebproxy']) {
-    const { stdout } = await run(NETWORKSETUP, [command, service], COMMAND_OPTIONS);
+    const { stdout } = await run(NETWORKSETUP, [command, service]);
     if (/^Enabled:\s*Yes$/mi.test(stdout) && !replaceExisting) throw routingError('ROUTING_CONFLICT', 'An HTTP(S) system proxy is already enabled. Inspect the other proxy before explicitly replacing system routing.');
   }
   const pacBody = buildPacText(domains, '127.0.0.1', proxyPort);
@@ -246,7 +269,7 @@ export async function applyPacRouting({ domains, networkService, pacPort, proxyP
     const actual = await getAutoProxyState(service, run);
     if (!actual.enabled || actual.url !== pacUrl) throw routingError('ROUTING_APPLY_FAILED', 'macOS did not apply the requested PAC configuration.');
     await patchState({ routing_phase: 'active' });
-    pacServer.setLease?.(durationSeconds * 1000, () => clearPacRouting({ pacServer, run }));
+    if (manageLease) pacServer.setLease?.(durationSeconds * 1000, () => clearPacRouting({ pacServer, run }));
     return { networkService: service, pacUrl, domains, fail_open: true, expires_at: new Date(Date.now() + durationSeconds * 1000).toISOString() };
   } catch (error) {
     try { await clearPacRouting({ pacServer, run }); }
@@ -258,7 +281,9 @@ export async function applyPacRouting({ domains, networkService, pacPort, proxyP
   }
 }
 
-export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP } = {}) {
+export async function clearPacRouting({ pacServer, networkService, recoverStale = false, run = execFileP, loadavg, cores } = {}) {
+  const rawRun = run;
+  run = (_file, args) => routingCommand(rawRun, args, { loadavg, cores });
   const persisted = await readState();
   if (!persisted?.routing_active) {
     await pacServer?.stop();
@@ -275,10 +300,111 @@ export async function clearPacRouting({ pacServer, networkService, recoverStale 
   const stillOwned = current.url === persisted.pac_url && (current.enabled || persisted.routing_phase === 'applying');
   if (stillOwned) {
     const prior = persisted.prior_auto_proxy ?? { enabled: false, url: '' };
-    await run(NETWORKSETUP, ['-setautoproxyurl', service, prior.url ?? ''], COMMAND_OPTIONS);
-    await run(NETWORKSETUP, ['-setautoproxystate', service, prior.enabled ? 'on' : 'off'], COMMAND_OPTIONS);
+    await run(NETWORKSETUP, ['-setautoproxyurl', service, prior.url ?? '']);
+    await run(NETWORKSETUP, ['-setautoproxystate', service, prior.enabled ? 'on' : 'off']);
   }
   if (pacServer) await pacServer.stop();
   await patchState({ routing_active: false, routing_phase: null, routing_expires_at: null, cleared_at: new Date().toISOString() });
   return { networkService: service ?? null, status: stillOwned ? 'restored' : 'changed_externally' };
+}
+
+// Explicit sync is the startup hook. Later runtime wiring owns when it is safe
+// to re-arm persisted intent; construction alone never changes system routing.
+export function createRoutingController({ claims, pacServer, proxyPort, pacPort, networkService,
+  run = execFileP, select = pickActiveNetworkService, now = Date.now,
+  setTimer = setTimeout, clearTimer = clearTimeout, record = recordRuntimeEvent, loadavg, cores,
+}) {
+  let queue = Promise.resolve(), timer = null, stopped = false;
+  let lastChange = null;
+  const stamp = () => new Date(now()).toISOString();
+  const emit = (event, details) => Promise.resolve().then(() => record(event, { details })).catch(() => {});
+  const serialize = fn => {
+    const result = queue.then(fn); queue = result.catch(() => {}); return result;
+  };
+  const domainsOf = rows => [...new Set(rows.flatMap(c => c.domains))].sort();
+  const commandOptions = { pacServer, networkService, run, loadavg, cores };
+  async function sweep() {
+    const { expired } = await claims.sweepExpired({ now: now() });
+    for (const c of expired) await emit('routing_claim_expired', { claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id });
+  }
+  function arm(rows) {
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+    if (stopped || !rows.length) return;
+    const delay = Math.max(0, Math.min(...rows.map(c => Date.parse(c.expires_at))) - new Date(now()).getTime());
+    timer = setTimer(() => serialize(async () => { await sweep(); return syncInternal({}, 'expiry'); }).catch(async error => {
+      await emit('routing_sync_failed', { code: error.code ?? 'ROUTING_SYNC_FAILED', message: error.message });
+      // Keep recovery live after a transient command failure, without a busy loop.
+      if (timer !== null) clearTimer(timer);
+      timer = null;
+      if (!stopped) {
+        timer = setTimer(() => controller.sync().catch(() => {}), 1000);
+        timer?.unref?.();
+      }
+    }), delay);
+    timer?.unref?.();
+  }
+  async function syncInternal(options = {}, reason = 'sync') {
+    const rows = await claims.listClaims({ now: now() });
+    const domains = domainsOf(rows);
+    try {
+      const state = await readState();
+      if (domains.length) {
+        const service = await select(networkService);
+        if (state?.routing_active && state.pid !== process.pid) throw routingError('ROUTING_OWNED', 'Routing is owned by another runtime.');
+        if (state?.routing_active && state.network_service === service && pacServer.port != null) {
+          clearTimeout(pacServer.leaseTimer); pacServer.leaseTimer = null;
+          const body = buildPacText(domains, '127.0.0.1', proxyPort);
+          await fs.writeFile(PAC_FILE, body);
+          pacServer.setBody(body);
+          await patchState({ domains, routing_expires_at: rows.map(c => c.expires_at).sort()[0] });
+        } else {
+          await applyValidatedPacRouting({ ...commandOptions, domains, proxyPort, pacPort,
+            select: async () => service, replaceExisting: options.replaceExisting, manageLease: false });
+          // Retire any old single-owner timer when adopting routing.
+          clearTimeout(pacServer.leaseTimer); pacServer.leaseTimer = null;
+          await patchState({ routing_expires_at: rows.map(c => c.expires_at).sort()[0] });
+          await emit('routing_applied', { network_service: service, domain_count: domains.length });
+        }
+      } else {
+        const result = await clearPacRouting(commandOptions);
+        if (result.status !== 'not_active') await emit('routing_cleared', { network_service: result.networkService, status: result.status });
+      }
+      lastChange = { at: stamp(), reason };
+    } finally { arm(rows); }
+    return statusInternal();
+  }
+  async function statusInternal() {
+    const rows = await claims.listClaims({ now: now(), includeExpired: true });
+    const state = await readState();
+    const active = Boolean(state?.routing_active && state.pid === process.pid);
+    const at = new Date(now()).getTime();
+    return { active, network_service: state?.network_service ?? null,
+      union_domains: domainsOf(rows.filter(c => Date.parse(c.expires_at) > at)),
+      claims: rows.map(c => ({ claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id,
+        domains: c.domains, expires_at: c.expires_at,
+        state: Date.parse(c.expires_at) <= at ? 'expired' : active ? 'active' : 'suspended' })), last_change: lastChange };
+  }
+  const controller = {
+    set: options => serialize(async () => {
+      const claim = await claims.upsertClaim({ ...options, now: now() });
+      await emit('routing_claim_set', { claim_id: claim.claim_id, client_id: claim.client_id, task_id: claim.task_id, expires_at: claim.expires_at });
+      await sweep();
+      return syncInternal(options, 'claim_set');
+    }),
+    clear: options => serialize(async () => {
+      const removed = options.all ? await claims.removeAllClaims() : await claims.removeClaim(options);
+      for (const c of removed) await emit('routing_claim_cleared', { claim_id: c.claim_id, client_id: c.client_id, task_id: c.task_id });
+      await sweep();
+      return syncInternal({}, 'claim_cleared');
+    }),
+    renew: client_id => serialize(async () => {
+      await claims.renewClaimsForClient(client_id, { now: now() });
+      await sweep(); return syncInternal({}, 'claim_renewed');
+    }),
+    sync: () => serialize(async () => { await sweep(); return syncInternal(); }),
+    status: () => serialize(statusInternal),
+    stop: () => { stopped = true; if (timer !== null) clearTimer(timer); timer = null; },
+  };
+  return controller;
 }
