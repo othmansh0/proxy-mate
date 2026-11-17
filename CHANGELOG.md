@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Give guardian-initiated shutdowns 25 seconds before escalation, record shutdown intent and load-aware diagnostics, and retry failed recovery steps without blocking ticks.
+- Add an isolated daemon load harness with real bridge and guardian probes, optional CPU starvation and background scheduling, JSON evidence, and owned-process cleanup.
 
 ## 0.9.1 — 2026-11-16
 
