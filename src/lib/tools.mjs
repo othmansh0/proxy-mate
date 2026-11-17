@@ -1486,6 +1486,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   async function mock_json_response(args = {}) {
     return create_map_local({ rule_id: args.rule_id, url: args.url, method: args.method ?? 'GET',
       status: args.status ?? 200, priority: args.priority, headers: args.headers,
+      owner: args.owner, match_scope: args.match_scope, match_headers: args.match_headers,
       body: encodeAgentJson(args.json), content_type: 'application/json; charset=utf-8' });
   }
 
@@ -1649,8 +1650,25 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     };
   }
 
-  async function list_rules() {
-    return { rules: engine.listRuleConfigs() };
+  function publicRule(rule, context) {
+    const mine = !!rule.owner && owned(rule.owner, context);
+    return { ...rule, owner: mine ? rule.owner : rule.owner ? { mine: false } : null, mine };
+  }
+
+  async function assertRuleOwner(rule, args, context) {
+    if (!rule?.owner || owned(rule.owner, context) || args.force === true) return;
+    await captureLease.summary(context);
+    const liveLease = Object.values(captureLease.snapshot.leases).some(l => owned(l, rule.owner));
+    const liveClaim = (await claims.listClaims()).some(c => owned(c, rule.owner));
+    if (liveLease || liveClaim || clientRegistry?.isAlive(rule.owner.client_id)) {
+      throw Object.assign(new Error('Rule belongs to another live owner. Choose another rule_id or wait for its owner to finish.'), {
+        code: 'RULE_CONFLICT', recovery: ['Choose a different rule_id. For an intentional mutation, use force: true.'],
+      });
+    }
+  }
+
+  async function list_rules(args = {}, context = {}) {
+    return { rules: engine.listRuleConfigs().map(r => publicRule(r, context)) };
   }
 
   async function remove_rule(args = {}) {
@@ -1678,7 +1696,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return { status: 'reprioritized', rule };
   }
 
-  async function reorder_rules(args = {}) {
+  async function reorder_rules(args = {}, context = {}) {
+    const previous = engine.listRuleConfigs();
+    const requested = args.rule_ids ?? [];
+    const ordered = [...requested.map(id => previous.find(r => r.rule_id === id)), ...previous.filter(r => !requested.includes(r.rule_id))];
+    for (const [order, rule] of ordered.entries()) {
+      if (rule && (rule.order !== order || requested.includes(rule.rule_id))) await assertRuleOwner(rule, args, context);
+    }
     const rules = await engine.reorderRules(args.rule_ids);
     await persistRules();
     return { status: 'reordered', rules };
@@ -1689,28 +1713,40 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return engine.explainRuleMatch(args.request ?? {});
   }
 
-  async function clear_rules_tool() {
-    await engine.clearRules();
+  async function clear_rules_tool(args = {}, context = {}) {
+    const rules = engine.listRuleConfigs();
+    if (args.scope === 'all' && args.confirm_shared !== true) {
+      throw Object.assign(new Error('Clearing all rules requires confirm_shared: true.'), {
+        code: 'CONFIRM_SHARED_REQUIRED', details: { total: rules.length,
+          mine: rules.filter(r => r.owner && owned(r.owner, context)).length,
+          foreign: rules.filter(r => r.owner && !owned(r.owner, context)).length,
+          unowned: rules.filter(r => !r.owner).length },
+      });
+    }
+    if (args.scope === 'all') await engine.clearRules();
+    else for (const r of rules) if (!r.owner || owned(r.owner, context)) await engine.removeRule(r.rule_id);
     await persistRules();
     return { status: 'cleared' };
   }
 
-  async function export_rules(args = {}) {
+  async function export_rules(args = {}, context = {}) {
     const outputPath = args.path ? await authorizeWritePath(args.path) : undefined;
-    const dest = await exportRulesTo(engine.listRuleConfigs(), outputPath);
+    const dest = await exportRulesTo(engine.listRuleConfigs().map(r => publicRule(r, context)), outputPath);
     return { path: dest, count: engine.listRuleConfigs().length };
   }
 
-  async function import_rules(args = {}) {
+  async function import_rules(args = {}, context = {}) {
     await ensureProxyRunning();
     if (!args.path) throw new Error('path is required');
     const sourcePath = await authorizeReadPath(args.path);
     const rules = await importRulesFrom(sourcePath);
-    if (args.replace) await engine.clearRules();
+    // Validate all collisions before removing any existing definitions.
+    for (const r of rules) await assertRuleOwner(engine.listRuleConfigs().find(x => x.rule_id === r.rule_id), {}, context);
+    if (args.replace) await clear_rules_tool(args, context);
     const registered = [];
     const failed = [];
     for (const r of rules) {
-      try { registered.push(await engine.registerRule(await authorizeRulePaths(r))); }
+      try { registered.push(await engine.registerRule(await authorizeRulePaths({ ...r, owner: owner(context), match_scope: args.match_scope ?? r.match_scope ?? 'all' }))); }
       catch (e) { failed.push({ rule_id: r.rule_id, error: e?.message ?? String(e) }); }
     }
     await persistRules();
@@ -2289,7 +2325,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     // GET /v1/users also answered http://evil.test/x/v1/users/extra — and when
     // the URL failed to parse it fell back to the whole URL, query included.
     const rule = await engine.registerRule({
-      rule_id: id,
+      rule_id: id, owner: args.owner, match_scope: args.match_scope,
       ...ruleUrlMatchers(f.request?.url ?? '', { ...args, url_pattern }, { normalize: true }),
       method: method ?? f.request?.method ?? 'ANY',
       status: status ?? f.response.statusCode ?? 200,
@@ -2571,21 +2607,48 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
         capture_to_mock: () => `capture-${args.flow_id}`,
         create_transform_plugin_rule: () => stableRuleId('plugin', `${args.plugin_id}:${args.url ?? args.url_pattern}`),
       };
-      if (defaults[name] && !args.rule_id) args = { ...args, rule_id: defaults[name]() };
+      if (defaults[name] && !args.rule_id) {
+        const namespace = crypto.createHash('sha256').update(JSON.stringify(owner(context))).digest('hex').slice(0, 20);
+        args = { ...args, rule_id: name === 'create_breakpoint' ? defaults[name]() : `${namespace}-${defaults[name]()}` };
+      }
+      const ownedRuleTools = new Set(['create_map_local', 'mock_json_response', 'create_map_remote', 'create_blacklist',
+        'create_network_condition', 'create_no_cache_rule', 'capture_to_mock', 'create_transform_plugin_rule']);
+      const ruleMutations = new Set([...ownedRuleTools, 'patch_mock_json', 'update_rule', 'set_rule_enabled',
+        'set_rule_priority', 'remove_rule', 'reorder_rules']);
+      if (ownedRuleTools.has(name)) {
+        args = { ...args, owner: owner(context), match_scope: args.match_scope ?? 'all' };
+      }
+      if (ruleMutations.has(name)) {
+        for (const id of args.rule_ids ?? [args.rule_id]) {
+          await assertRuleOwner(engine.listRuleConfigs().find(r => r.rule_id === id),
+            ownedRuleTools.has(name) ? {} : args, context);
+        }
+        if (name === 'update_rule' && ('owner' in (args.patch ?? {}))) throw new Error('Rule owner cannot be patched');
+      }
       const resources = [];
       if (args.rule_id) resources.push({ kind: 'rule', id: args.rule_id });
       if (name === 'reorder_rules') for (const id of args.rule_ids ?? []) resources.push({ kind: 'rule', id });
       if (name === 'import_rules' && args.path) {
         const imported = await importRulesFrom(await authorizeReadPath(args.path));
-        for (const rule of imported) if (rule.rule_id) resources.push({ kind: 'rule', id: rule.rule_id });
+        for (const rule of imported) await assertRuleOwner(engine.listRuleConfigs().find(r => r.rule_id === rule.rule_id), {}, context);
         if (args.replace) for (const rule of engine.listRuleConfigs()) resources.push({ kind: 'rule', id: rule.rule_id });
       }
       if (['create_reverse_proxy', 'remove_reverse_proxy'].includes(name) && args.id) resources.push({ kind: 'reverse_proxy', id: args.id });
-      if (!resources.length && !RULE_CREATORS.has(name) && name !== 'create_reverse_proxy') return fn(args, context);
-      const lease = await captureLease.assert(args.capture_lease_id, context, resources);
-      const priorRules = lease && RULE_CREATORS.has(name) ? new Set(engine.mockRules.keys()) : null;
+      if (!resources.length && !RULE_CREATORS.has(name) && !['create_reverse_proxy', 'import_rules'].includes(name)) return fn(args, context);
+      const lease = await captureLease.assert(args.capture_lease_id, context, resources.filter(resource => {
+        if (!ruleMutations.has(name) && name !== 'import_rules') return true;
+        const rule = engine.listRuleConfigs().find(r => r.rule_id === resource.id);
+        return !rule?.owner || owned(rule.owner, context);
+      }));
+      const priorRules = lease && (RULE_CREATORS.has(name) || name === 'import_rules') ? new Set(engine.mockRules.keys()) : null;
       const result = await fn(args, context);
       if (lease && name !== 'finish_capture_task') {
+        if (name === 'import_rules') for (const config of engine.listRuleConfigs()) {
+          if (owned(config.owner ?? {}, context) && (!priorRules.has(config.rule_id)
+            || lease.resources?.some(r => r.kind === 'rule' && r.id === config.rule_id))) {
+            await captureLease.trackResource(lease.lease_id, { kind: 'rule', id: config.rule_id, revision: resourceRevision(config) });
+          }
+        }
         const ruleId = result?.rule_id ?? result?.rule?.rule_id ?? args.rule_id;
         const ownedRule = ruleId && lease.resources?.some((resource) => resource.kind === 'rule' && resource.id === ruleId);
         if (ruleId && (priorRules && !priorRules.has(ruleId) || ownedRule)) {
@@ -2595,6 +2658,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
         if (name === 'create_reverse_proxy') await captureLease.trackResource(lease.lease_id,
           { kind: 'reverse_proxy', id: result.id, revision: resourceRevision(result) });
       }
+      if (ruleMutations.has(name) && result?.rule) return { ...result, rule: publicRule(result.rule, context) };
+      if (name === 'reorder_rules') return { ...result, rules: result.rules.map(r => publicRule(r, context)) };
       return result;
     };
     tools[name] = (args = {}, context = {}) => {
