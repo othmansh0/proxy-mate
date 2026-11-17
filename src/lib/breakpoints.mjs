@@ -69,10 +69,11 @@ export class BreakpointManager {
     this.pending = new Map();
     this.history = [];
     this.sequence = 0;
+    this.skippedOutOfScope = 0;
     this.closed = false;
   }
 
-  pause({ ruleId, direction, message, timeoutMs, defaultAction } = {}) {
+  pause({ ruleId, direction, message, timeoutMs, defaultAction, owner, scope = 'all', inScope = true } = {}) {
     validateRuleId(ruleId);
     if (!DIRECTIONS.has(direction)) {
       throw new BreakpointError('INVALID_BREAKPOINT_DIRECTION', 'direction must be either request or response.');
@@ -99,6 +100,8 @@ export class BreakpointManager {
     const deadlineAt = createdAt + effectiveTimeout;
     const recordBase = {
       id,
+      owner: owner ?? null,
+      scope,
       rule_id: ruleId,
       direction,
       state: 'pending',
@@ -122,6 +125,14 @@ export class BreakpointManager {
         maxPreviewBytes: this.maxPreviewBytes,
       }),
     }) : null;
+
+    if (scope === 'mine' && !inScope) {
+      this.skippedOutOfScope++;
+      this.#pushHistory(this.#historyRecord(publicRecord, {
+        outcome: 'skipped_out_of_scope', action: 'continue', defaulted: true,
+      }));
+      return Promise.resolve(undefined);
+    }
 
     if (this.closed || this.pending.size >= this.maxPending) {
       const outcome = this.closed ? 'manager_closed' : 'capacity_exceeded';
@@ -258,6 +269,7 @@ export class BreakpointManager {
       pending_count: this.pending.size,
       max_pending: this.maxPending,
       history_count: this.history.length,
+      skipped_out_of_scope: this.skippedOutOfScope,
       default_timeout_ms: this.defaultTimeoutMs,
       default_action: this.defaultAction,
       redacted: true,
@@ -314,6 +326,8 @@ export class BreakpointManager {
     const createdAt = Date.parse(record.created_at);
     return Object.freeze({
       id: record.id,
+      owner: record.owner,
+      scope: record.scope,
       rule_id: record.rule_id,
       direction: record.direction,
       outcome,
@@ -343,6 +357,7 @@ export function createMockttpBreakpointCallbacks(manager, {
   response = true,
   timeoutMs,
   defaultAction,
+  owner, scope = 'all', inScope = () => false,
 } = {}) {
   if (!manager || typeof manager.pause !== 'function') {
     throw new BreakpointError('INVALID_BREAKPOINT_MANAGER', 'manager must provide a pause function.');
@@ -351,7 +366,8 @@ export function createMockttpBreakpointCallbacks(manager, {
   return {
     ...(request ? {
       beforeRequest: (message) => manager.pause({
-        ruleId, direction: 'request', message, timeoutMs, defaultAction,
+        ruleId, direction: 'request', message, timeoutMs, defaultAction, owner, scope,
+        inScope: scope === 'all' || inScope(message),
       }),
     } : {}),
     ...(response ? {
@@ -359,6 +375,7 @@ export function createMockttpBreakpointCallbacks(manager, {
         ruleId,
         direction: 'response',
         message: { response: responseMessage, request: requestMessage },
+        owner, scope, inScope: scope === 'all' || inScope(requestMessage),
         timeoutMs,
         defaultAction,
       }),
@@ -766,4 +783,27 @@ function toTimestamp(value) {
 
 function clonePublic(value) {
   return structuredClone(value);
+}
+
+// Refresh off the request path. A cold or failed snapshot safely skips pauses.
+export function createBreakpointScope({ listClaims, isAlive = () => true, now = Date.now }) {
+  let snapshot = [], refreshed = -Infinity, refreshing = false;
+  return ({ owner, hostname, device_udid }) => {
+    const at = now();
+    if (!refreshing && at - refreshed >= 1000) {
+      refreshing = true; refreshed = at;
+      Promise.resolve().then(listClaims).then(rows => {
+        snapshot = rows.map(c => ({ ...c, hosts: c.domains.map(domain => new RegExp('^' + domain.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i')) }));
+      }).catch(() => { snapshot = []; }).finally(() => { refreshing = false; });
+    }
+    const active = snapshot.filter(c => Date.parse(c.expires_at) > at);
+    const mine = active.filter(c => c.client_id === owner?.client_id && (c.task_id ?? null) === (owner?.task_id ?? null));
+    if (device_udid) {
+      if (mine.some(c => c.device_udids?.some(id => id.toUpperCase() === device_udid.toUpperCase()))) return true;
+      // A known foreign device must never fall back to the owner's host claim.
+      if (active.some(c => c.device_udids?.some(id => id.toUpperCase() === device_udid.toUpperCase()))) return false;
+    }
+    const covers = c => c.hosts.some(h => h.test(hostname ?? ''));
+    return mine.some(covers) && !active.some(c => c.client_id !== owner?.client_id && isAlive(c.client_id) && covers(c));
+  };
 }

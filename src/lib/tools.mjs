@@ -1,3 +1,4 @@
+import { createBreakpointScope } from './breakpoints.mjs';
 // Shared tool implementations. Both the daemon's control HTTP server and the
 // in-process MCP-server route through these functions. Each tool returns
 // JSON-serializable data; the MCP transport layer wraps that into MCP content.
@@ -81,7 +82,7 @@ function resourceRevision(config) {
 export const INTERNAL_PRESENCE_LOST = Symbol('presence-lost');
 export const INTERNAL_ROUTING_CONTROL = Symbol('routing-control');
 export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
-  clientRegistry,
+  clientRegistry, restartApps = restartSimApps,
   pacPort = PAC_PORT_DEFAULT, now = Date.now, setTimer, clearTimer,
   hostCertificateStatus = getHostCertificateStatus,
 }) {
@@ -97,6 +98,27 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     now, setTimer, clearTimer });
   const owner = context => ({ client_id: context.client_id ?? LEGACY_CLIENT_ID, task_id: context.task_id ?? null });
   const owned = (claim, context) => claim.client_id === owner(context).client_id && claim.task_id === owner(context).task_id;
+  engine.breakpointScope = createBreakpointScope({ listClaims: () => claims.listClaims(),
+    isAlive: id => id !== LEGACY_CLIENT_ID && Boolean(clientRegistry?.isAlive(id)), now });
+  engine.breakpointScope({});
+  async function guardGlobal(args, context) {
+    if (args.force === true) return;
+    const ids = new Set((await claims.listClaims()).filter(c => c.client_id !== owner(context).client_id
+      && c.client_id !== LEGACY_CLIENT_ID && clientRegistry?.isAlive(c.client_id)).map(c => c.client_id));
+    if (ids.size) throw Object.assign(new Error(`${ids.size} other live client(s) hold routing claims.`), {
+      code: 'OTHER_CLIENTS_ACTIVE', details: { other_clients_active: ids.size }, retryable: false,
+      recovery: ['Use your own routing or rules, or coordinate with other clients before using force: true.'],
+    });
+  }
+  async function claimedDevices(context) {
+    return [...new Set((await claims.listClaims()).filter(c => owned(c, context)).flatMap(c => c.device_udids ?? []))];
+  }
+  async function restartForCaller(args, context) {
+    const devices = args.udid ? [args.udid] : await claimedDevices(context);
+    if (!devices.length) return restartApps({ ...args });
+    const reports = await Promise.all(devices.map(udid => restartApps({ ...args, udid })));
+    return { restarted: reports.flatMap(r => r.restarted ?? []), failed: reports.flatMap(r => r.failed ?? []) };
+  }
   const invalidateRouting = () => { routingCache = null; };
   function lossEvent(event) {
     if (event.event === 'routing_claim_expired') return 'lease_expired';
@@ -357,6 +379,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
 
   // ---- proxy lifecycle ----
   async function start_proxy(args = {}, context = {}) {
+    if (args.auto_setup) await guardGlobal(args, context);
     if (appGateway) throw Object.assign(new Error('App-only capture is active. Stop it before switching capture modes.'), { code: 'APP_CAPTURE_ACTIVE' });
     const {
       port, auto_setup = false, network_service, pac_port, tls_passthrough, max_body_size,
@@ -441,7 +464,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
       throw error;
     }
     const restartReport = trust.trusted?.length
-      ? await restartSimApps({})
+      ? await restartForCaller(args, context)
       : { restarted: [], skipped: 'certificate was not imported on a booted simulator' };
     const watcher = await start_sim_watcher({ interval: 5000 });
     return { ...started, auto_setup: true, host_certificate: hostCertificate, routing, trust, restart: restartReport, watcher };
@@ -455,7 +478,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return listSimulatorApplications(args);
   }
 
-  async function start_app_capture(args = {}) {
+  async function start_app_capture(args = {}, context = {}) {
+    await guardGlobal(args, context);
     if (engine.isRunning() && appScope?.bundle_id === args.bundle_id && appScope?.device_id === args.udid) {
       const state = await readState();
       let routing = null;
@@ -606,11 +630,13 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return await trustCaOnSimulators(await activeCaCertificate());
   }
 
-  async function setup_simulator_certificate(args = {}) {
+  async function setup_simulator_certificate(args = {}, context = {}) {
+    if (args.restart_apps !== false) await guardGlobal(args, context);
+    const devices = args.device_ids ?? await claimedDevices(context);
     return setupSimulatorCertificates({
       cert_path: await activeCaCertificate(),
       scope: args.scope ?? 'booted',
-      device_ids: args.device_ids,
+      device_ids: devices.length ? devices : undefined,
       developer_dir: args.developer_dir,
       boot_shutdown: args.boot_shutdown ?? false,
       restart_apps: args.restart_apps ?? true,
@@ -785,8 +811,9 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     };
   }
 
-  async function restart_sim_apps_tool(args = {}) {
-    return await restartSimApps({ udid: args.udid, bundle_id: args.bundle_id });
+  async function restart_sim_apps_tool(args = {}, context = {}) {
+    await guardGlobal(args, context);
+    return restartForCaller(args, context);
   }
 
   async function presenceLost(client) {
@@ -930,7 +957,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     return { dashboard: operatorUi.status };
   }
 
-  async function toggle_recording(args = {}) {
+  async function toggle_recording(args = {}, context = {}) {
+    await guardGlobal(args, context);
     return engine.setRecording(args.enabled == null ? !engine.recording : args.enabled);
   }
 
@@ -1504,13 +1532,16 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
     });
   }
 
-  async function create_breakpoint(args = {}) {
+  async function create_breakpoint(args = {}, context = {}) {
+    const scope = args.scope ?? (owner(context).client_id === LEGACY_CLIENT_ID ? 'all' : 'mine');
+    if (!['mine', 'all'].includes(scope)) throw new Error('scope must be mine or all');
     await ensureProxyRunning();
     const url = args.url ?? args.url_pattern;
     if (!url) throw new Error('url or url_pattern is required');
     const rule = await engine.registerRule({
       ...args,
       type: 'breakpoint',
+      owner: owner(context), scope,
       rule_id: args.rule_id ?? stableRuleId('breakpoint', `${url}:${args.direction ?? 'request'}`),
       ...ruleUrlMatchers(url, args),
     });
@@ -2400,7 +2431,8 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
 
   const tools = {
     // lifecycle
-    start_proxy, start_app_capture, list_simulator_apps, stop_proxy, set_proxy_routing, clear_proxy_routing,
+    start_proxy, start_app_capture, list_simulator_apps,
+    stop_proxy: async (args = {}, context = {}) => { await guardGlobal(args, context); return stop_proxy(args); }, set_proxy_routing, clear_proxy_routing,
     start_operator_ui, stop_operator_ui, get_operator_ui_status,
     trust_ca_on_simulators: trust_ca_on_simulators_tool,
     setup_simulator_certificate, setup_xcode_preview_certificate,

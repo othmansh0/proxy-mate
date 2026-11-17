@@ -126,6 +126,9 @@ const proxyStatusSchema = z.looseObject({
     consecutive_failures: z.number().int().nonnegative(), last_error: z.unknown().nullable(),
   }).optional(),
 });
+const breakpointOwnerSchema = z.object({ client_id: z.string(), task_id: z.string().nullable() });
+const breakpointRecordSchema = z.looseObject({ owner: breakpointOwnerSchema.nullable().optional(), scope: z.enum(['mine', 'all']).optional() });
+const breakpointStatusSchema = z.looseObject({ skipped_out_of_scope: z.number().int().nonnegative() });
 const ruleSchema = z.looseObject({
   rule_id: z.string().optional(),
   id: z.string().optional(),
@@ -162,6 +165,12 @@ function toolResultSchema(dataSchema = z.looseObject({})) {
 export const toolOutputSchema = toolResultSchema();
 
 const typedToolOutputSchemas = Object.freeze({
+  create_breakpoint: toolResultSchema(z.looseObject({ rule: breakpointRecordSchema })),
+  list_pending_breakpoints: toolResultSchema(z.looseObject({ breakpoints: z.array(breakpointRecordSchema), status: breakpointStatusSchema })),
+  get_pending_breakpoint: toolResultSchema(z.looseObject({ breakpoint: breakpointRecordSchema })),
+  get_breakpoint_history: toolResultSchema(z.looseObject({ history: z.array(breakpointRecordSchema), status: breakpointStatusSchema })),
+  resolve_breakpoint: toolResultSchema(z.looseObject({ outcome: breakpointRecordSchema })),
+  cancel_breakpoint: toolResultSchema(z.looseObject({ outcome: breakpointRecordSchema })),
   get_started: toolResultSchema(z.looseObject({ routing_guidance: z.string().optional() })),
   set_proxy_routing: toolResultSchema(routingResultSchema),
   clear_proxy_routing: toolResultSchema(routingResultSchema),
@@ -211,6 +220,7 @@ const typedToolOutputSchemas = Object.freeze({
 });
 
 const startProxySchema = {
+  force: z.boolean().optional(),
   port: z.number().int().min(1).max(65535).optional(),
   auto_setup: z.boolean().optional(),
   domains: z.array(z.string()).optional(),
@@ -468,6 +478,7 @@ export const MCP_TOOLS = Object.freeze([
     udid: z.string().min(1).max(128).optional(),
   }, READ, { longRunning: true }),
   tool('start_app_capture', 'Capture only connections attributed to one Simulator app, without app code changes or Mac Keychain trust. Other and unknown connections pass through uninspected. Confirm the selected app and shared proxy routing before starting.', {
+    force: z.boolean().optional(),
     udid: z.string().min(1).max(128),
     bundle_id: z.string().min(1).max(255).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
     port: z.number().int().min(0).max(65535).optional(),
@@ -477,11 +488,12 @@ export const MCP_TOOLS = Object.freeze([
     restart_app: z.boolean().optional(),
     tls_passthrough: z.array(z.string().min(1).max(255)).max(256).optional(),
   }, OPEN_MUTATE, { longRunning: true }),
-  tool('stop_proxy', 'Stop the proxy, restore recorded PAC routing, and stop background watchers. Durable captured flows remain available.', {}, OPEN_MUTATE, { longRunning: true }),
+  tool('stop_proxy', 'Stop the proxy, restore recorded PAC routing, and stop background watchers. Durable captured flows remain available.', { force: z.boolean().optional() }, OPEN_MUTATE, { longRunning: true }),
   tool('set_proxy_routing', 'Set your agent/task routing claim. PAC serves the union of all active claims; default duration is one hour.', setRoutingSchema, OPEN_MUTATE, { longRunning: true }),
   tool('clear_proxy_routing', 'Clear only your routing claim. Other agents keep routing active. Explicit scope all clears every claim.', { network_service: z.string().optional(), scope: z.enum(['mine', 'all']).optional() }, MUTATE, { longRunning: true }),
   tool('trust_ca_on_simulators', 'Import the proxy CA on every currently booted iOS Simulator.', {}, ADD, { longRunning: true }),
   tool('setup_simulator_certificate', 'Preflight Xcode and import the proxy CA on selected Simulators without erasing devices or resetting keychains.', {
+    force: z.boolean().optional(),
     scope: z.enum(['booted', 'all_available']).optional(),
     device_ids: z.array(z.string().min(1)).max(50).optional(),
     developer_dir: z.string().optional(),
@@ -510,10 +522,12 @@ export const MCP_TOOLS = Object.freeze([
     archive_private_key: z.boolean().optional().describe('Retain the old private key in the owner-only archive; defaults false.'),
   }, MUTATE, { longRunning: true }),
   tool('restart_sim_apps', 'Terminate and relaunch one or all running iOS apps on a booted Simulator.', {
+    force: z.boolean().optional(),
     udid: z.string().optional(), bundle_id: z.string().optional(),
   }, MUTATE, { longRunning: true }),
   tool('get_proxy_status', 'Read the current proxy, recording, routing, storage, daemon, and Simulator watcher state; safe first step for troubleshooting.'),
   tool('toggle_recording', 'Enable, disable, or toggle flow recording without stopping proxying.', {
+    force: z.boolean().optional(),
     enabled: z.boolean().optional(),
   }, NON_IDEMPOTENT),
   tool('clear_session', 'Delete captured HTTP(S) flows and WebSocket captures from the active or selected session while keeping rules.', {
@@ -684,6 +698,7 @@ export const MCP_TOOLS = Object.freeze([
     match_query: matchQuerySchema.optional(),
   }, MUTATE),
   tool('create_breakpoint', 'Create or replace a headless request/response breakpoint rule. Matching traffic pauses until resolved or its deadline applies the configured fallback.', {
+    scope: z.enum(['mine', 'all']).optional().describe('Defaults to mine for current clients and all for legacy bridges.'),
     rule_id: z.string().regex(/^[A-Za-z0-9._-]+$/).max(128).optional(),
     url: z.string().optional().describe("Exact URL, or '*' wildcard; the first '?' always starts the query, split into match_query."),
     url_pattern: z.string().max(500).optional().describe("Regular expression, not a glob: '.' matches one character and '.*' many, while a bare '?' or '*' is a regex quantifier on the previous atom. Overrides url and its derived match_query."),
@@ -718,7 +733,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('get_breakpoint_history', 'Return bounded, redacted breakpoint resolution and timeout history.', {
     limit: z.number().int().min(0).max(500).optional(), rule_id: z.string().optional(),
     direction: z.enum(['request', 'response']).optional(),
-    outcome: z.enum(['resolved', 'timed_out', 'cancelled', 'closed', 'capacity_exceeded', 'manager_closed']).optional(),
+    outcome: z.enum(['resolved', 'timed_out', 'cancelled', 'closed', 'capacity_exceeded', 'manager_closed', 'skipped_out_of_scope']).optional(),
   }),
   tool('list_rules', 'List interception rules in evaluation order, including enablement and priority.'),
   tool('remove_rule', 'Remove a rule by id.', { rule_id: z.string().min(1) }, MUTATE),
