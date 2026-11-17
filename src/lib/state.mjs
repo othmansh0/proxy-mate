@@ -156,9 +156,21 @@ export async function defensiveNetworkResetAllServices(options = {}) {
   }
 }
 
+// Test runs must never change the developer's real network settings. Node's
+// test runner marks its child processes with NODE_TEST_CONTEXT; a test that
+// genuinely needs the real binary must opt in explicitly.
+export function assertRealNetworkCommandAllowed(env = process.env) {
+  if (env.NODE_TEST_CONTEXT && env.PROXY_MATE_ALLOW_REAL_NETWORKSETUP !== '1') {
+    throw Object.assign(new Error('Refusing to run the real networksetup inside a test run; inject a fake runner.'), {
+      code: 'REAL_NETWORKSETUP_BLOCKED', retryable: false,
+    });
+  }
+}
+
 // Targeted reset: clear only the autoproxy on the service we configured.
 export async function targetedAutoProxyOff(service) {
   if (!service) return false;
+  assertRealNetworkCommandAllowed();
   try { await execFileP(NETWORKSETUP, ['-setautoproxystate', service, 'off']); }
   catch { /* ignore */ }
   return true;

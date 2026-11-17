@@ -13,7 +13,7 @@ import { recordRuntimeEvent } from './runtime-identity.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { patchState, readState, isStateStale } from './state.mjs';
+import { patchState, readState, isStateStale, assertRealNetworkCommandAllowed } from './state.mjs';
 import { STATE_DIR } from './config.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createRoutingClaimsStore } from './routing-claims.mjs';
@@ -27,6 +27,7 @@ async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.avai
   const cap = typeof timeoutCapMs === 'function' ? timeoutCapMs() : timeoutCapMs;
   if (cap <= 0) throw Object.assign(new Error('Routing budget exhausted.'), { code: 'ROUTING_COMMAND_TIMEOUT' });
   const timeout = Math.max(1, Math.min(Math.ceil(cap), 20000, Math.ceil(5000 * Math.max(1, (Number.isFinite(load) ? load : 0) / Math.max(1, cores)))));
+  if (run === execFileP) assertRealNetworkCommandAllowed();
   try { return await run(NETWORKSETUP, args, { timeout, maxBuffer: 1024 * 1024 }); }
   catch (error) {
     if (error?.killed || error?.code === 'ETIMEDOUT' || error?.code === 'ERR_CHILD_PROCESS_TIMEOUT') {

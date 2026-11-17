@@ -88,7 +88,7 @@ export function makeTools({ engine, pacServer, mode = 'in-process', run, select,
   let routingCache = null;
   const claimDetails = new Map();
   const routingController = () => controller ??= createRoutingController({ claims, pacServer,
-    proxyPort: engine.port, pacPort: routingOptions.pac_port ?? pacPort,
+    proxyPort: () => engine.port, pacPort: routingOptions.pac_port ?? pacPort,
     run, select: service => select ? select(routingOptions.network_service ?? service)
       : pickActiveNetworkService(routingOptions.network_service ?? service),
     now, setTimer, clearTimer });
