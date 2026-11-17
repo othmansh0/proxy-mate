@@ -88,7 +88,10 @@ export function createBridgeHeartbeat({ client, readiness, read = readHandshake,
     return response.json();
   },
 }) {
-  let timer = null, stopped = false, cached = null, intervalMs = 30000, failures = 0, inFlight = false;
+  // Test-only timing override; keep normal production heartbeat scheduling.
+  const testInterval = (process.env.NODE_TEST_CONTEXT || process.env.PROXY_MATE_ALLOW_FAKE_NETWORKSETUP === '1')
+    ? Number(process.env.PROXY_MATE_TEST_HEARTBEAT_MS) : 0;
+  let timer = null, stopped = false, cached = null, intervalMs = Number.isFinite(testInterval) && testInterval > 0 ? testInterval : 30000, failures = 0, inFlight = false;
   const arm = () => {
     if (stopped || inFlight || timer !== null) return;
     timer = setTimer(async () => {

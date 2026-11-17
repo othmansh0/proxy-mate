@@ -39,19 +39,19 @@ const interrupt = name => { interrupted = name; controller.abort(); };
 const onInt = () => interrupt('SIGINT');
 const onTerm = () => interrupt('SIGTERM');
 process.on('SIGINT', onInt); process.on('SIGTERM', onTerm);
-const children = [], tasks = [], samples = [], metrics = [], timeline = [], terminations = [];
+const children = [], tasks = [], samples = [], metrics = [], timeline = [], terminations = [], policyDecisions = [];
 const observer = createHttpObserver();
 const events = { requests: [], readiness: [], rpc: [], subscriptions: [], guardian: [] };
 const report = { schema_version: 1, config, state_dir: home, started_at: new Date(started).toISOString(),
-  durations: {}, samples, metrics_snapshots: metrics, guardian: { timeline, terminations, counts: {} } };
+  durations: {}, samples, metrics_snapshots: metrics, guardian: { timeline, terminations, policy_decisions: policyDecisions, counts: {} } };
 let daemon, upstream, auth, loadStarted, loadEnded, failure;
 const upstreamTimers = new Set();
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const running = child => child?.pid && child.exitCode === null && child.signalCode === null;
 function child(command, args, role) {
-  const proc = spawn(command, args, { cwd: root, env: { ...process.env, PROXY_MATE_HOME: home }, stdio: 'ignore' });
-  const info = { role, process: proc, error: null };
+  const proc = spawn(command, args, { cwd: root, env: { ...process.env, PROXY_MATE_HOME: home }, stdio: ['ignore', 'ignore', 'pipe'] });
+  const info = { role, process: proc, error: null, closed: new Promise(resolve => proc.once('close', resolve)) };
   proc.on('error', error => { info.error = error.code ?? 'SPAWN_FAILED'; controller.abort(); });
   children.push(info); return proc;
 }
@@ -73,7 +73,7 @@ async function measured(bucket, fn) {
   return result.value;
 }
 try {
-  const [{ waitForReadyDaemon }, { callDaemon, probeDaemon }, { createGuardian }, { newClientId }] = await Promise.all([
+  const [{ waitForReadyDaemon }, { callDaemon, probeDaemon }, { createGuardian, healthTimeoutPolicy }, { newClientId }] = await Promise.all([
     import('../src/lib/daemon-connection.mjs'), import('../src/lib/control.mjs'), import('../src/lib/guardian.mjs'),
     import('../src/lib/client-identity.mjs'),
   ]);
@@ -84,21 +84,28 @@ try {
   });
   const upstreamPort = await listen(upstream);
   // Hold all reservations simultaneously, so the three ports are distinct.
-  const reservations = [http.createServer(), http.createServer(), http.createServer()];
   let ports;
-  try { ports = await Promise.all(reservations.map(listen)); }
-  finally { await Promise.all(reservations.map(closeServer)); }
-  report.ports = { proxy: ports[0], pac: ports[1], control: ports[2], upstream: upstreamPort };
-  const args = [fileURLToPath(new URL('../src/server.mjs', import.meta.url)), '--daemon', '--no-routing', '--no-trust-ca', '--no-host-trust',
-    '--proxy-port', String(ports[0]), '--pac-port', String(ports[1]), '--control-port', String(ports[2])];
-  daemon = config.backgroundBand ? child('/usr/sbin/taskpolicy', ['-b', process.execPath, ...args], 'daemon') : child(process.execPath, args, 'daemon');
-  const startupDeadline = Date.now() + 30000;
-  while (!signal.aborted && Date.now() < startupDeadline && running(daemon)) {
-    try { auth = JSON.parse(await readFile(path.join(home, 'handshake.json'), 'utf8')); if (auth?.controlUrl && auth?.token) break; }
-    catch (error) { if (!['ENOENT'].includes(error.code) && !(error instanceof SyntaxError)) throw error; }
-    await pause(50);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const reservations = [http.createServer(), http.createServer(), http.createServer()];
+    try { ports = await Promise.all(reservations.map(listen)); }
+    finally { await Promise.all(reservations.map(closeServer)); }
+    report.ports = { proxy: ports[0], pac: ports[1], control: ports[2], upstream: upstreamPort };
+    const args = [fileURLToPath(new URL('../src/server.mjs', import.meta.url)), '--daemon', '--no-routing', '--no-trust-ca', '--no-host-trust',
+      '--proxy-port', String(ports[0]), '--pac-port', String(ports[1]), '--control-port', String(ports[2])];
+    let startupLog = '';
+    daemon = config.backgroundBand ? child('/usr/sbin/taskpolicy', ['-b', process.execPath, ...args], 'daemon') : child(process.execPath, args, 'daemon');
+    daemon.stderr?.on('data', b => { startupLog = (startupLog + b).slice(-16384); });
+    const startupDeadline = Date.now() + 30000;
+    while (!signal.aborted && Date.now() < startupDeadline && running(daemon)) {
+      try { const candidate = JSON.parse(await readFile(path.join(home, 'handshake.json'), 'utf8')); if (candidate?.token && JSON.parse(await readFile(path.join(home, 'state.json'), 'utf8')).pid === daemon.pid) { auth = candidate; break; } }
+      catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+      await pause(50);
+    }
+    if (auth?.token) break;
+    if (!running(daemon)) await children.find(c => c.process === daemon).closed;
+    if (attempt || running(daemon) || !/EADDRINUSE|address already in use/i.test(startupLog)) throw loadError('LOAD_STARTUP_FAILED', 'Isolated daemon did not publish its handshake.');
+    await stopChild(daemon);
   }
-  if (!auth?.token) throw loadError('LOAD_STARTUP_FAILED', 'Isolated daemon did not publish its handshake.');
   for (let i = 0; i < Math.round(config.cpuFactor * os.cpus().length); i++) {
     child(process.execPath, ['-e', 'for (;;) { Math.sqrt(Math.random()); }'], 'cpu');
   }
@@ -139,11 +146,15 @@ try {
         try { return await measured(events.guardian, () => realProbe(...args)); }
         finally { probeLatency = performance.now() - start; }
       },
-      terminate: async pid => {
-        terminations.push({ timestamp: new Date().toISOString(), pid, dry_run: !config.allowKill });
-        if (pid !== daemon.pid || !running(daemon)) return false;
-        if (config.allowKill) await stopChild(daemon);
-        return true;
+      shouldTerminate: details => {
+        const decision = healthTimeoutPolicy(details);
+        if (decision) policyDecisions.push({ timestamp: new Date().toISOString(), pid: details.state.pid, decision: 'would_terminate', reason: details.decision });
+        return decision;
+      },
+      signal: async (pid, sig) => {
+        if (pid !== daemon.pid || !running(daemon)) throw loadError('UNOWNED_SIGNAL', 'Refusing another process');
+        terminations.push({ timestamp: new Date().toISOString(), pid, signal: sig, dry_run: !config.allowKill });
+        if (config.allowKill) daemon.kill(sig);
       },
       // Routing is forbidden in this harness, even on unexpected daemon state.
       restore: async () => { throw loadError('LOAD_ROUTING_FORBIDDEN', 'Harness cannot restore host routing'); },

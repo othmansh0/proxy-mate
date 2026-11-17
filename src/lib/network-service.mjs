@@ -1,3 +1,5 @@
+import { assertRealNetworkCommandAllowed } from './state.mjs';
+import { networksetupBinary } from './test-hooks.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -26,7 +28,8 @@ export async function detectPrimaryNetworkService({ query = readScutil } = {}) {
 export async function selectNetworkService(preferred, {
   run = exec, primary = detectPrimaryNetworkService,
 } = {}) {
-  const { stdout } = await run('/usr/sbin/networksetup', ['-listallnetworkservices'], options);
+  if (run === exec && networksetupBinary() === '/usr/sbin/networksetup') assertRealNetworkCommandAllowed();
+  const { stdout } = await run(networksetupBinary(), ['-listallnetworkservices'], options);
   const services = stdout.split('\n').slice(1).map((s) => s.trim()).filter((s) => s && !s.startsWith('*'));
   if (preferred) {
     if (services.includes(preferred)) return preferred;

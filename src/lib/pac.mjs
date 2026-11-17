@@ -1,3 +1,4 @@
+import { networksetupBinary } from './test-hooks.mjs';
 // PAC file generation + macOS networksetup wiring + state.json persistence.
 //
 // The PAC server lives on a separate port (default 8081) and is delivered as
@@ -20,7 +21,7 @@ import { createRoutingClaimsStore } from './routing-claims.mjs';
 import { selectNetworkService } from './network-service.mjs';
 
 const execFileP = promisify(execFile);
-const NETWORKSETUP = '/usr/sbin/networksetup';
+const NETWORKSETUP = networksetupBinary();
 // Sample host load for every command, including rollback commands.
 async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.availableParallelism(), timeoutCapMs = Infinity, signal, deadline } = {}) {
   signal?.throwIfAborted();
@@ -28,7 +29,7 @@ async function routingCommand(run, args, { loadavg = os.loadavg, cores = os.avai
   const cap = Math.min(typeof timeoutCapMs === 'function' ? timeoutCapMs() : timeoutCapMs, deadline == null ? Infinity : deadline - performance.now());
   if (cap <= 0) throw Object.assign(new Error('Routing budget exhausted.'), { code: 'ROUTING_COMMAND_TIMEOUT' });
   const timeout = Math.max(1, Math.min(Math.ceil(cap), 20000, Math.ceil(5000 * Math.max(1, (Number.isFinite(load) ? load : 0) / Math.max(1, cores)))));
-  if (run === execFileP) assertRealNetworkCommandAllowed();
+  if (run === execFileP && NETWORKSETUP === '/usr/sbin/networksetup') assertRealNetworkCommandAllowed();
   try {
     const result = await run(NETWORKSETUP, args, { timeout, signal, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 });
     signal?.throwIfAborted();
