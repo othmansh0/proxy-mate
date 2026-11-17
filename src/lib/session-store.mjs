@@ -1,7 +1,7 @@
 // Durable SQLite capture-session storage.
 //
-// Flows are stored one row at a time in WAL mode. Appending or completing a
-// flow therefore updates only that flow and the small parent-session row; it
+// Flow writes share bounded transactions in WAL mode. Appending or completing
+// a flow updates only that flow and the small parent-session row; it
 // never reparses and rewrites an entire capture document. Existing v1 JSON
 // snapshots are imported transactionally on first open and then moved into a
 // private legacy-json directory for recovery.
@@ -9,7 +9,10 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { increment, registerGauge } from './metrics.mjs';
 import { STATE_DIR } from './config.mjs';
+
+let pendingRows = 0;
 
 const FORMAT = 'proxy-mate.session/v1';
 const SCHEMA_VERSION = 1;
@@ -48,6 +51,12 @@ export class SessionStore {
     this.initializing = null;
     this.mutation = Promise.resolve();
     this.migrationWarnings = [];
+    this.pending = [];
+    this.batchTimer = null;
+    this.inBatch = false;
+    this.counts = null;
+    this.statements = new Map();
+    registerGauge('storage.pending', () => pendingRows);
   }
 
   async init() {
@@ -66,7 +75,7 @@ export class SessionStore {
     this.backend = opened.backend;
     try {
       this.db.exec(`
-        PRAGMA busy_timeout = 5000;
+        PRAGMA busy_timeout = 50;
         PRAGMA foreign_keys = ON;
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
@@ -113,7 +122,7 @@ export class SessionStore {
         CREATE INDEX IF NOT EXISTS flows_session_created
           ON flows(session_id, created_at_ms, sequence);
       `);
-      const version = this.db.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get();
+      const version = this.#prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get();
       if (version && Number(version.value) === 1) this.#migrateDatabaseV1ToV2();
       else if (version && Number(version.value) !== DATABASE_SCHEMA_VERSION) {
         throw new SessionStoreError(
@@ -121,7 +130,7 @@ export class SessionStore {
           `Unsupported session database schema: ${version.value}`,
         );
       }
-      this.db.prepare(`
+      this.#prepare(`
         INSERT INTO store_meta(key, value) VALUES ('schema_version', ?)
         ON CONFLICT(key) DO NOTHING
       `).run(String(DATABASE_SCHEMA_VERSION));
@@ -133,7 +142,7 @@ export class SessionStore {
         CREATE INDEX IF NOT EXISTS flows_session_status_sequence
           ON flows(session_id, status_code, sequence);
       `);
-      const check = this.db.prepare('PRAGMA quick_check').get();
+      const check = this.#prepare('PRAGMA quick_check').get();
       const checkValue = check?.quick_check ?? Object.values(check ?? {})[0];
       if (checkValue !== 'ok') throw new SessionStoreError('CORRUPT_DATABASE', `SQLite quick_check failed: ${checkValue}`);
       await fs.chmod(this.dbPath, 0o600);
@@ -143,6 +152,8 @@ export class SessionStore {
     } catch (error) {
       try { this.db?.close(); } catch { /* best effort */ }
       this.db = null;
+      this.statements.clear();
+      this.counts = null;
       if (isSqliteCorruption(error) && !(error instanceof SessionStoreError)) {
         throw new SessionStoreError('CORRUPT_DATABASE', 'The capture database is corrupt or is not a SQLite database.', {
           database_path: this.dbPath,
@@ -155,24 +166,27 @@ export class SessionStore {
 
   async close() {
     if (this.initializing) await this.initializing;
-    await this.mutation;
+    await this.#readBarrier();
     if (!this.db) return;
     try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* best effort */ }
     this.db.close();
     this.db = null;
+    this.statements.clear();
+    this.counts = null;
     this.initialized = false;
   }
 
   async storageStatus() {
     await this.init();
-    const pageCount = scalar(this.db.prepare('PRAGMA page_count').get());
-    const pageSize = scalar(this.db.prepare('PRAGMA page_size').get());
-    const sessions = this.db.prepare('SELECT COUNT(*) AS count FROM sessions').get().count;
-    const flows = this.db.prepare('SELECT COUNT(*) AS count FROM flows').get().count;
+    await this.#readBarrier();
+    const pageCount = scalar(this.#prepare('PRAGMA page_count').get());
+    const pageSize = scalar(this.#prepare('PRAGMA page_size').get());
+    this.counts ??= this.#prepare('SELECT COUNT(*) AS sessions, COALESCE(SUM(flow_count), 0) AS flows FROM sessions').get();
+    const { sessions, flows } = this.counts;
     return {
       backend: this.backend,
       database_path: this.dbPath,
-      journal_mode: String(scalar(this.db.prepare('PRAGMA journal_mode').get())).toLowerCase(),
+      journal_mode: String(scalar(this.#prepare('PRAGMA journal_mode').get())).toLowerCase(),
       database_bytes: Number(pageCount) * Number(pageSize),
       sessions: Number(sessions),
       flows: Number(flows),
@@ -188,7 +202,7 @@ export class SessionStore {
     const now = iso(this.clock());
     return this.#mutate(() => {
       try {
-        this.db.prepare(`
+        this.#prepare(`
           INSERT INTO sessions(
             id, schema_version, name, created_at, updated_at, next_sequence,
             retention_max_flows, retention_max_bytes, retention_max_age_ms,
@@ -216,14 +230,16 @@ export class SessionStore {
 
   async getSession(sessionId) {
     await this.init();
+    await this.#readBarrier();
     const id = normalizeId(sessionId, 'session_id');
-    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
+    const row = this.#prepare('SELECT * FROM sessions WHERE id = ?').get(id);
     return row ? publicSessionRow(row) : null;
   }
 
   async listSessions() {
     await this.init();
-    return this.db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC, id ASC').all().map(publicSessionRow);
+    await this.#readBarrier();
+    return this.#prepare('SELECT * FROM sessions ORDER BY updated_at DESC, id ASC').all().map(publicSessionRow);
   }
 
   async updateSession({ sessionId, name, retention, metadata, mergeMetadata = true } = {}) {
@@ -240,7 +256,7 @@ export class SessionStore {
         : mergeMetadata ? { ...currentMetadata, ...cloneJson(metadata, 'metadata') } : cloneJson(metadata, 'metadata');
       const nextName = name === undefined ? current.name : normalizeName(name);
       const now = iso(this.clock());
-      this.db.prepare(`
+      this.#prepare(`
         UPDATE sessions SET name = ?, updated_at = ?,
           retention_max_flows = ?, retention_max_bytes = ?, retention_max_age_ms = ?, metadata_json = ?
         WHERE id = ?
@@ -258,7 +274,7 @@ export class SessionStore {
     const id = normalizeId(sessionId, 'session_id');
     const candidate = cloneJson(flow, 'flow');
     const flowId = normalizeId(candidate.id ?? candidate.flow_id ?? `flow_${crypto.randomUUID()}`, 'flow_id');
-    return this.#mutate(() => this.#transaction(() => {
+    return this.#enqueueFlow(id, () => this.#transaction(() => {
       const session = this.#requireSessionRow(id);
       const now = iso(this.clock());
       const entry = normalizeStoredFlow({
@@ -274,7 +290,7 @@ export class SessionStore {
         throw error;
       }
       const sizes = flowSizes(entry);
-      this.db.prepare(`
+      this.#prepare(`
         UPDATE sessions SET next_sequence = ?, updated_at = ?,
           flow_count = flow_count + 1, total_bytes = total_bytes + ?
         WHERE id = ?
@@ -290,16 +306,16 @@ export class SessionStore {
     const targetId = normalizeId(flowId, 'flow_id');
     const update = cloneJson(patch, 'patch');
     for (const field of ['id', 'flow_id', 'sequence', 'created_at']) delete update[field];
-    return this.#mutate(() => this.#transaction(() => {
+    return this.#enqueueFlow(id, () => this.#transaction(() => {
       const session = this.#requireSessionRow(id);
-      const currentRow = this.db.prepare('SELECT * FROM flows WHERE session_id = ? AND id = ?').get(id, targetId);
+      const currentRow = this.#prepare('SELECT * FROM flows WHERE session_id = ? AND id = ?').get(id, targetId);
       if (!currentRow) throw new SessionStoreError('FLOW_NOT_FOUND', `Flow was not found: ${targetId}`);
       const current = flowRow(currentRow);
       const entry = normalizeStoredFlow({ ...current, ...update, updated_at: iso(this.clock()) }, current.updated_at, { stripPaths: false });
       const sizes = flowSizes(entry);
       const indexed = indexedFlowFields(entry);
       const sizeDelta = sizes.totalBytes - Number(currentRow.total_bytes);
-      this.db.prepare(`
+      this.#prepare(`
         UPDATE flows SET updated_at = ?, data_json = ?, data_bytes = ?,
           spilled_body_bytes = ?, total_bytes = ?, method = ?, url = ?, hostname = ?, status_code = ?
         WHERE session_id = ? AND id = ?
@@ -307,7 +323,7 @@ export class SessionStore {
         entry.updated_at, sizes.json, sizes.dataBytes, sizes.spilledBytes, sizes.totalBytes,
         indexed.method, indexed.url, indexed.hostname, indexed.statusCode, id, targetId,
       );
-      this.db.prepare('UPDATE sessions SET updated_at = ?, total_bytes = total_bytes + ? WHERE id = ?')
+      this.#prepare('UPDATE sessions SET updated_at = ?, total_bytes = total_bytes + ? WHERE id = ?')
         .run(entry.updated_at, sizeDelta, id);
       const retention = this.#applyRetention(id, retentionFromRow(session));
       return { flow: cloneJson(entry, 'flow'), retention };
@@ -316,14 +332,16 @@ export class SessionStore {
 
   async getFlow({ sessionId, flowId }) {
     await this.init();
+    await this.#readBarrier();
     const id = normalizeId(sessionId, 'session_id');
     this.#requireSessionRow(id);
-    const row = this.db.prepare('SELECT * FROM flows WHERE session_id = ? AND id = ?').get(id, normalizeId(flowId, 'flow_id'));
+    const row = this.#prepare('SELECT * FROM flows WHERE session_id = ? AND id = ?').get(id, normalizeId(flowId, 'flow_id'));
     return row ? flowRow(row) : null;
   }
 
   async listFlows({ sessionId, cursor = null, since_flow_id = null, limit = 100, filters = {} } = {}) {
     await this.init();
+    await this.#readBarrier();
     const id = normalizeId(sessionId, 'session_id');
     const session = this.#requireSessionRow(id);
     const pageSize = normalizeLimit(limit);
@@ -331,13 +349,13 @@ export class SessionStore {
     let sinceSequence = 0;
     if (since_flow_id) {
       const sinceId = normalizeId(since_flow_id, 'since_flow_id');
-      const since = this.db.prepare('SELECT sequence FROM flows WHERE session_id = ? AND id = ?').get(id, sinceId);
+      const since = this.#prepare('SELECT sequence FROM flows WHERE session_id = ? AND id = ?').get(id, sinceId);
       if (!since) throw new SessionStoreError('FLOW_NOT_FOUND', `since_flow_id was not found: ${sinceId}`);
       sinceSequence = Number(since.sequence);
     }
     const after = Math.max(cursorValue, sinceSequence);
     const sqlFilters = flowFilterSql(filters);
-    const rows = this.db.prepare(`
+    const rows = this.#prepare(`
       SELECT * FROM flows WHERE session_id = ? AND sequence > ? ${sqlFilters.sql}
       ORDER BY sequence ASC LIMIT ?
     `).all(id, after, ...sqlFilters.params, pageSize + 1);
@@ -371,9 +389,9 @@ export class SessionStore {
       if (cutoff != null) { clauses.push('created_at_ms < ?'); params.push(cutoff); }
       if (clauses.length === 0) return { purged: 0, purged_flow_ids: [], remaining: this.#flowCount(id) };
       const where = `session_id = ? AND (${clauses.join(' OR ')})`;
-      const purgedRows = this.db.prepare(`SELECT id, total_bytes FROM flows WHERE ${where} ORDER BY sequence`).all(...params);
+      const purgedRows = this.#prepare(`SELECT id, total_bytes FROM flows WHERE ${where} ORDER BY sequence`).all(...params);
       const purgedFlowIds = purgedRows.map((row) => row.id);
-      this.db.prepare(`DELETE FROM flows WHERE ${where}`).run(...params);
+      this.#prepare(`DELETE FROM flows WHERE ${where}`).run(...params);
       this.#adjustAggregates(id, -purgedRows.length, -sumRowBytes(purgedRows), iso(this.clock()));
       return { purged: purgedFlowIds.length, purged_flow_ids: purgedFlowIds, remaining: this.#flowCount(id) };
     }));
@@ -382,11 +400,12 @@ export class SessionStore {
   async purgeSession(sessionId) {
     await this.init();
     const id = normalizeId(sessionId, 'session_id');
-    return this.#mutate(() => this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id).changes > 0);
+    return this.#mutate(() => this.#prepare('DELETE FROM sessions WHERE id = ?').run(id).changes > 0);
   }
 
   async exportSession(sessionId) {
     await this.init();
+    await this.#readBarrier();
     const id = normalizeId(sessionId, 'session_id');
     const session = this.#fullSession(id);
     return { format: FORMAT, exported_at: iso(this.clock()), session: sanitizeForExport(session) };
@@ -398,7 +417,7 @@ export class SessionStore {
     await this.init();
     return this.#mutate(() => this.#transaction(() => {
       if (!replace && this.#sessionRow(id)) throw new SessionStoreError('SESSION_EXISTS', `Session already exists: ${id}`);
-      if (replace) this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+      if (replace) this.#prepare('DELETE FROM sessions WHERE id = ?').run(id);
       const now = iso(this.clock());
       const flows = normalizeFlows(imported.flows ?? [], now, { stripPaths: true });
       const retention = normalizeRetention(imported.retention, this.retention);
@@ -420,7 +439,7 @@ export class SessionStore {
   }
 
   #sessionRow(sessionId) {
-    return this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    return this.#prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
   }
 
   #requireSessionRow(sessionId) {
@@ -432,7 +451,7 @@ export class SessionStore {
   #getPublicSession(sessionId) { return publicSessionRow(this.#requireSessionRow(sessionId)); }
 
   #insertSession(session) {
-    this.db.prepare(`
+    this.#prepare(`
       INSERT INTO sessions(
         id, schema_version, name, created_at, updated_at, next_sequence,
         retention_max_flows, retention_max_bytes, retention_max_age_ms,
@@ -448,7 +467,7 @@ export class SessionStore {
   #insertFlow(sessionId, entry) {
     const sizes = flowSizes(entry);
     const indexed = indexedFlowFields(entry);
-    this.db.prepare(`
+    this.#prepare(`
       INSERT INTO flows(
         session_id, id, sequence, created_at, created_at_ms, updated_at,
         data_json, data_bytes, spilled_body_bytes, total_bytes,
@@ -469,15 +488,15 @@ export class SessionStore {
         ALTER TABLE flows ADD COLUMN hostname TEXT;
         ALTER TABLE flows ADD COLUMN status_code INTEGER;
       `);
-      const update = this.db.prepare(`
+      const update = this.#prepare(`
         UPDATE flows SET method = ?, url = ?, hostname = ?, status_code = ?
         WHERE session_id = ? AND id = ?
       `);
-      for (const row of this.db.prepare('SELECT session_id, id, data_json FROM flows').all()) {
+      for (const row of this.#prepare('SELECT session_id, id, data_json FROM flows').all()) {
         const indexed = indexedFlowFields(parseJson(row.data_json, 'flow'));
         update.run(indexed.method, indexed.url, indexed.hostname, indexed.statusCode, row.session_id, row.id);
       }
-      this.db.prepare("UPDATE store_meta SET value = ? WHERE key = 'schema_version'")
+      this.#prepare("UPDATE store_meta SET value = ? WHERE key = 'schema_version'")
         .run(String(DATABASE_SCHEMA_VERSION));
     });
   }
@@ -486,7 +505,7 @@ export class SessionStore {
     const removed = { max_flows: 0, max_bytes: 0, max_age: 0 };
     const removedFlowIds = [];
     const removeRows = (rows, reason) => {
-      const statement = this.db.prepare('DELETE FROM flows WHERE session_id = ? AND id = ?');
+      const statement = this.#prepare('DELETE FROM flows WHERE session_id = ? AND id = ?');
       const deleted = [];
       for (const row of rows) {
         if (statement.run(sessionId, row.id).changes > 0) {
@@ -499,14 +518,14 @@ export class SessionStore {
     };
 
     const cutoff = this.clock() - retention.max_age_ms;
-    removeRows(this.db.prepare(`
+    removeRows(this.#prepare(`
       SELECT id, total_bytes FROM flows WHERE session_id = ? AND created_at_ms < ? ORDER BY sequence ASC
     `).all(sessionId, cutoff), 'max_age');
 
     let session = this.#requireSessionRow(sessionId);
     const excess = Math.max(0, Number(session.flow_count) - retention.max_flows);
     if (excess > 0) {
-      removeRows(this.db.prepare(`
+      removeRows(this.#prepare(`
         SELECT id, total_bytes FROM flows WHERE session_id = ? ORDER BY sequence ASC LIMIT ?
       `).all(sessionId, excess), 'max_flows');
     }
@@ -515,17 +534,25 @@ export class SessionStore {
     if (Number(session.flow_count) > 1 && Number(session.total_bytes) > retention.max_bytes) {
       // The common path performs no flow scan. Only an over-budget session
       // reads the oldest prefix needed to return below its byte quota.
-      const rows = this.db.prepare(`
-        SELECT id, total_bytes FROM flows WHERE session_id = ? ORDER BY sequence ASC
-      `).all(sessionId);
       let bytes = Number(session.total_bytes);
-      const byteRows = [];
-      for (const row of rows) {
-        if (rows.length - byteRows.length <= 1 || bytes <= retention.max_bytes) break;
-        byteRows.push(row);
-        bytes -= Number(row.total_bytes);
+      let remaining = Number(session.flow_count);
+      let after = 0;
+      while (remaining > 1 && bytes > retention.max_bytes) {
+        const rows = this.#prepare(`
+          SELECT id, sequence, total_bytes FROM flows WHERE session_id = ? AND sequence > ?
+          ORDER BY sequence ASC LIMIT 64
+        `).all(sessionId, after);
+        const byteRows = [];
+        for (const row of rows) {
+          if (remaining <= 1 || bytes <= retention.max_bytes) break;
+          byteRows.push(row);
+          bytes -= Number(row.total_bytes);
+          remaining--;
+          after = Number(row.sequence);
+        }
+        if (!byteRows.length) break;
+        removeRows(byteRows, 'max_bytes');
       }
-      removeRows(byteRows, 'max_bytes');
     }
     session = this.#requireSessionRow(sessionId);
     return {
@@ -539,28 +566,28 @@ export class SessionStore {
 
   #adjustAggregates(sessionId, flowDelta, byteDelta, updatedAt = null) {
     if (updatedAt) {
-      this.db.prepare(`
+      this.#prepare(`
         UPDATE sessions SET flow_count = flow_count + ?, total_bytes = total_bytes + ?, updated_at = ?
         WHERE id = ?
       `).run(flowDelta, byteDelta, updatedAt, sessionId);
     } else {
-      this.db.prepare(`
+      this.#prepare(`
         UPDATE sessions SET flow_count = flow_count + ?, total_bytes = total_bytes + ? WHERE id = ?
       `).run(flowDelta, byteDelta, sessionId);
     }
   }
 
   #refreshAggregates(sessionId) {
-    const row = this.db.prepare(`
+    const row = this.#prepare(`
       SELECT COUNT(*) AS flow_count, COALESCE(SUM(total_bytes), 0) AS total_bytes
       FROM flows WHERE session_id = ?
     `).get(sessionId);
-    this.db.prepare('UPDATE sessions SET flow_count = ?, total_bytes = ? WHERE id = ?')
+    this.#prepare('UPDATE sessions SET flow_count = ?, total_bytes = ? WHERE id = ?')
       .run(Number(row.flow_count), Number(row.total_bytes), sessionId);
   }
 
   #flowCount(sessionId) {
-    return Number(this.db.prepare('SELECT COUNT(*) AS count FROM flows WHERE session_id = ?').get(sessionId).count);
+    return Number(this.#requireSessionRow(sessionId).flow_count);
   }
 
   #fullSession(sessionId) {
@@ -574,12 +601,75 @@ export class SessionStore {
       next_sequence: Number(row.next_sequence),
       retention: retentionFromRow(row),
       metadata: parseJson(row.metadata_json, 'metadata'),
-      flows: this.db.prepare('SELECT * FROM flows WHERE session_id = ? ORDER BY sequence ASC').all(sessionId).map(flowRow),
+      flows: this.#prepare('SELECT * FROM flows WHERE session_id = ? ORDER BY sequence ASC').all(sessionId).map(flowRow),
       total_bytes: Number(row.total_bytes),
     };
   }
 
+  #prepare(sql) {
+    let statement = this.statements.get(sql);
+    if (!statement) { statement = this.db.prepare(sql); this.statements.set(sql, statement); }
+    return statement;
+  }
+
+  // A crash can lose the pending batch, like an in-flight flow today. Promises
+  // resolve only after commit, and rejection reaches the proxy health/diagnostics.
+  #enqueueFlow(sessionId, operation) {
+    return new Promise((resolve, reject) => {
+      const queued = this.mutation.then(() => {
+        if (this.pending.length && this.pendingSession !== sessionId) this.#flushPending();
+        this.pendingSession = sessionId;
+        this.pending.push({ operation, resolve, reject });
+        pendingRows++;
+        this.#scheduleBatch();
+      });
+      this.mutation = queued.catch(reject);
+    });
+  }
+
+  #scheduleBatch() {
+    if (this.batchTimer || !this.pending.length) return;
+    this.batchTimer = setImmediate(() => {
+      this.batchTimer = null;
+      this.#flushBatch();
+      this.#scheduleBatch();
+    });
+  }
+
+  #flushBatch() {
+    const batch = this.pending.splice(0, 64);
+    pendingRows -= batch.length;
+    if (!batch.length) return;
+    this.counts = null;
+    try {
+      const results = this.#transaction(() => {
+        this.inBatch = true;
+        try { return batch.map(item => item.operation()); }
+        finally { this.inBatch = false; }
+      });
+      increment('storage.batches');
+      increment('storage.rows', batch.length);
+      batch.forEach((item, index) => item.resolve(results[index]));
+    } catch (error) {
+      for (const item of batch) item.reject(error);
+    }
+  }
+
+  #flushPending() {
+    if (this.batchTimer) clearImmediate(this.batchTimer);
+    this.batchTimer = null;
+    while (this.pending.length) this.#flushBatch();
+  }
+
+  async #readBarrier() {
+    // Let API calls awaiting an already-initialized store enqueue first.
+    await Promise.resolve();
+    await this.mutation;
+    this.#flushPending();
+  }
+
   #transaction(operation) {
+    if (this.inBatch) return operation();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = operation();
@@ -592,7 +682,7 @@ export class SessionStore {
   }
 
   #mutate(operation) {
-    const next = this.mutation.then(operation);
+    const next = this.mutation.then(() => { this.#flushPending(); this.counts = null; return operation(); });
     this.mutation = next.catch(() => {});
     return next;
   }
@@ -647,7 +737,7 @@ async function openSqlite(file) {
   try {
     const imported = await import('better-sqlite3');
     const Database = imported.default ?? imported;
-    db = new Database(file, { timeout: 5000 });
+    db = new Database(file, { timeout: 50 });
     // Loading the module can succeed even when an optional native binding did
     // not install; force binding initialization before reporting success.
     db.prepare('SELECT 1').get();

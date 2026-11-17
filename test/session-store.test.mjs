@@ -172,3 +172,69 @@ test('purge and portable import/export remove unsafe local body paths', async ()
   assert.equal(await store.purgeSession('copy'), true);
   assert.equal(await store.getSession('copy'), null);
 });
+
+test('flow writes coalesce, preserve order, and reads flush pending work', async () => {
+  const { snapshotMetrics } = await import('../src/lib/metrics.mjs');
+  const { store } = await makeStore();
+  await store.createSession({ id: 'batched' });
+  const before = snapshotMetrics().counters['storage.batches'] ?? 0;
+  const writes = Array.from({ length: 10 }, (_, i) => store.appendFlow({ sessionId: 'batched', flow: { id: `b-${i}` } }));
+  const page = await store.listFlows({ sessionId: 'batched' });
+  await Promise.all(writes);
+  assert.deepEqual(page.flows.map(f => f.id), Array.from({ length: 10 }, (_, i) => `b-${i}`));
+  assert.equal(snapshotMetrics().counters['storage.batches'] - before, 1);
+  assert.equal(snapshotMetrics().gauges['storage.pending'], 0);
+  await store.close();
+});
+
+test('a failed batch rejects its callers and rolls back all its rows', async () => {
+  const { store } = await makeStore();
+  await store.createSession({ id: 'failure' });
+  const results = await Promise.allSettled(['same', 'same'].map(id => store.appendFlow({ sessionId: 'failure', flow: { id } })));
+  assert.deepEqual(results.map(r => r.status), ['rejected', 'rejected']);
+  assert.equal((await store.getSession('failure')).flow_count, 0);
+  await store.close();
+});
+
+test('counts and incremental budgets match a full-scan model after random updates and purges', async () => {
+  const { store } = await makeStore({ retention: { max_flows: 12, max_bytes: 3500, max_age_ms: 1_000_000 } });
+  await store.createSession({ id: 'model' });
+  let seed = 17;
+  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0);
+  let model = [];
+  for (let i = 0; i < 150; i++) {
+    const result = model.length && random() % 3 === 0
+      ? await store.updateFlow({ sessionId: 'model', flowId: model[random() % model.length].id, patch: { payload: 'u'.repeat(random() % 800) } })
+      : await store.appendFlow({ sessionId: 'model', flow: { id: `r-${i}`, payload: 'a'.repeat(random() % 800) } });
+    const existing = model.findIndex(f => f.id === result.flow.id);
+    if (existing < 0) model.push(result.flow); else model[existing] = result.flow;
+    model = model.slice(-12);
+    while (model.length > 1 && model.reduce((n, f) => n + Buffer.byteLength(JSON.stringify(f)), 0) > 3500) model.shift();
+    if (i % 13 === 0 && model.length) {
+      const before = model[0].sequence + 1;
+      await store.purgeFlows({ sessionId: 'model', before_sequence: before });
+      model = model.filter(f => f.sequence >= before);
+    }
+    assert.deepEqual((await store.listFlows({ sessionId: 'model' })).flows, model);
+    assert.equal((await store.storageStatus()).flows, model.length);
+    assert.equal((await store.getSession('model')).total_bytes, model.reduce((n, f) => n + Buffer.byteLength(JSON.stringify(f)), 0));
+  }
+  await store.purgeSession('model');
+  assert.equal((await store.storageStatus()).sessions, 0);
+  assert.equal((await store.storageStatus()).flows, 0);
+  await store.close();
+});
+
+test('flow batches yield at 64 rows and close flushes pending writes', async () => {
+  const { store, rootDir } = await makeStore();
+  await store.createSession({ id: 'close' });
+  const { snapshotMetrics } = await import('../src/lib/metrics.mjs');
+  const batches = snapshotMetrics().counters['storage.batches'] ?? 0;
+  const writes = Array.from({ length: 130 }, (_, i) => store.appendFlow({ sessionId: 'close', flow: { id: `c-${i}` } }));
+  await store.close();
+  await Promise.all(writes);
+  assert.equal(snapshotMetrics().counters['storage.batches'] - batches, 3);
+  const reopened = new SessionStore({ rootDir });
+  assert.equal((await reopened.getSession('close')).flow_count, 130);
+  await reopened.close();
+});

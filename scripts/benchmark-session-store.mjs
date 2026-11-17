@@ -53,8 +53,19 @@ try {
   } while (cursor);
   const pagedReadMs = performance.now() - readStarted;
 
+  // Model many in-flight captures without changing the sequential baseline.
+  await store.createSession({ id: 'burst' });
+  const burstStarted = performance.now();
+  for (let offset = 0; offset < flowCount; offset += 64) {
+    await Promise.all(Array.from({ length: Math.min(64, flowCount - offset) }, (_, i) =>
+      store.appendFlow({ sessionId: 'burst', flow: { id: `burst-${offset + i}`, request: { method: 'GET', url: 'https://benchmark.invalid/burst' } } })));
+  }
+  const burstMs = performance.now() - burstStarted;
+
   process.stdout.write(`${JSON.stringify({
     flow_count: flowCount,
+    burst_append_ms: round(burstMs),
+    burst_append_per_second: round(flowCount / (burstMs / 1000)),
     append_ms: round(appendMs),
     append_per_second: round(flowCount / (appendMs / 1000)),
     update_ms: round(updateMs),
