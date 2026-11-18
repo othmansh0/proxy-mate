@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 — 2026-11-18
+
 Multi-agent reliability release. Many agents can now share one daemon on a heavily loaded Mac. A slow daemon is no longer killed. Routing survives restarts. Each agent's evidence, routing, leases, rules and breakpoints are scoped to that agent by default. The root causes and load-test evidence are in `docs/RELIABILITY_AUDIT.md`.
 
 ### Upgrade notes (behaviour changes)
