@@ -1,6 +1,6 @@
 {
   "name": "@othmansh01/proxyfan",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Local MCP server for iOS Simulator HTTP/HTTPS network debugging on macOS. Inspect app requests, mock APIs, and capture redacted evidence.",
   "type": "module",
   "bin": {

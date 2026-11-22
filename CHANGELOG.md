@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.11.0 — 2026-11-22
+
 - Rename Proxy Mate to ProxyFan. Use `@othmansh01/proxyfan` on npm, `proxyfan` for the CLI and MCP registration, and `PROXYFAN_*` for new configuration. Existing state roots, trusted certificates, managed bridges, saved sessions and legacy resource URIs can migrate in place. See [client setup](docs/CLIENT_SETUP.md#migrate-from-proxy-mate).
 - Update the bundled SQLite driver to 13.1.1.
 
