@@ -1,7 +1,7 @@
 {
   "name": "@othmansh01/proxy-mate",
   "version": "0.10.0",
-  "description": "Give coding agents access to Simulator HTTP traffic, API mocks, breakpoints and durable QA evidence.",
+  "description": "Local MCP server for iOS Simulator HTTP/HTTPS network debugging on macOS. Inspect app requests, mock APIs, and capture redacted evidence.",
   "type": "module",
   "bin": {
     "proxy-mate": "src/server.mjs",
@@ -31,7 +31,13 @@
     "proxy",
     "http",
     "https",
-    "debugging"
+    "debugging",
+    "model-context-protocol",
+    "mcp-server",
+    "proxy-mcp",
+    "ios-simulator",
+    "network-debugging",
+    "api-mocking"
   ],
   "scripts": {
     "start": "node src/server.mjs",

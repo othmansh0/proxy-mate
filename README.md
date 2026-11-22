@@ -1,159 +1,80 @@
 # Proxy Mate
 
-**Give your coding agent access to your app's network traffic.**
+[![npm version](https://img.shields.io/npm/v/@othmansh01/proxy-mate.svg)](https://www.npmjs.com/package/@othmansh01/proxy-mate) [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/othmansh0/proxy-mate/blob/develop/LICENSE)
 
-Inspect backend requests, responses and headers from the iOS Simulator. Ask your agent to mock an API, pause a response, reproduce a failure, or check what changed—without adding debugging code to your app.
+A local Model Context Protocol (MCP) server for debugging HTTP and HTTPS traffic from iOS Simulator apps. Ask your coding agent to explain a failed request, mock a backend response, or compare what the app sent across two runs.
 
-Works with Claude Code, Codex, Cursor, Claude Desktop, and other local stdio MCP clients. The npm package is **`@othmansh01/proxy-mate`**. Public releases install without a GitHub account or registry login.
+Install from npm using the full package name [@othmansh01/proxy-mate](https://www.npmjs.com/package/@othmansh01/proxy-mate).
 
-## Quick start
+Earlier versions used the name `proxy-mcp`. [Migrate an existing installation](https://github.com/othmansh0/proxy-mate/blob/develop/docs/CLIENT_SETUP.md#migrate-from-proxy-mcp)
 
-You need **macOS**, **Node.js 22+** (Node 24 recommended), and **Xcode with an iOS Simulator**.
+## Get started
 
-Proxy Mate was previously named `proxy-mcp`. Existing users can follow the [rename migration](docs/CLIENT_SETUP.md#migrate-from-proxy-mcp).
+You need macOS, Node.js 22 or newer, and full Xcode with an installed iOS Simulator runtime.
 
-Install the latest published release and connect Claude Code:
+**1. Connect your MCP client.** For Claude Code, run this once.
 
-```bash
+```sh
 npx --yes @othmansh01/proxy-mate@latest init --client claude
 ```
 
-That's the installation. The command installs the background service, backs up an existing client configuration before updating only its `proxy-mate` entry, and uses a stable local entry point. It reuses a healthy installed service. Your agent does not need npm authentication or another package download every time it connects.
+For another client, replace the last argument.
 
-Reconnect your MCP client, boot a Simulator, then ask:
-
-> Set up network capture for my app in this Simulator for 30 minutes. Help me select the app, then show me the API requests when I open the home screen.
-
-The agent guides you through app selection and the selected Simulator's HTTPS certificate setup. Installation itself leaves routing and certificate trust unchanged. App-only capture is the default; broader Mac/domain capture requires an explicit choice.
-
-### Use another client
-
-Run the same `init` command with your client name:
-
-| Client | Option |
+| Client | Argument |
 | --- | --- |
-| Claude Code | `--client claude` |
-| Codex CLI / IDE | `--client codex` (requires the `codex` CLI) |
-| Cursor | `--client cursor` |
-| Claude Desktop | `--client claude-desktop` |
-| Any other stdio client | `--client json` prints the configuration to copy |
+| Codex CLI or IDE | `codex` (requires the Codex CLI) |
+| Cursor | `cursor` |
+| Claude Desktop | `claude-desktop` |
+| Other stdio clients | `json` (prints the configuration to copy) |
 
-Use `init --dry-run --client claude` to preview setup. Registration uses your user configuration, so the server is available across projects. See [client setup details](docs/CLIENT_SETUP.md) for configuration paths and manual setup.
+The installer sets up a local background service and registers its stable entry point. Use `--dry-run` to preview setup. Capture starts separately. [Client setup guide](https://github.com/othmansh0/proxy-mate/blob/develop/docs/CLIENT_SETUP.md)
 
-## What you can ask your agent
+**2. Capture a request.** Reconnect your MCP client and boot the Simulator with your app installed. Try this prompt.
 
-You do not need to memorize tool names. Describe what you want to inspect or test:
+> Start app-only capture for my app for 10 minutes. When I tap Refresh, show which request failed, its HTTP status, and the error message.
 
-**Inspect and explain traffic**
+Select the Simulator and app when prompted. For HTTPS, setup verifies the debugging certificate on that Simulator. Trigger Refresh once capture is ready.
 
-> Show the request and response headers for the latest login request. Explain why it failed without exposing tokens.
+## Which requests can the agent see?
 
-> Find the search response and list the distinct provider values. Return just the fields we need, not the entire JSON body.
-
-**Mock responses and test edge cases**
-
-> Mock the orders endpoint with an empty list, then with three orders. Keep the rest of the response unchanged and help me check both UI states.
-
-> Make this endpoint return HTTP 500, then add a two-second delay. Help me verify the error and loading states.
-
-**Pause requests or responses**
-
-> Pause the next checkout response. Change the total to zero, resume it, and help me verify what the app does.
-
-> Pause the outgoing profile request so we can inspect its headers and edit the test payload before forwarding it.
-
-**Reproduce and compare**
-
-> Replay this captured request and export a redacted curl command for the developer.
-
-> Compare these two requests. Highlight changes to status, headers and JSON fields.
-
-**Check contracts and keep evidence**
-
-> Validate this capture against our OpenAPI document and report the failing endpoints.
-
-> Save a redacted HAR of this session, then remove only the mocks and breakpoints created for this task. Keep the captured evidence.
-
-The agent can also inspect captured WebSocket messages, use captured local reverse proxies for localhost backends, and generate request code. The [capability reference](docs/CAPABILITIES.md) describes the full surface and its limits.
-
-## How it works
-
-A local background service owns capture, rules and durable sessions. MCP clients connect through a small stdio bridge and share that service. Closing an agent does not stop capture. Routing claims combine per agent/task; heartbeats renew their deadlines, and clearing one claim preserves the others. New bridges default scoped evidence reads and clears to their own traffic; explicit shared reads remain available. See [multi-agent behavior](docs/AGENT_GUIDE.md#several-agents-on-one-daemon).
-
-Agents finish tasks with `finish_capture_task`: it removes their tracked, unchanged mocks and reverse listeners and releases the lease. Other tasks' fixtures, saved captures and exports remain. Ask the agent to keep fixtures explicitly when QA needs to reuse them.
-
-## Privacy and limits
-
-- Text credentials are redacted by default. Raw access requires a separate explicit grant.
-- Captures stay on your Mac under `~/.proxy-mate`. Returned evidence is visible to your connected agent and subject to that provider's data handling.
-- App-only mode inspects connections attributed to the selected Simulator app. Unknown/background-helper connections pass through without capture; attribution is not universal.
-- Certificate pinning and clients bypassing proxy settings can prevent inspection. This tool does not bypass pinning.
-- Localhost APIs use a captured reverse proxy and its returned local URL. Setup does not silently redirect your app's localhost backend.
-- Capture automation targets macOS and iOS Simulators. Physical Apple devices need additional manual setup; Android, Windows, Linux and HTTP/3 capture are not supported.
-
-See [Security](SECURITY.md), [Privacy](PRIVACY.md), and [advanced configuration](docs/ADVANCED_CONFIGURATION.md) for grants, routing and storage controls. Never share your local CA private key.
-
-## Use from Node.js
-
-Add the package to a QA script or developer tool:
-
-```bash
-npm install @othmansh01/proxy-mate
-```
-
-```js
-import { createProxyClient } from '@othmansh01/proxy-mate';
-
-const proxy = createProxyClient();
-const { flows } = await proxy.callTool('get_flows', {
-  host_equals: 'api.example.com',
-  limit: 5,
-});
-console.log(flows);
-```
-
-The library talks to an already installed daemon and returns tool data directly. Importing it starts no capture, changes no networking and installs no service. TypeScript declarations are included. See [Node.js API](docs/NODE_API.md) for task cleanup, errors and cancellation.
-
-## Update or remove
-
-Ask your agent to stop capture and finish its task, then install the latest package into the service:
-
-```bash
-npx --yes @othmansh01/proxy-mate@latest init --upgrade --client claude
-```
-
-Updates preserve durable evidence and the local CA. Upgrade refuses to replace a capture using routing, an app gateway, a task lease, pending breakpoints or reverse listeners. Reconnect MCP after updating to load the new tools.
-
-To remove the service while keeping the CA:
-
-```bash
-npx --yes @othmansh01/proxy-mate@latest uninstall --keep-ca
-```
-
-Remove the `proxy-mate` entry from your client's MCP settings if you no longer want to connect. Uninstall does not delete saved captures. Omitting `--keep-ca` also removes managed CA trust.
-
-## Troubleshooting
-
-| Problem | Next step |
+| Capture choice | What reaches the recording proxy |
 | --- | --- |
-| npm returns `401`, `403` or `404` | Check that the version is published on npm. If you used the earlier private setup, [remove its GitHub registry mapping](docs/CLIENT_SETUP.md#migrate-from-private-github-packages). |
-| MCP is missing after setup | Reconnect the client. Run `npx --yes @othmansh01/proxy-mate@latest status` to inspect the service. |
-| Setup cannot parse an existing config | Fix that file or use `--client json`. Setup preserves invalid files. |
-| No requests appear | Ask the agent to diagnose capture for the selected app and Simulator. Trigger a new app request. |
-| One endpoint fails HTTPS | Check certificate pinning/custom trust and use an authorized debug build. |
-| Upgrade says capture is in use | Stop capture and finish its task first. Plain `init` connects the client without restarting a healthy service. |
+| **App only** (guided setup default) | A local gateway checks which process opened each connection. It sends traffic it can attribute to the selected Simulator app to the recording proxy, across eligible hosts. Other apps and unidentified connections pass through without capture. |
+| **Selected domains** (explicit choice) | The macOS proxy configuration routes matching hostnames or host patterns, such as `api.example.com`. Any proxy-aware app using that network service can match. With multiple agents, routing covers the combined set of active host claims. |
+| **Local backend** | Point the app at the URL returned by a capture-enabled reverse proxy for that backend. Ordinary localhost traffic bypasses domain routing. |
 
-More help: [Simulator setup and recovery](docs/IOS_SIMULATOR_SETUP.md).
+**The prompt guides what the agent reads.** For example, “Show the last failed checkout request to `api.example.com`” can become a `get_flows` query filtered by host, URL, and status. The agent can then read headers or selected JSON fields from one matching flow. If the same app also sent an analytics request, that request may already be in the local session even when the agent returns only checkout results. App-only setup has no host allowlist. If hostname is the recording boundary you need, choose domain routing before reproducing the issue and account for other apps using the same host. A URL path such as `/checkout` is a query filter within that host.
 
-## Development
+Pinned TLS, clients that bypass proxy settings, and background helpers the gateway cannot attribute can leave gaps. New identified clients default to their own evidence on scoped tools. Explicit shared reads are available, and a shared host can be visible to several agents. [Multi-agent behavior](https://github.com/othmansh0/proxy-mate/blob/develop/docs/AGENT_GUIDE.md#several-agents-on-one-daemon) · [Simulator troubleshooting](https://github.com/othmansh0/proxy-mate/blob/develop/docs/IOS_SIMULATOR_SETUP.md)
 
-```bash
-npm ci
-npm run check
-```
+## What you can ask
 
-For a source checkout, run `node src/server.mjs init --client claude`. See [Contributing](CONTRIBUTING.md), [releases and versioning](docs/PACKAGING.md), [agent workflows](docs/AGENT_NETWORK_WORKFLOW.md), and the [reliability audit](docs/RELIABILITY_AUDIT.md).
+| Task | Example prompt |
+| --- | --- |
+| Inspect | “Show the status and request ID for the last failed login. Omit the body.” |
+| Mock | “Return an empty list for the orders endpoint so I can check the empty state.” |
+| Pause | “Pause the next checkout response so I can inspect it before the app continues.” |
+| Compare | “Compare the last two search responses and list the JSON fields that changed.” |
+| Share evidence | “Export a redacted HAR for this session and clean up the mocks you created.” |
 
-Releases before 1.0 may change the API. Version tags, checksums and release notes are available through [GitHub Releases](https://github.com/othmansh0/proxy-mate/releases).
+The server also supports WebSocket inspection, OpenAPI checks, and a Node.js client for QA scripts. [Capabilities](https://github.com/othmansh0/proxy-mate/blob/develop/docs/CAPABILITIES.md) · [Node.js API](https://github.com/othmansh0/proxy-mate/blob/develop/docs/NODE_API.md) · [Agent workflows](https://github.com/othmansh0/proxy-mate/blob/develop/docs/AGENT_NETWORK_WORKFLOW.md)
 
-MIT licensed. Independent project; not affiliated with Proxyman.
+## Privacy and storage
+
+Captures stay on the Mac, under `~/.proxy-mate` by default. Existing installations may use `~/.proxy-mcp`. The service redacts recognized text credentials before storage and when returning evidence. Raw storage and raw reads each require an explicit grant. Your MCP client and its model provider can see the evidence the agent requests. Review exported captures before sharing. [Privacy](https://github.com/othmansh0/proxy-mate/blob/develop/PRIVACY.md) · [Security](https://github.com/othmansh0/proxy-mate/blob/develop/SECURITY.md)
+
+## Troubleshooting and maintenance
+
+- **Cannot find the package?** Use the [scoped npm listing](https://www.npmjs.com/package/@othmansh01/proxy-mate). Both unscoped names, `proxy-mate` and `proxy-mcp`, resolve to other npm packages. For an old GitHub Packages configuration, follow the [registry migration instructions](https://github.com/othmansh0/proxy-mate/blob/develop/docs/CLIENT_SETUP.md#migrate-from-private-github-packages).
+- **The client cannot connect?** Run `npx --yes @othmansh01/proxy-mate@latest status`, then reconnect the client.
+- **No requests appear?** Confirm the selected app and Simulator, trigger a new request, and ask the agent to diagnose capture and certificate trust. [Simulator setup and recovery](https://github.com/othmansh0/proxy-mate/blob/develop/docs/IOS_SIMULATOR_SETUP.md)
+- **Upgrading?** Stop capture and finish active tasks, then run `npx --yes @othmansh01/proxy-mate@latest init --upgrade --client claude` with your client argument. Reconnect afterward.
+- **Removing the service?** Run `npx --yes @othmansh01/proxy-mate@latest uninstall --keep-ca` to retain the local CA. Remove the client entry manually. Saved captures persist.
+
+Automation targets macOS and iOS Simulators. Physical Apple devices require manual setup. Capture on Android, Windows, or Linux and HTTP/3 inspection are unsupported. [Advanced configuration](https://github.com/othmansh0/proxy-mate/blob/develop/docs/ADVANCED_CONFIGURATION.md)
+
+## Contributing
+
+On macOS, run `npm ci` followed by `npm run check` in a source checkout. Releases before 1.0 may change the API. [Contributing](https://github.com/othmansh0/proxy-mate/blob/develop/CONTRIBUTING.md) · [Release notes and checksums](https://github.com/othmansh0/proxy-mate/releases) · [Reliability audit](https://github.com/othmansh0/proxy-mate/blob/develop/docs/RELIABILITY_AUDIT.md)
+
+Proxy Mate is an independent project distributed under the [MIT license](https://github.com/othmansh0/proxy-mate/blob/develop/LICENSE).
