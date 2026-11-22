@@ -21,8 +21,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ matrix.node == 24 && '24.22.2' || matrix.node }}
           cache: npm
+      - name: Use the qualified npm version for release packaging
+        if: matrix.node == 24
+        run: npm install --global npm@11.19.1
       - run: npm ci
       - run: npm audit --omit=dev
       - run: npm run check -- --test-concurrency=1
