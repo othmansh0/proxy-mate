@@ -1,10 +1,10 @@
-// Isolated WP14 microbenchmark. Run with a temporary PROXY_MATE_HOME.
+// Isolated WP14 microbenchmark. Run with a temporary PROXYFAN_HOME.
 // One job at a time, two workers maximum, no CPU burners, capped at 60 seconds.
 // Baseline reproduces the pre-WP14 decode/redact/hash/spill path.
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
-if (!process.env.PROXY_MATE_HOME) throw new Error('Set PROXY_MATE_HOME to an isolated temporary directory');
+if (!process.env.PROXYFAN_HOME) throw new Error('Set PROXYFAN_HOME to an isolated temporary directory');
 const { BodyWorkerPool } = await import('../src/lib/body-worker-pool.mjs');
 const { storeFlowBody } = await import('../src/lib/bodies.mjs');
 const { redactBody } = await import('../src/lib/redaction.mjs');

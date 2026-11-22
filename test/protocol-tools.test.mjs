@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { makeTools } from '../src/lib/tools.mjs';
 
 test('protocol inspection redacts GraphQL variables and gates binary payload decoding', async () => {
-  const previous = process.env.PROXY_MATE_ALLOW_SENSITIVE;
-  delete process.env.PROXY_MATE_ALLOW_SENSITIVE;
+  const previous = process.env.PROXYFAN_ALLOW_SENSITIVE;
+  delete process.env.PROXYFAN_ALLOW_SENSITIVE;
   const graphql = {
     id: 'graphql-flow',
     request: {
@@ -43,7 +43,7 @@ test('protocol inspection redacts GraphQL variables and gates binary payload dec
       (error) => error.code === 'SENSITIVE_ACCESS_REQUIRED',
     );
   } finally {
-    if (previous == null) delete process.env.PROXY_MATE_ALLOW_SENSITIVE;
-    else process.env.PROXY_MATE_ALLOW_SENSITIVE = previous;
+    if (previous == null) delete process.env.PROXYFAN_ALLOW_SENSITIVE;
+    else process.env.PROXYFAN_ALLOW_SENSITIVE = previous;
   }
 });

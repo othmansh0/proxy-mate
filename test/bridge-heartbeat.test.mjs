@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { readEnvironment } from '../src/lib/environment.mjs';
+import { clientIdentityHeaders } from '../src/lib/client-identity.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
@@ -10,7 +12,8 @@ const factory = source.slice(source.indexOf('export function createBridgeHeartbe
 
 test('bridge heartbeat starts after contact, uses cached readiness, catches failures, stops on stdin close', async () => {
   assert.match(factory, /^function createBridgeHeartbeat/);
-  const create = new Function('readHandshake', 'SERVER_VERSION', `return (${factory});`)(null, 'test');
+  const create = new Function('readHandshake', 'SERVER_VERSION', 'readEnvironment', 'clientIdentityHeaders',
+    `return (${factory});`)(null, 'test', readEnvironment, clientIdentityHeaders);
   const stdin = new EventEmitter(), timers = new Map();
   let next = 0, unrefs = 0, sent = [], successes = 0;
   const cached = { token: 'test', controlUrl: 'http://127.0.0.1:1' };

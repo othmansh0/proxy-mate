@@ -13,7 +13,7 @@ function formatValue(value) {
 }
 
 export function formatLogLine(component, message, fields = {}, { now = () => new Date(), pid = process.pid } = {}) {
-  const parts = [`${now().toISOString()} [proxy-mate ${component} pid=${pid}] ${String(message).replace(/[\r\n]+/g, ' ')}`];
+  const parts = [`${now().toISOString()} [proxyfan ${component} pid=${pid}] ${String(message).replace(/[\r\n]+/g, ' ')}`];
   for (const [key, value] of Object.entries(fields ?? {})) {
     if (value === undefined) continue;
     if (!/^[a-z][a-z0-9_]*$/.test(key)) continue;

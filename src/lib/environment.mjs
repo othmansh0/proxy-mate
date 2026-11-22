@@ -1,16 +1,19 @@
-// Read configuration dynamically without mutating the embedding application's
-// environment. Explicit Proxy Mate values take precedence, including "0".
+// Earlier service installations can pass either of the two previous prefixes.
+const prefixes = ['PROXY_MCP_', 'PROXY_MATE_', 'PROXYFAN_'];
+
 export function readEnvironment(name, env = process.env) {
-  return env?.[name] ?? env?.[name.replace(/^PROXY_MATE_/, 'PROXY_MCP_')];
+  if (!name.startsWith('PROXYFAN_')) return env?.[name];
+  const suffix = name.slice('PROXYFAN_'.length);
+  return env?.[name] ?? env?.['PROXY_MATE_' + suffix] ?? env?.['PROXY_MCP_' + suffix];
 }
 
 export function serviceEnvironment(env = process.env) {
   const result = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith('PROXY_MCP_')) result[key.replace(/^PROXY_MCP_/, 'PROXY_MATE_')] = value;
+  for (const prefix of prefixes) {
+    for (const [key, value] of Object.entries(env)) {
+      if (key.startsWith(prefix)) result['PROXYFAN_' + key.slice(prefix.length)] = value;
+    }
   }
-  for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith('PROXY_MATE_') || key === 'DEVELOPER_DIR') result[key] = value;
-  }
+  if (env.DEVELOPER_DIR !== undefined) result.DEVELOPER_DIR = env.DEVELOPER_DIR;
   return result;
 }

@@ -16,7 +16,7 @@
  * --concurrency 16            Concurrent absolute-URI HTTP traffic loops.
  * --json <path>               Report path (default: timestamped file in OS temp).
  * SIGINT/SIGTERM stop load, reap owned children, remove state, and write report.
- * Run this entry in a fresh process: src modules capture PROXY_MATE_HOME at import.
+ * Run this entry in a fresh process: src modules capture PROXYFAN_HOME at import.
  */
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -31,7 +31,7 @@ import { createHttpObserver, parseOptions, summarize, failsQualification, loadEr
 const config = parseOptions(process.argv.slice(2));
 const started = Date.now();
 const home = await mkdtemp(path.join(os.tmpdir(), 'proxy-load-'));
-process.env.PROXY_MATE_HOME = home; // MUST precede every src import, including guardian dependencies.
+process.env.PROXYFAN_HOME = home; // MUST precede every src import, including guardian dependencies.
 const controller = new AbortController();
 const { signal } = controller;
 let interrupted = null;
@@ -50,7 +50,7 @@ const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const running = child => child?.pid && child.exitCode === null && child.signalCode === null;
 function child(command, args, role) {
-  const proc = spawn(command, args, { cwd: root, env: { ...process.env, PROXY_MATE_HOME: home }, stdio: ['ignore', 'ignore', 'pipe'] });
+  const proc = spawn(command, args, { cwd: root, env: { ...process.env, PROXYFAN_HOME: home }, stdio: ['ignore', 'ignore', 'pipe'] });
   const info = { role, process: proc, error: null, closed: new Promise(resolve => proc.once('close', resolve)) };
   proc.on('error', error => { info.error = error.code ?? 'SPAWN_FAILED'; controller.abort(); });
   children.push(info); return proc;

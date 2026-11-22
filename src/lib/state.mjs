@@ -1,3 +1,4 @@
+import { readEnvironment } from './environment.mjs';
 import { networksetupBinary } from './test-hooks.mjs';
 // state.json — persisted daemon state for crash recovery.
 //
@@ -141,12 +142,12 @@ export async function clearHandshake(expectedToken) {
 
 // Crash recovery must only undo the exact automatic proxy setting that this
 // process recorded. Disabling every proxy type on every network service can
-// destroy VPN/corporate/user configuration unrelated to proxy-mate.
+// destroy VPN/corporate/user configuration unrelated to proxyfan.
 export async function defensiveNetworkResetAllServices(options = {}) {
   const state = await readState();
   const service = state?.network_service;
   if (!service || !state?.routing_active) {
-    return { reset: [], skipped: 'no recorded proxy-mate routing mutation' };
+    return { reset: [], skipped: 'no recorded proxyfan routing mutation' };
   }
   try {
     const { clearPacRouting } = await import('./pac.mjs');
@@ -161,7 +162,7 @@ export async function defensiveNetworkResetAllServices(options = {}) {
 // test runner marks its child processes with NODE_TEST_CONTEXT; a test that
 // genuinely needs the real binary must opt in explicitly.
 export function assertRealNetworkCommandAllowed(env = process.env) {
-  if (env.NODE_TEST_CONTEXT && env.PROXY_MATE_ALLOW_REAL_NETWORKSETUP !== '1') {
+  if (env.NODE_TEST_CONTEXT && readEnvironment('PROXYFAN_ALLOW_REAL_NETWORKSETUP', env) !== '1') {
     throw Object.assign(new Error('Refusing to run the real networksetup inside a test run; inject a fake runner.'), {
       code: 'REAL_NETWORKSETUP_BLOCKED', retryable: false,
     });

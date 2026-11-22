@@ -1,4 +1,5 @@
 // Read-only PAC hosting independent of the daemon's lifetime.
+import { readEnvironment } from './environment.mjs';
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -92,7 +93,7 @@ export class ExternalPacServer {
 // Only launchd daemon mode opts in. Resolve the host on first routing use,
 // retaining the body for the explicitly logged in-process fallback.
 export function createDaemonPacServer({ env = process.env, log = logLine } = {}) {
-  if (env.PROXY_MATE_PAC_HOST !== 'guardian') return new PacServer();
+  if (readEnvironment('PROXYFAN_PAC_HOST', env) !== 'guardian') return new PacServer();
   let active = new ExternalPacServer(), body = '', firstUse = true;
   return {
     get port() { return active.port; },

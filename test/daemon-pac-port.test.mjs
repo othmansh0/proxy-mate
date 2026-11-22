@@ -47,7 +47,7 @@ const NETWORKSETUP =\`);
   const child = spawn(process.execPath, ['--loader', pathToFileURL(loader).href,
     'src/server.mjs', '--daemon', '--no-routing', '--no-host-trust', '--no-trust-ca',
     '--network-service', 'Fake', '--proxy-port', String(proxyPort), '--pac-port', String(pacPort), '--control-port', String(controlPort)],
-  { cwd: new URL('../', import.meta.url), env: { ...process.env, PROXY_MATE_HOME: directory }, stdio: ['ignore', 'ignore', 'pipe'] });
+  { cwd: new URL('../', import.meta.url), env: { ...process.env, PROXYFAN_HOME: directory }, stdio: ['ignore', 'ignore', 'pipe'] });
   let errors = '';
   child.stderr.on('data', data => { errors += data; });
   const finished = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));

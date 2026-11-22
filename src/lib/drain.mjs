@@ -3,7 +3,7 @@ import { readEnvironment } from './environment.mjs';
 import { logLine } from './log-line.mjs';
 
 export function defaultDrainMs() {
-  const value = Number(readEnvironment('PROXY_MATE_DRAIN_MS') ?? 8000);
+  const value = Number(readEnvironment('PROXYFAN_DRAIN_MS') ?? 8000);
   return Number.isFinite(value) && value >= 0 ? value : 8000;
 }
 

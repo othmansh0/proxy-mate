@@ -13,7 +13,14 @@ import crypto from 'node:crypto';
 // The id is coordination metadata, not authentication: every local process
 // running as this user can read the control token.
 
-export const CLIENT_ID_HEADER = 'x-proxy-mate-client-id';
+export const CLIENT_ID_HEADER = 'x-proxyfan-client-id';
+export const PREVIOUS_CLIENT_ID_HEADER = 'x-proxy-mate-client-id';
+
+// Old daemons must still attribute new bridges while a shared runtime upgrades.
+export function clientIdentityHeaders(value) {
+  const id = normalizeClientId(value);
+  return id ? { [CLIENT_ID_HEADER]: id, [PREVIOUS_CLIENT_ID_HEADER]: id } : {};
+}
 export const LEGACY_CLIENT_ID = 'legacy';
 const CLIENT_ID = /^[a-z0-9][a-z0-9_-]{7,63}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;

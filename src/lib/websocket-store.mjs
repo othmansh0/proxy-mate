@@ -182,14 +182,14 @@ export class WebSocketStore {
   /** A portable, JSON-serializable snapshot. It retains ring cursors exactly. */
   exportSnapshot({ includeSensitive = true } = {}) {
     return {
-      format: 'proxy-mate.websocket-store/v1', exported_at: nowIso(this.clock),
+      format: 'proxyfan.websocket-store/v1', exported_at: nowIso(this.clock),
       connections: this.connectionOrder.map((id) => this.connections.get(id)).filter(Boolean).map((connection) => serializeConnection(connection, includeSensitive)),
     };
   }
 
   importSnapshot(snapshot, { replace = true } = {}) {
-    if (!snapshot || !['proxy-mate.websocket-store/v1', 'proxy-mcp.websocket-store/v1'].includes(snapshot.format) || !Array.isArray(snapshot.connections)) {
-      throw new WebSocketStoreError('INVALID_SNAPSHOT', 'snapshot must be a proxy-mate.websocket-store/v1 export');
+    if (!snapshot || !['proxyfan.websocket-store/v1', 'proxy-mate.websocket-store/v1', 'proxy-mcp.websocket-store/v1'].includes(snapshot.format) || !Array.isArray(snapshot.connections)) {
+      throw new WebSocketStoreError('INVALID_SNAPSHOT', 'snapshot must be a proxyfan.websocket-store/v1 export');
     }
     if (replace) { this.connections.clear(); this.connectionOrder.length = 0; }
     for (const raw of snapshot.connections) this.#importConnection(raw);
@@ -202,11 +202,11 @@ export class WebSocketStore {
   exportTranscript({ connectionId, includeSensitive = true } = {}) {
     const connection = this.connections.get(normalizeConnectionId(connectionId));
     if (!connection) throw new WebSocketStoreError('WEBSOCKET_NOT_FOUND', `WebSocket connection was not found: ${connectionId}`);
-    return { format: 'proxy-mate.websocket-transcript/v1', exported_at: nowIso(this.clock), connection: serializeConnection(connection, includeSensitive) };
+    return { format: 'proxyfan.websocket-transcript/v1', exported_at: nowIso(this.clock), connection: serializeConnection(connection, includeSensitive) };
   }
 
   importTranscript(transcript, { replace = false } = {}) {
-    if (!transcript || !['proxy-mate.websocket-transcript/v1', 'proxy-mcp.websocket-transcript/v1'].includes(transcript.format) || !transcript.connection) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxy-mate.websocket-transcript/v1 export');
+    if (!transcript || !['proxyfan.websocket-transcript/v1', 'proxy-mate.websocket-transcript/v1', 'proxy-mcp.websocket-transcript/v1'].includes(transcript.format) || !transcript.connection) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxyfan.websocket-transcript/v1 export');
     if (replace) this.connections.delete(normalizeConnectionId(transcript.connection.id));
     this.#importConnection(transcript.connection);
     this.#enforceConnectionRetention(); this.#recountAndLimitBytes(); this.#persist();
@@ -462,7 +462,7 @@ export class JsonlWebSocketStoreBackend {
       this.needsNewline = validText.length > 0 && !validText.endsWith('\n');
       this.bytes = Buffer.byteLength(validText);
       this.loaded = true;
-      return { format: 'proxy-mate.websocket-store/v1', connections: [...this.live.values()] };
+      return { format: 'proxyfan.websocket-store/v1', connections: [...this.live.values()] };
     } catch (error) {
       if (error?.code === 'ENOENT') { this.loaded = true; return null; }
       throw new WebSocketStoreError('WEBSOCKET_PERSISTENCE_READ_FAILED', error.message);
@@ -516,10 +516,10 @@ export class JsonlWebSocketStoreBackend {
 
 /** Produce replay data only; this proxy intentionally cannot inject frames into a live socket. */
 export function buildWebSocketReplayPlan(transcript, { mutations = [] } = {}) {
-  if (!transcript || !['proxy-mate.websocket-transcript/v1', 'proxy-mcp.websocket-transcript/v1'].includes(transcript.format)) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxy-mate.websocket-transcript/v1 export');
+  if (!transcript || !['proxyfan.websocket-transcript/v1', 'proxy-mate.websocket-transcript/v1', 'proxy-mcp.websocket-transcript/v1'].includes(transcript.format)) throw new WebSocketStoreError('INVALID_TRANSCRIPT', 'transcript must be a proxyfan.websocket-transcript/v1 export');
   const connection = structuredClone(transcript.connection);
   for (const mutation of mutations) applyFrameMutation(connection.messages, mutation);
-  return { format: 'proxy-mate.websocket-replay-plan/v1', live_injection_supported: false, reason: 'Captured WebSocket frames are export/replay data; live frame injection is not supported.', connection_id: connection.id, frames: connection.messages.map((message) => ({ sequence: message.sequence, direction: message.direction, timestamp: message.timestamp, data: message.data })) };
+  return { format: 'proxyfan.websocket-replay-plan/v1', live_injection_supported: false, reason: 'Captured WebSocket frames are export/replay data; live frame injection is not supported.', connection_id: connection.id, frames: connection.messages.map((message) => ({ sequence: message.sequence, direction: message.direction, timestamp: message.timestamp, data: message.data })) };
 }
 
 function applyFrameMutation(messages, mutation = {}) {

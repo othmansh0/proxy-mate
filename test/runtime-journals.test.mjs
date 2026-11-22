@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'runtime-journals-'));
-process.env.PROXY_MATE_HOME = home;
+process.env.PROXYFAN_HOME = home;
 const identity = await import('../src/lib/runtime-identity.mjs');
 const state = await import('../src/lib/state.mjs');
 const runtime = await import('../src/lib/runtime.mjs');
@@ -94,7 +94,7 @@ test('compromised locks record attribution and request clean shutdown', async ()
 test('previous unrecorded exit uses an injectable launchd reader only for our label', async () => {
   let calls = 0; const recorded = [];
   const options = { pid: 20, readEvents: async () => [{ event: 'ready', pid: 10 }], recordEvent: async (...args) => recorded.push(args),
-    readLastExit: async () => { calls++; return -9; }, serviceName: 'dev.proxy-mate.daemon' };
+    readLastExit: async () => { calls++; return -9; }, serviceName: 'dev.proxyfan.daemon' };
   await identity.recordPreviousExit(options);
   assert.deepEqual(recorded[0][1].details, { previous_pid: 10, launchd_last_exit: -9 });
   await identity.recordPreviousExit({ ...options, serviceName: undefined });
@@ -186,7 +186,7 @@ test('two real uncaught exceptions preserve the second fatal event before exit',
     setTimeout(() => { throw new Error('first fatal'); }, 0);
     setTimeout(() => { throw new Error('second fatal'); }, 20);`;
   await assert.rejects(promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], {
-    env: { ...process.env, PROXY_MATE_HOME: directory }, timeout: 15000,
+    env: { ...process.env, PROXYFAN_HOME: directory }, timeout: 15000,
   }), error => error.code === 1 && !error.killed);
   const events = (await fs.readFile(path.join(directory, 'daemon.events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.ok(events.some(e => e.event === 'fatal_error' && e.error_message === 'second fatal'));

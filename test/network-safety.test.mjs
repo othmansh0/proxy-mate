@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import http from 'node:http';
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-network-safety-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-network-safety-'));
 const { detectPrimaryNetworkService, selectNetworkService } = await import('../src/lib/network-service.mjs');
 const { applyPacRouting, clearPacRouting, buildPacText, validateRoutingDomains, PacServer } = await import('../src/lib/pac.mjs');
 const { clearState, readState } = await import('../src/lib/state.mjs');

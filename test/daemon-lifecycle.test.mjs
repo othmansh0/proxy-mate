@@ -32,7 +32,7 @@ test('real daemon owns one runtime and recovers after SIGKILL and an extended ou
   const args = ['src/server.mjs', '--daemon', '--no-routing',
     '--proxy-port', String(ports[0]), '--pac-port', String(ports[1]), '--control-port', String(ports[2])];
   const start = (environment = {}) => {
-    const child = spawn(process.execPath, args, { cwd: root, env: { ...process.env, PROXY_MATE_HOME: directory, ...environment }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, args, { cwd: root, env: { ...process.env, PROXYFAN_HOME: directory, ...environment }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.errors = '';
     child.stdout.resume();
     child.stderr.on('data', (data) => { child.errors += data; });
@@ -73,7 +73,7 @@ test('real daemon owns one runtime and recovers after SIGKILL and an extended ou
     clients.push(client);
     await client.connect(new StdioClientTransport({ command: process.execPath,
       args: ['src/server.mjs', '--require-daemon'], cwd: root,
-      env: { ...process.env, PROXY_MATE_HOME: directory }, stderr: 'pipe' }));
+      env: { ...process.env, PROXYFAN_HOME: directory }, stderr: 'pipe' }));
     const result = await client.callTool({ name: 'get_proxy_status', arguments: {} });
     assert.equal(result.structuredContent.data.daemon_pid, first.pid);
   }
@@ -88,7 +88,7 @@ test('real daemon owns one runtime and recovers after SIGKILL and an extended ou
   first.kill('SIGTERM');
   assert.deepEqual(await first.finished, { code: 0, signal: null });
   await assert.rejects(fs.access(path.join(directory, 'handshake.json')), { code: 'ENOENT' });
-  const second = start({ PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS: '1250' });
+  const second = start({ PROXYFAN_CONNECT_ATTEMPT_TIMEOUT_MS: '1250' });
   const restarted = await ready(second, initial.token);
   assert.equal((await callDaemon({ ...restarted, tool: 'get_proxy_status' })).connection_attempt_timeout_ms, 1250);
   const restoredStatus = await callDaemon({ ...restarted, tool: 'get_proxy_status' });

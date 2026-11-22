@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-task-cleanup-'));
-process.env.PROXY_MATE_HOME = root;
+process.env.PROXYFAN_HOME = root;
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
 const { PacServer } = await import('../src/lib/pac.mjs');

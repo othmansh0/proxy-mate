@@ -31,8 +31,8 @@ export async function validateCustomCaPaths({ keyPath, certPath, stat = fs.stat 
     details: { key_path: keyPath, cert_path: certPath, key_problem: key?.kind ?? null, key_errno: key?.errno ?? null,
       cert_problem: cert?.kind ?? null, cert_errno: cert?.errno ?? null },
     recovery: [
-      ...(permission ? ['The background service cannot read files in macOS privacy-protected folders (Documents, Desktop, Downloads). Move the key and certificate under the proxy-mate state directory, or grant the Node binary Full Disk Access.'] : []),
-      'Pass existing regular files to --ca-key and --ca-cert, or omit both to use the generated proxy-mate CA.',
+      ...(permission ? ['The background service cannot read files in macOS privacy-protected folders (Documents, Desktop, Downloads). Move the key and certificate under the proxyfan state directory, or grant the Node binary Full Disk Access.'] : []),
+      'Pass existing regular files to --ca-key and --ca-cert, or omit both to use the generated proxyfan CA.',
     ],
   });
 }

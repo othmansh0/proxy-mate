@@ -1,7 +1,7 @@
 import { readEnvironment } from './environment.mjs';
 // Daemon control plane — local HTTP server that lets a separate MCP-server
 // process forward tool calls into a long-running daemon. Token-authenticated
-// via ~/.proxy-mate/handshake.json (0600).
+// via ~/.proxyfan/handshake.json (0600).
 //
 // Endpoint shape: POST /rpc with body { tool: "name", args: {...} }
 // Returns: { ok: true, result: ... } or { ok: false, error: "..." }
@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { writeHandshake, clearHandshake } from './state.mjs';
 import { MCP_TOOLS } from './mcp-contract.mjs';
 import { SERVER_VERSION } from './config.mjs';
-import { CLIENT_ID_HEADER, normalizeClientId, normalizeTaskId, LEGACY_CLIENT_ID } from './client-identity.mjs';
+import { CLIENT_ID_HEADER, PREVIOUS_CLIENT_ID_HEADER, clientIdentityHeaders, normalizeClientId, normalizeTaskId, LEGACY_CLIENT_ID } from './client-identity.mjs';
 import { increment, snapshotMetrics } from './metrics.mjs';
 import { logLine } from './log-line.mjs';
 
@@ -57,7 +57,7 @@ export class ControlServer {
     port = DEFAULT_CONTROL_PORT,
     tools,
     clientRegistry, onHeartbeat = async () => {},
-    scopes = ['observe', 'control', ...(readEnvironment('PROXY_MATE_ALLOW_SENSITIVE') === '1' ? ['sensitive'] : [])],
+    scopes = ['observe', 'control', ...(readEnvironment('PROXYFAN_ALLOW_SENSITIVE') === '1' ? ['sensitive'] : [])],
     maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS,
     maxLongConcurrentRequests = 16,
     rateLimit = DEFAULT_RATE_LIMIT,
@@ -155,10 +155,10 @@ export class ControlServer {
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       // Headerless pre-rename bridges require the old service marker. New
       // clients identify themselves and accept either generation of daemon.
-      res.end(JSON.stringify({ ok: true, service: req.headers['x-proxy-mate-client'] === '1' ? 'proxy-mate' : 'proxy-mcp', name: 'proxy-mate', pid: process.pid }));
+      res.end(JSON.stringify({ ok: true, service: req.headers['x-proxyfan-client'] === '1' ? 'proxyfan' : req.headers['x-proxy-mate-client'] === '1' ? 'proxy-mate' : 'proxy-mcp', name: 'proxyfan', pid: process.pid }));
       return;
     }
-    const clientId = normalizeClientId(req.headers[CLIENT_ID_HEADER]);
+    const clientId = normalizeClientId(req.headers[CLIENT_ID_HEADER] ?? req.headers[PREVIOUS_CLIENT_ID_HEADER]);
     if (!this.#consumeRate(clientId
       ? `client:${clientId}` : `address:${req.socket.remoteAddress}`)) {
       this.#reject('control.rate_limited');
@@ -433,7 +433,7 @@ export async function callDaemon({ controlUrl, token, tool, args, timeoutMs = rp
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(body),
         'authorization': `Bearer ${token}`,
-        ...(normalizeClientId(client?.client_id) ? { [CLIENT_ID_HEADER]: normalizeClientId(client.client_id) } : {}),
+        ...clientIdentityHeaders(client?.client_id),
       },
       timeout: timeoutMs,
     }, (res) => {
@@ -527,8 +527,8 @@ export async function probeDaemon(controlUrl, token, timeoutMs = 1500, client) {
       host: url.hostname,
       port: url.port || 80,
       path: url.pathname,
-      headers: { authorization: `Bearer ${token}`, 'x-proxy-mate-client': '1',
-        ...(normalizeClientId(client?.client_id) ? { [CLIENT_ID_HEADER]: normalizeClientId(client.client_id) } : {}) },
+      headers: { authorization: `Bearer ${token}`, 'x-proxyfan-client': '1',
+        ...clientIdentityHeaders(client?.client_id) },
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
@@ -539,7 +539,7 @@ export async function probeDaemon(controlUrl, token, timeoutMs = 1500, client) {
       res.on('end', () => {
         try {
           const p = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          finish(res.statusCode === 200 && p?.ok === true && ['proxy-mate', 'proxy-mcp'].includes(p.service));
+          finish(res.statusCode === 200 && p?.ok === true && ['proxyfan', 'proxy-mate', 'proxy-mcp'].includes(p.service));
         } catch { finish(false); }
       });
     });

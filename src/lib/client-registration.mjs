@@ -8,14 +8,16 @@ import lockfile from 'proper-lockfile';
 import { STATE_DIR, SERVER_NAME } from './config.mjs';
 import { stableNodePath } from './launchagent.mjs';
 
+const previousNames = ['proxy-mate', 'proxy-mcp'];
 const execute = promisify(execFile);
 export const SETUP_CLIENTS = Object.freeze(['claude', 'codex', 'cursor', 'claude-desktop', 'json']);
 
 export async function clientRegistrationPlan({ client = 'claude', home = os.homedir(), stateDir = STATE_DIR,
   nodeBin = process.execPath, env = process.env } = {}) {
   if (!SETUP_CLIENTS.includes(client)) throw new Error(`Choose --client ${SETUP_CLIENTS.join('|')}.`);
+  // A reused pre-rename bridge must still resolve the same custom state directory.
   const entry = { command: await stableNodePath(nodeBin), args: [path.join(stateDir, 'runtime/current/src/client.mjs')],
-    env: { PROXY_MATE_HOME: stateDir } };
+    env: { PROXYFAN_HOME: stateDir, PROXY_MATE_HOME: stateDir } };
   const files = {
     claude: path.join(env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : home, '.claude.json'),
     cursor: path.join(home, '.cursor/mcp.json'),
@@ -24,7 +26,7 @@ export async function clientRegistrationPlan({ client = 'claude', home = os.home
   };
   return { client, config_path: files[client] ?? null, backup_dir: path.join(stateDir, 'setup-backups'), entry,
     ...(client === 'codex' ? { executable: await findExecutable('codex', env),
-      arguments: ['mcp', 'add', SERVER_NAME, '--env', `PROXY_MATE_HOME=${stateDir}`, '--', entry.command, ...entry.args] } : {}) };
+      arguments: ['mcp', 'add', SERVER_NAME, '--env', `PROXYFAN_HOME=${stateDir}`, '--env', `PROXY_MATE_HOME=${stateDir}`, '--', entry.command, ...entry.args] } : {}) };
 }
 
 export async function validateClientRegistration(plan) {
@@ -42,28 +44,30 @@ export async function registerClient(plan, { run = execute } = {}) {
     if (plan.client === 'codex') {
       const options = { timeout: 30_000, maxBuffer: 1024 * 1024,
         env: { ...process.env, CODEX_HOME: path.dirname(plan.config_path) } };
-      let legacy;
-      try {
-        const { stdout } = await run(plan.executable, ['mcp', 'get', 'proxy-mcp', '--json'], options);
-        legacy = JSON.parse(stdout).transport;
-      } catch (error) {
-        if (!/No MCP server named/.test(error.stderr ?? error.message)) throw error;
+      const managed = [];
+      for (const name of previousNames) {
+        try {
+          const { stdout } = await run(plan.executable, ['mcp', 'get', name, '--json'], options);
+          if (isManagedLegacyEntry(JSON.parse(stdout).transport, plan.entry)) managed.push(name);
+        } catch (error) {
+          if (!/No MCP server named/.test(error.stderr ?? error.message)) throw error;
+        }
       }
       const backup = await backupConfig(plan, original);
       try {
         await run(plan.executable, plan.arguments, options);
-        if (isManagedLegacyEntry(legacy, plan.entry)) await run(plan.executable, ['mcp', 'remove', 'proxy-mcp'], options);
+        for (const name of managed) await run(plan.executable, ['mcp', 'remove', name], options);
       }
       catch { throw new Error(`Codex registration failed. The service is installed; retry init --client codex. Configuration backup: ${backup ?? 'no previous file'}.`); }
       return { status: 'registered', config_path: target, backup_path: backup };
     }
     const config = parseJsonConfig(original, target);
-    const migrateLegacy = isManagedLegacyEntry(config.mcpServers?.['proxy-mcp'], plan.entry);
-    if (!migrateLegacy && JSON.stringify(config.mcpServers?.[SERVER_NAME]) === JSON.stringify(plan.entry)) {
+    const managed = previousNames.filter((name) => isManagedLegacyEntry(config.mcpServers?.[name], plan.entry));
+    if (!managed.length && JSON.stringify(config.mcpServers?.[SERVER_NAME]) === JSON.stringify(plan.entry)) {
       return { status: 'unchanged', config_path: target, backup_path: null };
     }
     const next = { ...config, mcpServers: { ...config.mcpServers, [SERVER_NAME]: plan.entry } };
-    if (migrateLegacy) delete next.mcpServers['proxy-mcp'];
+    for (const name of managed) delete next.mcpServers[name];
     const backup = await backupConfig(plan, original);
     const temporary = `${target}.${randomUUID()}.tmp`;
     try {

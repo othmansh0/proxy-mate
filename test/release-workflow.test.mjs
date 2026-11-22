@@ -14,7 +14,7 @@ test('npm version creates a matching commit/tag/changelog without editing a runt
     await fs.copyFile(path.resolve(import.meta.dirname, '..', file), path.join(temporary, file));
   }
   for (const file of ['src/index.mjs', 'src/index.d.ts', 'src/client.mjs', 'src/server.mjs', 'README.md']) await fs.writeFile(path.join(temporary, file), '');
-  const pkg = { name: '@othmansh01/proxy-mate', version: '0.9.0', type: 'module',
+  const pkg = { name: '@othmansh01/proxyfan', version: '0.9.0', type: 'module',
     publishConfig: { registry: 'https://registry.npmjs.org', access: 'public' }, dependencies: {}, bundleDependencies: [],
     scripts: { preversion: 'node scripts/release.mjs preversion', version: 'node scripts/release.mjs version' } };
   await fs.writeFile(path.join(temporary, 'package.json'), JSON.stringify(pkg));

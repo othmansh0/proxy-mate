@@ -84,7 +84,7 @@ export function resolveOpenApiReferences(document, { externalDocuments = {} } = 
 }
 
 /**
- * Validate one proxy-mate captured flow against a loaded OpenAPI 3.x document.
+ * Validate one proxyfan captured flow against a loaded OpenAPI 3.x document.
  * Supported schemas: object/properties/required, array/items, primitive type,
  * enum and nullable. `$ref`, composition and advanced JSON Schema are reported
  * in `unsupported`, never silently treated as fully validated.

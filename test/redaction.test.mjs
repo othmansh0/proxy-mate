@@ -13,7 +13,7 @@ test('redaction configuration adds safe glob patterns without weakening defaults
     headerPatterns: ['x-company-*'],
     queryPatterns: ['private_*'],
     bodyFieldPatterns: ['customer?secret'],
-    env: { PROXY_MATE_REDACT_HEADERS: 'x-env-secret' },
+    env: { PROXYFAN_REDACT_HEADERS: 'x-env-secret' },
   });
   const preview = previewRedaction({
     url: '/items?token=default&private_id=42&safe=yes',

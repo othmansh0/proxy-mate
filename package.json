@@ -1,9 +1,10 @@
 {
-  "name": "@othmansh01/proxy-mate",
+  "name": "@othmansh01/proxyfan",
   "version": "0.10.0",
   "description": "Local MCP server for iOS Simulator HTTP/HTTPS network debugging on macOS. Inspect app requests, mock APIs, and capture redacted evidence.",
   "type": "module",
   "bin": {
+    "proxyfan": "src/server.mjs",
     "proxy-mate": "src/server.mjs",
     "proxy-mcp": "src/server.mjs"
   },
@@ -34,6 +35,7 @@
     "debugging",
     "model-context-protocol",
     "mcp-server",
+    "proxy-mate",
     "proxy-mcp",
     "ios-simulator",
     "network-debugging",
@@ -93,11 +95,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/othmansh0/proxy-mate.git"
+    "url": "git+https://github.com/othmansh0/proxyfan.git"
   },
-  "homepage": "https://github.com/othmansh0/proxy-mate#readme",
+  "homepage": "https://github.com/othmansh0/proxyfan#readme",
   "bugs": {
-    "url": "https://github.com/othmansh0/proxy-mate/issues"
+    "url": "https://github.com/othmansh0/proxyfan/issues"
   },
   "bundleDependencies": [
     "@modelcontextprotocol/sdk",

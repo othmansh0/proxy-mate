@@ -11,7 +11,7 @@ import { createGuardian } from '../src/lib/guardian.mjs';
 
 async function fixture(t, options = {}) {
   // Only ever reset a temporary state directory, never a real installation.
-  const real = ['.proxy-mcp', '.proxy-mate'].map((name) => path.join(os.homedir(), name));
+  const real = ['.proxy-mcp', '.proxyfan'].map((name) => path.join(os.homedir(), name));
   assert.ok(!real.includes(path.resolve(STATE_DIR)), `refusing to reset a real state directory: ${STATE_DIR}`);
   await fs.rm(STATE_DIR, { recursive: true, force: true });
   let auto = { enabled: false, url: '' }, port = 8000;

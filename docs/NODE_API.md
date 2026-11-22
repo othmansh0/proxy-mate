@@ -1,12 +1,12 @@
 # Node.js API
 
-Install `@othmansh01/proxy-mate` from npm. No registry login is required for public releases. Requires macOS and Node.js 22+. The package is ESM and includes TypeScript declarations.
+Install `@othmansh01/proxyfan` from npm. No registry login is required for public releases. Requires macOS and Node.js 22+. The package is ESM and includes TypeScript declarations.
 
 ```js
-import { createProxyClient } from '@othmansh01/proxy-mate';
+import { createProxyClient } from '@othmansh01/proxyfan';
 
 const proxy = createProxyClient({
-  // home: '/absolute/path/to/.proxy-mate', // default: PROXY_MATE_HOME or ~/.proxy-mate
+  // home: '/absolute/path/to/.proxyfan', // default: PROXYFAN_HOME or ~/.proxyfan
   readyTimeoutMs: 15000,
 });
 const status = await proxy.callTool('get_proxy_status');

@@ -31,7 +31,7 @@ const server = http.createServer((req, res) => {
   const now = Date.now();
   const age = Math.max(0, now - Number(Atomics.load(heartbeat, 0)));
   res.end(JSON.stringify({
-    ok: true, service: 'proxy-mate-liveness', pid,
+    ok: true, service: 'proxyfan-liveness', pid,
     heartbeat_age_ms: age,
     verdict: age < 1000 ? 'healthy' : age < 30000 ? 'slow' : 'stalled',
     progress: {

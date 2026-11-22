@@ -8,7 +8,7 @@ import { TransformSandbox } from './transform-sandbox.mjs';
 export const PLUGIN_STAGES = Object.freeze(['request', 'response', 'websocket_offline']);
 const PLUGIN_ID = /^[a-z][a-z0-9_-]{0,63}$/;
 const SOURCE_HASH = /^[a-f0-9]{64}$/;
-const CATALOG_FORMAT = 'proxy-mate.plugin-store/v1';
+const CATALOG_FORMAT = 'proxyfan.plugin-store/v1';
 const MAX_PLUGINS = 1_000;
 const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
 const MAX_NAME_LENGTH = 128;
@@ -210,7 +210,7 @@ export class PluginStore {
     let catalog;
     try { catalog = JSON.parse(raw); }
     catch { throw new PluginStoreError('PLUGIN_CATALOG_INVALID', 'Plugin catalog is not valid JSON'); }
-    if (![CATALOG_FORMAT, 'proxy-mcp.plugin-store/v1'].includes(catalog?.format) || !Array.isArray(catalog.plugins) || catalog.plugins.length > MAX_PLUGINS) {
+    if (![CATALOG_FORMAT, 'proxy-mate.plugin-store/v1', 'proxy-mcp.plugin-store/v1'].includes(catalog?.format) || !Array.isArray(catalog.plugins) || catalog.plugins.length > MAX_PLUGINS) {
       throw new PluginStoreError('PLUGIN_CATALOG_INVALID', `Plugin catalog must use ${CATALOG_FORMAT}`);
     }
     const restored = new Map();

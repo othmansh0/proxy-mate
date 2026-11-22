@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-bodies-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxyfan-bodies-'));
 const bodies = await import('../src/lib/bodies.mjs');
 
 test('small binary bodies are persisted instead of silently lost', async () => {

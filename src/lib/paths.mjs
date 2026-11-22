@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import { STATE_DIR } from './config.mjs';
 
 function configuredRoots() {
-  const extra = String(readEnvironment('PROXY_MATE_ALLOWED_PATHS') ?? '')
+  const extra = String(readEnvironment('PROXYFAN_ALLOWED_PATHS') ?? '')
     .split(path.delimiter)
     .map((item) => item.trim())
     .filter(Boolean);
@@ -54,7 +54,7 @@ async function authorizedPath(value, { mustExist, kind }) {
   if (!allowed.some((root) => isContained(canonical, root))) {
     throw codedPathError(
       'PATH_NOT_AUTHORIZED',
-      `${kind} path is outside proxy-mate's authorized roots`,
+      `${kind} path is outside proxyfan's authorized roots`,
       { path: resolved, allowed_roots: roots },
     );
   }
@@ -74,18 +74,18 @@ export function defaultExportPath(...parts) {
 }
 
 export function sensitiveAccessAllowed() {
-  return readEnvironment('PROXY_MATE_ALLOW_SENSITIVE') === '1';
+  return readEnvironment('PROXYFAN_ALLOW_SENSITIVE') === '1';
 }
 
 export function requireSensitiveAccess(requested) {
   if (!requested) return false;
   if (sensitiveAccessAllowed()) return true;
   const error = new Error(
-    'Sensitive flow access is disabled. Restart proxy-mate with PROXY_MATE_ALLOW_SENSITIVE=1 only in a trusted, temporary debugging session.',
+    'Sensitive flow access is disabled. Restart proxyfan with PROXYFAN_ALLOW_SENSITIVE=1 only in a trusted, temporary debugging session.',
   );
   error.code = 'SENSITIVE_ACCESS_DISABLED';
   error.retryable = false;
-  error.recovery = ['Keep redaction enabled', 'Or restart a trusted local session with PROXY_MATE_ALLOW_SENSITIVE=1'];
+  error.recovery = ['Keep redaction enabled', 'Or restart a trusted local session with PROXYFAN_ALLOW_SENSITIVE=1'];
   throw error;
 }
 

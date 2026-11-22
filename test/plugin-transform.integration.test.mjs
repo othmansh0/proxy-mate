@@ -5,10 +5,10 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-plugin-integration-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxyfan-plugin-integration-'));
 // Live plugin rules are grant-gated at the engine. Tests that exercise real
 // traffic hold the grant; the gating tests below clear it deliberately.
-process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS = '1';
+process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS = '1';
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { PluginStore } = await import('../src/lib/plugin-store.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
@@ -123,11 +123,11 @@ test('ProxyEngine rejects disabled and non-live-stage plugins with coded errors'
 });
 
 test('stage check outranks the grant check: PLUGIN_STAGE_MISMATCH beats TRANSFORM_PLUGINS_NOT_ENABLED, and vice versa', async (t) => {
-  const previousGrant = process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
-  delete process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
+  const previousGrant = process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
+  delete process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
   t.after(() => {
-    if (previousGrant == null) delete process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
-    else process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS = previousGrant;
+    if (previousGrant == null) delete process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
+    else process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS = previousGrant;
   });
 
   const { engine, pluginStore } = await createEngine(t, 'plugin-gate-order');
@@ -175,15 +175,15 @@ test('ProxyEngine records a coded diagnostic when sandbox execution fails', asyn
 });
 
 test('makeTools keeps live plugins off by default and gates source disclosure', async (t) => {
-  const previousLiveGrant = process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
-  const previousSensitiveGrant = process.env.PROXY_MATE_ALLOW_SENSITIVE;
-  delete process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
-  delete process.env.PROXY_MATE_ALLOW_SENSITIVE;
+  const previousLiveGrant = process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
+  const previousSensitiveGrant = process.env.PROXYFAN_ALLOW_SENSITIVE;
+  delete process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
+  delete process.env.PROXYFAN_ALLOW_SENSITIVE;
   t.after(() => {
-    if (previousLiveGrant == null) delete process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
-    else process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS = previousLiveGrant;
-    if (previousSensitiveGrant == null) delete process.env.PROXY_MATE_ALLOW_SENSITIVE;
-    else process.env.PROXY_MATE_ALLOW_SENSITIVE = previousSensitiveGrant;
+    if (previousLiveGrant == null) delete process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
+    else process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS = previousLiveGrant;
+    if (previousSensitiveGrant == null) delete process.env.PROXYFAN_ALLOW_SENSITIVE;
+    else process.env.PROXYFAN_ALLOW_SENSITIVE = previousSensitiveGrant;
   });
 
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-tools-gating-'));
@@ -207,10 +207,10 @@ test('makeTools keeps live plugins off by default and gates source disclosure', 
 });
 
 test('the live-transform grant is re-checked per run by startup replay and rule import', async (t) => {
-  const previousGrant = process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
+  const previousGrant = process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
   t.after(() => {
-    if (previousGrant == null) delete process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
-    else process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS = previousGrant;
+    if (previousGrant == null) delete process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
+    else process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS = previousGrant;
   });
 
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'plugin-grant-replay-'));
@@ -223,12 +223,12 @@ test('the live-transform grant is re-checked per run by startup replay and rule 
     rule_id: 'persisted-plugin-rule', type: 'plugin_transform', plugin_id: 'persisted-live',
     plugin_stage: 'request', url_pattern: '^http://persisted-plugin\\.test/', enabled: true,
   };
-  const importPath = path.join(process.env.PROXY_MATE_HOME, 'plugin-rules-import.json');
+  const importPath = path.join(process.env.PROXYFAN_HOME, 'plugin-rules-import.json');
   await fs.writeFile(importPath, JSON.stringify({
     version: 2, rules: [{ ...persistedRule, rule_id: 'imported-plugin-rule' }],
   }));
 
-  delete process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS;
+  delete process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS;
   await saveRules([persistedRule]);
   const ungrantedEngine = new ProxyEngine({ pluginStore, sessionId: `plugin-grant-off-${Date.now()}` });
   const ungrantedTools = makeTools({ engine: ungrantedEngine, pacServer: {}, mode: 'test' });
@@ -239,15 +239,15 @@ test('the live-transform grant is re-checked per run by startup replay and rule 
   const replay = ungrantedEngine.diagnostics.find((item) => item.kind === 'rule-replay-failures');
   assert.ok(replay, 'the skipped rule must be visible in diagnostics');
   assert.deepEqual(replay.failures.map((failure) => failure.rule_id), ['persisted-plugin-rule']);
-  assert.match(replay.failures[0].error, /PROXY_MATE_ENABLE_TRANSFORM_PLUGINS=1/);
+  assert.match(replay.failures[0].error, /PROXYFAN_ENABLE_TRANSFORM_PLUGINS=1/);
 
   const ungrantedImport = await ungrantedTools.import_rules({ path: importPath });
   assert.equal(ungrantedImport.registered, 0);
   assert.deepEqual(ungrantedImport.failed.map((failure) => failure.rule_id), ['imported-plugin-rule']);
-  assert.match(ungrantedImport.failed[0].error, /PROXY_MATE_ENABLE_TRANSFORM_PLUGINS=1/);
+  assert.match(ungrantedImport.failed[0].error, /PROXYFAN_ENABLE_TRANSFORM_PLUGINS=1/);
 
   // The same durable state registers normally once the grant is present again.
-  process.env.PROXY_MATE_ENABLE_TRANSFORM_PLUGINS = '1';
+  process.env.PROXYFAN_ENABLE_TRANSFORM_PLUGINS = '1';
   await saveRules([persistedRule]);
   const grantedEngine = new ProxyEngine({ pluginStore, sessionId: `plugin-grant-on-${Date.now()}` });
   const grantedTools = makeTools({ engine: grantedEngine, pacServer: {}, mode: 'test' });

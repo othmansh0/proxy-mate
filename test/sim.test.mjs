@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-mate-sim-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxyfan-sim-'));
 const { ensureCA, CA_CERT } = await import('../src/lib/proxy.mjs');
 const { inspectCertificate, simulatorPreflight } = await import('../src/lib/sim.mjs');
 

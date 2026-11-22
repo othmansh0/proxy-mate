@@ -11,7 +11,7 @@ import { writeShutdownIntent, readShutdownIntent, clearShutdownIntent, INTENT_TT
 test('log lines are timestamped, single-line and keep only safe keys', () => {
   const line = formatLogLine('guardian', 'probe failed\nsecond', { step: 'probe', elapsed_ms: 1200, note: 'has space', 'Bad-Key': 'x', skipped: undefined },
     { now: () => new Date('2026-11-17T11:08:14.433Z'), pid: 42 });
-  assert.equal(line, '2026-11-17T11:08:14.433Z [proxy-mate guardian pid=42] probe failed second step=probe elapsed_ms=1200 note="has space"\n');
+  assert.equal(line, '2026-11-17T11:08:14.433Z [proxyfan guardian pid=42] probe failed second step=probe elapsed_ms=1200 note="has space"\n');
   assert.deepEqual(errorFields(Object.assign(new Error('timed out'), { code: null, killed: true, signal: 'SIGTERM' })),
     { error_code: null, error_name: 'Error', error_message: 'timed out', error_signal: 'SIGTERM', error_killed: true });
 });
@@ -34,7 +34,7 @@ test('client identity values are bounded and validated', () => {
   assert.equal(normalizeClientId('../../etc'), null);
   assert.equal(normalizeTaskId('recipe-jar:E1'), 'recipe-jar:E1');
   assert.equal(normalizeTaskId('bad task'), null);
-  assert.equal(CLIENT_ID_HEADER, 'x-proxy-mate-client-id');
+  assert.equal(CLIENT_ID_HEADER, 'x-proxyfan-client-id');
 });
 
 test('shutdown intent is scoped to one pid and expires', async () => {

@@ -13,10 +13,10 @@ function option(value, fallback, maximum) {
 // No transfer list: mockttp may still own or reuse the original buffer.
 export class BodyWorkerPool {
   constructor({
-    threshold = readEnvironment('PROXY_MATE_BODY_WORKER_THRESHOLD'),
-    size = readEnvironment('PROXY_MATE_BODY_WORKERS'),
-    queueLimit = readEnvironment('PROXY_MATE_BODY_WORKER_QUEUE'),
-    timeoutMs = readEnvironment('PROXY_MATE_BODY_WORKER_TIMEOUT_MS'),
+    threshold = readEnvironment('PROXYFAN_BODY_WORKER_THRESHOLD'),
+    size = readEnvironment('PROXYFAN_BODY_WORKERS'),
+    queueLimit = readEnvironment('PROXYFAN_BODY_WORKER_QUEUE'),
+    timeoutMs = readEnvironment('PROXYFAN_BODY_WORKER_TIMEOUT_MS'),
     workerFactory = () => new Worker(new URL('./body-worker.mjs', import.meta.url)),
   } = {}) {
     this.threshold = option(threshold, 256 * 1024, Number.MAX_SAFE_INTEGER);

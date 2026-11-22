@@ -56,7 +56,7 @@ export function buildPacText(domains, targetHost, targetPort) {
     .map((d) => d.trim());
   const matches = safe.map((d) => `shExpMatch(host, ${JSON.stringify(d)})`).join(' || ');
   const fallback = matches || 'false';
-  return `// proxy-mate generated PAC — only listed hosts go through the intercepting proxy.
+  return `// proxyfan generated PAC — only listed hosts go through the intercepting proxy.
 function FindProxyForURL(url, host) {
   if (isPlainHostName(host) || host === "localhost" || host === "127.0.0.1" || host === "::1") {
     return "DIRECT";
@@ -103,7 +103,7 @@ export class PacServer {
         // doesn't silently configure macOS to point at someone else's PAC.
         const existing = await fetchExistingPac(port);
         const reason = existing
-          ? `PAC port :${port} is held by another process. Their PAC ${existing.matches ? 'matches' : 'does NOT match'} ours. Stop the other daemon (try \`proxy-mate doctor\`) or pass a different pac_port.`
+          ? `PAC port :${port} is held by another process. Their PAC ${existing.matches ? 'matches' : 'does NOT match'} ours. Stop the other daemon (try \`proxyfan doctor\`) or pass a different pac_port.`
           : `PAC port :${port} is busy but not serving PAC content. Free the port and retry.`;
         const err = new Error(reason);
         err.code = 'PAC_PORT_BUSY';
@@ -133,7 +133,7 @@ export class PacServer {
     this.leaseTimer = setTimeout(() => {
       restore().catch((error) => {
         this.body = 'function FindProxyForURL() { return "DIRECT"; }';
-        process.stderr.write(`[proxy-mate] routing lease cleanup failed: ${error.message}\n`);
+        process.stderr.write(`[proxyfan] routing lease cleanup failed: ${error.message}\n`);
       });
     }, ms);
     this.leaseTimer.unref?.();
@@ -161,7 +161,7 @@ export async function fetchExistingPac(port, { maxBytes = 8192 } = {}) {
           status: res.statusCode,
           content_type: res.headers['content-type'] ?? null,
           body_preview: body.slice(0, 200),
-          matches: ['proxy-mate generated PAC', 'proxy-mcp generated PAC'].some((marker) => body.includes(marker)),
+          matches: ['proxyfan generated PAC', 'proxy-mate generated PAC', 'proxy-mcp generated PAC'].some((marker) => body.includes(marker)),
         });
       });
     });

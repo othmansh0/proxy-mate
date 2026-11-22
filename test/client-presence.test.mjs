@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'presence-test-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'presence-test-'));
 const { createClientRegistry } = await import('../src/lib/client-registry.mjs');
 const { makeTools, INTERNAL_ROUTING_CONTROL, INTERNAL_PRESENCE_LOST } = await import('../src/lib/tools.mjs');
 const { ControlServer, callDaemon } = await import('../src/lib/control.mjs');
@@ -46,7 +46,7 @@ test('heartbeat renews one owner without network churn; absence clears all its t
   now += 30000;
   const count = calls, selected = selections;
   const response = await fetch(`${hs.controlUrl}/heartbeat`, { method: 'POST',
-    headers: { authorization: `Bearer ${hs.token}`, 'x-proxy-mate-client-id': a.client_id }, body: JSON.stringify(a) });
+    headers: { authorization: `Bearer ${hs.token}`, 'x-proxyfan-client-id': a.client_id }, body: JSON.stringify(a) });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).interval_ms, 30000);
   assert.equal(calls, count); assert.equal(selections, selected);
@@ -75,7 +75,7 @@ test('heartbeats require auth, bound bodies, bypass general slots, and consume p
   const hs = await readHandshake();
   ctrl.activeRequests = ctrl.maxConcurrentRequests;
   const post = (body, token = hs.token, id = a.client_id) => fetch(`${hs.controlUrl}/heartbeat`, {
-    method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-proxy-mate-client-id': id }, body: JSON.stringify(body) });
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-proxyfan-client-id': id }, body: JSON.stringify(body) });
   assert.equal((await post(a, 'wrong')).status, 401);
   assert.equal((await post({ client: a })).status, 200);
   assert.equal((await post(a)).status, 200);

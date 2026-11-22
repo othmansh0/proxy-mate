@@ -119,7 +119,7 @@ test('exports/imports durable snapshots and produces data-only replay plans', ()
 });
 
 test('JSONL backend restores snapshots through private atomic files', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-'));
+  const directory = await mkdtemp(join(tmpdir(), 'proxyfan-ws-'));
   const backend = new JsonlWebSocketStoreBackend(join(directory, 'sockets.jsonl'));
   const store = new WebSocketStore({ backend }); store.onRequest({ id: 'disk', url: 'wss://disk.test' }); store.onMessageReceived({ id: 'disk', data: 'persisted' }); await store.flush();
   assert.equal((await stat(join(directory, 'sockets.jsonl'))).mode & 0o777, 0o600);
@@ -129,7 +129,7 @@ test('JSONL backend restores snapshots through private atomic files', async () =
 
 test('JSONL appends deltas, compacts bounded history, and reloads legacy snapshots', async () => {
   const { readFile, writeFile } = await import('node:fs/promises');
-  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-append-'));
+  const directory = await mkdtemp(join(tmpdir(), 'proxyfan-ws-append-'));
   const file = join(directory, 'frames.jsonl');
   const store = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file), maxMessagesPerConnection: 3 });
   store.onRequest({ id: 'append', url: 'wss://append.test' });
@@ -153,7 +153,7 @@ test('JSONL appends deltas, compacts bounded history, and reloads legacy snapsho
 });
 
 test('journal preserves eviction across connections and reused connection ids', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-eviction-'));
+  const directory = await mkdtemp(join(tmpdir(), 'proxyfan-ws-eviction-'));
   const backend = new JsonlWebSocketStoreBackend(join(directory, 'frames.jsonl'));
   const store = new WebSocketStore({ backend, maxConnections: 2, maxTotalMessageBytes: 600 });
   store.onRequest({ id: 'a' }); store.onMessageSent({ id: 'a', data: 'old' }); await store.flush();
@@ -183,7 +183,7 @@ test('save-only JSON backends retain coalescing and surface persistence errors',
 
 test('journal recovers a torn final append and remains writable', async () => {
   const { appendFile } = await import('node:fs/promises');
-  const directory = await mkdtemp(join(tmpdir(), 'proxy-mate-ws-torn-'));
+  const directory = await mkdtemp(join(tmpdir(), 'proxyfan-ws-torn-'));
   const file = join(directory, 'frames.jsonl');
   const store = new WebSocketStore({ backend: new JsonlWebSocketStoreBackend(file) });
   store.onRequest({ id: 'torn' }); store.onMessageSent({ id: 'torn', data: 'committed' }); await store.flush();

@@ -91,7 +91,7 @@ test('WebSocket transcript imports cannot overwrite a foreign connection by embe
   const dir = path.join(STATE_DIR, 'exports');
   await fs.mkdir(dir, { recursive: true });
   const source = path.join(dir, `ws-${randomUUID()}.json`);
-  await fs.writeFile(source, JSON.stringify({ format: 'proxy-mate.websocket-transcript/v1', connection: { id: 'foreign', messages: [] } }));
+  await fs.writeFile(source, JSON.stringify({ format: 'proxyfan.websocket-transcript/v1', connection: { id: 'foreign', messages: [] } }));
   await assert.rejects(tools.import_websocket_transcript({ path: source }, { client_id: 'A' }), { code: 'CONNECTION_OUT_OF_SCOPE' });
 });
 test('capture replacement checks the embedded active session ID', async t => {

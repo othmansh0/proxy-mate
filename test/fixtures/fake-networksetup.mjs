@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Requires an explicit isolated state file; never delegates to networksetup.
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
-const file = process.env.PROXY_MATE_FAKE_NETWORK_STATE;
+const file = process.env.PROXYFAN_FAKE_NETWORK_STATE;
 // Node may discover fixtures as standalone test files; no command means no work.
 if (!file && process.env.NODE_TEST_CONTEXT && process.argv.length === 2) process.exit(0);
-if (!file) throw new Error('PROXY_MATE_FAKE_NETWORK_STATE required');
+if (!file) throw new Error('PROXYFAN_FAKE_NETWORK_STATE required');
 const state = JSON.parse(readFileSync(file, 'utf8'));
 const [command, service, value] = process.argv.slice(2);
 if (service && !(state.services ?? [state.service]).includes(service)) throw new Error('Unknown fake service');

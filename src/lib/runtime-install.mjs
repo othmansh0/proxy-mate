@@ -23,7 +23,7 @@ export async function stageDaemonRuntime({ serverPath, runtimeRoot = path.join(S
     const hash = createHash('sha256');
     for (const name of ['src', 'scripts', 'package.json']) await hashTree(directory, name, hash);
     await fs.access(path.join(directory, 'src/server.mjs'));
-    await fs.writeFile(path.join(directory, markerName), JSON.stringify({ managed_by: 'proxy-mate', version: 1, source: sourceRoot,
+    await fs.writeFile(path.join(directory, markerName), JSON.stringify({ managed_by: 'proxyfan', version: 1, source: sourceRoot,
       content_sha256: hash.digest('hex'), dependency_lock_sha256: lock ? createHash('sha256').update(lock).digest('hex') : null,
       staged_at: new Date().toISOString() }), { mode: 0o600, flag: 'wx' });
     return { directory, serverPath: path.join(directory, 'src/server.mjs'), sourceRoot };
@@ -51,7 +51,7 @@ export async function pruneDaemonRuntimes(currentDirectory) {
     if (directory === currentDirectory) continue;
     try {
       const marker = JSON.parse(await fs.readFile(path.join(directory, markerName), 'utf8'));
-      if (!['proxy-mate', 'proxy-mcp'].includes(marker.managed_by) || marker.version !== 1) continue;
+      if (!['proxyfan', 'proxy-mate', 'proxy-mcp'].includes(marker.managed_by) || marker.version !== 1) continue;
       prior.push({ directory, modified: (await fs.stat(directory)).mtimeMs });
     } catch { /* not one of our completed snapshots */ }
   }

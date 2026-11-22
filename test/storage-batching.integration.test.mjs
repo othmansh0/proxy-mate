@@ -8,7 +8,7 @@ import { SessionStore } from '../src/lib/session-store.mjs';
 import { ProxyEngine } from '../src/lib/proxy.mjs';
 
 test('a real SQLite batch failure reaches proxy persistence health and diagnostics', async t => {
-  const rootDir = await mkdtemp(join(tmpdir(), 'proxy-mate-batch-health-'));
+  const rootDir = await mkdtemp(join(tmpdir(), 'proxyfan-batch-health-'));
   const store = new SessionStore({ rootDir });
   const engine = new ProxyEngine({ sessionStore: store, sessionId: 'batch-health' });
   const upstream = http.createServer((_req, res) => res.end('ok'));

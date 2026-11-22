@@ -98,11 +98,11 @@ test('worker receives current additive redaction config, even after lazy startup
   const pool = new BodyWorkerPool({ threshold: 1 });
   t.after(() => pool.close());
   await pool.process(job(Buffer.from('{}')));
-  const previous = process.env.PROXY_MATE_REDACT_BODY_FIELDS;
-  process.env.PROXY_MATE_REDACT_BODY_FIELDS = 'private_*';
+  const previous = process.env.PROXYFAN_REDACT_BODY_FIELDS;
+  process.env.PROXYFAN_REDACT_BODY_FIELDS = 'private_*';
   t.after(() => {
-    if (previous === undefined) delete process.env.PROXY_MATE_REDACT_BODY_FIELDS;
-    else process.env.PROXY_MATE_REDACT_BODY_FIELDS = previous;
+    if (previous === undefined) delete process.env.PROXYFAN_REDACT_BODY_FIELDS;
+    else process.env.PROXYFAN_REDACT_BODY_FIELDS = previous;
   });
   const result = await pool.process(job(Buffer.from('{"private_key":"SECRET"}')));
   assert.equal(await contents(result), '{"private_key":"[REDACTED]"}');

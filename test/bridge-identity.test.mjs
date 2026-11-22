@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-bridge-identity-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-bridge-identity-'));
 const { ControlServer } = await import('../src/lib/control.mjs');
 const { CLIENT_ID_HEADER, normalizeClientId } = await import('../src/lib/client-identity.mjs');
 
