@@ -7,13 +7,13 @@ import { connectionAttemptTimeout, configureConnectionAttempts } from '../src/li
 test('connection attempt configuration rejects invalid values without changing the process policy', () => {
   const before = net.getDefaultAutoSelectFamilyAttemptTimeout();
   for (const value of ['', 'bad', '0', '-1', '9', '10001', '2.5', 'Infinity', '2000 trailing']) {
-    assert.throws(() => configureConnectionAttempts({ PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS: value }), {
+    assert.throws(() => configureConnectionAttempts({ PROXYFAN_CONNECT_ATTEMPT_TIMEOUT_MS: value }), {
       code: 'INVALID_CONNECT_ATTEMPT_TIMEOUT',
     });
     assert.equal(net.getDefaultAutoSelectFamilyAttemptTimeout(), before);
   }
   assert.equal(connectionAttemptTimeout({}), 2000);
-  assert.equal(connectionAttemptTimeout({ PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS: '1500' }), 1500);
+  assert.equal(connectionAttemptTimeout({ PROXYFAN_CONNECT_ATTEMPT_TIMEOUT_MS: '1500' }), 1500);
 });
 
 test('the default policy preserves a viable dual-stack connection across a delayed I/O turn', { timeout: 15000 }, async (t) => {
@@ -28,7 +28,7 @@ test('the default policy preserves a viable dual-stack connection across a delay
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const outcomes = [];
   for (const timeout of [250, undefined]) {
-    configureConnectionAttempts(timeout === undefined ? {} : { PROXY_MATE_CONNECT_ATTEMPT_TIMEOUT_MS: String(timeout) });
+    configureConnectionAttempts(timeout === undefined ? {} : { PROXYFAN_CONNECT_ATTEMPT_TIMEOUT_MS: String(timeout) });
     assert.equal(net.getDefaultAutoSelectFamily(), true);
     assert.equal(net.getDefaultAutoSelectFamilyAttemptTimeout(), timeout ?? 2000);
     const socket = new net.Socket();

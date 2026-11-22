@@ -118,7 +118,7 @@ export class ReverseProxyManager {
 
 export function resolveDestination(target, incomingUrl = '/') {
   const base = target instanceof URL ? target : validateTarget(target);
-  const incoming = new URL(incomingUrl || '/', 'http://proxy-mate.local');
+  const incoming = new URL(incomingUrl || '/', 'http://proxyfan.local');
   const destination = new URL(base);
   const basePath = base.pathname.endsWith('/') ? base.pathname.slice(0, -1) : base.pathname;
   destination.pathname = `${basePath}${incoming.pathname.startsWith('/') ? incoming.pathname : `/${incoming.pathname}`}` || '/';

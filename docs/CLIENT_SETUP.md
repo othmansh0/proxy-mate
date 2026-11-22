@@ -1,23 +1,23 @@
 # MCP client setup
 
-Start with the [README quick start](../README.md). `npx --yes @othmansh01/proxy-mate@latest init --client CLIENT` installs the shared service and connects a client.
+Start with the [README quick start](../README.md). `npx --yes @othmansh01/proxyfan@latest init --client CLIENT` installs the shared service and connects a client.
 
 ## Automatic registration
 
-- `claude`: updates the top-level `mcpServers.proxy-mate` in `~/.claude.json`. With `CLAUDE_CONFIG_DIR`, uses `.claude.json` inside that directory. This is Claude Code's user scope.
+- `claude`: updates the top-level `mcpServers.proxyfan` in `~/.claude.json`. With `CLAUDE_CONFIG_DIR`, uses `.claude.json` inside that directory. This is Claude Code's user scope.
 - `cursor`: updates `~/.cursor/mcp.json`.
 - `claude-desktop`: updates `~/Library/Application Support/Claude/claude_desktop_config.json`.
 - `codex`: runs the installed Codex CLI's `mcp add` command. The CLI manages its own TOML format and supports its normal configuration directory.
 - `json`: installs/reuses the service and prints a `mcpServers` object for manual registration.
 
-Existing JSON files are validated before service installation. Setup replaces only the `proxy-mate` entry, preserves other servers/settings, follows existing configuration-file symlinks, and stores private backups under `~/.proxy-mate/setup-backups`. Invalid JSON is preserved. If a client uses JSON with comments, use `--client json` and edit its configuration through that client.
+Existing JSON files are validated before service installation. Setup replaces only the `proxyfan` entry, preserves other servers/settings, follows existing configuration-file symlinks, and stores private backups under `~/.proxyfan/setup-backups`. Invalid JSON is preserved. If a client uses JSON with comments, use `--client json` and edit its configuration through that client.
 
 Registration affects future client connections. Reconnect an existing MCP session once; setup does not kill agent processes.
 
 ## Preview
 
 ```bash
-npx --yes @othmansh01/proxy-mate@latest init --client claude --dry-run
+npx --yes @othmansh01/proxyfan@latest init --client claude --dry-run
 ```
 
 Preview reads service/configuration metadata but writes no service, certificate, routing or client files. It shows whether setup would install, reuse or upgrade the service and the exact local command/configuration.
@@ -25,12 +25,12 @@ Preview reads service/configuration metadata but writes no service, certificate,
 ## Manual clients
 
 ```bash
-npx --yes @othmansh01/proxy-mate@latest init --client json
+npx --yes @othmansh01/proxyfan@latest init --client json
 ```
 
 Copy the returned `client.config.mcpServers` into your client's MCP settings. Both the Node executable and bridge path are absolute. No GitHub token belongs in the MCP configuration: public npm packages need no registry authentication. The installed runtime works independently of the source checkout or npm cache.
 
-`PROXY_MATE_HOME` can select a separate state directory before running setup. Registration records that absolute path so the daemon and client use the same state. Each state directory has one capture owner; ordinary agents should share the default installed service.
+`PROXYFAN_HOME` can select a separate state directory before running setup. Registration records that absolute path so the daemon and client use the same state. Each state directory has one capture owner; ordinary agents should share the default installed service.
 
 ## Existing services and updates
 
@@ -54,18 +54,20 @@ npm config set @othmansh01:registry https://registry.npmjs.org --location=user
 
 Then run the README init command. A GitHub Packages token is not needed for public releases.
 
-## Migrate from proxy-mcp
+<a id="migrate-from-proxy-mcp"></a>
 
-After the first Proxy Mate release is published, use the new package name:
+## Migrate from Proxy Mate
+
+For either previous package, install ProxyFan during an idle capture window.
 
 ```bash
-npx --yes @othmansh01/proxy-mate@latest init --upgrade --client claude
+npx --yes @othmansh01/proxyfan@latest init --upgrade --client claude
 ```
 
-Finish active capture before upgrading. Repeat plain `init --client CLIENT` for each additional client, then reconnect it. Setup replaces an owned `proxy-mcp` bridge entry with `proxy-mate` and backs up the original configuration. A custom server using the former key is preserved; remove it manually if it is an obsolete installation. New installs use `~/.proxy-mate`; existing installs reuse `~/.proxy-mcp` in place, preserving the CA, SQLite sessions and absolute captured-body paths. Do not move or copy a live state directory. Backups remain under the selected state directory's `setup-backups`.
+Finish active capture before upgrading. Repeat plain `init --client CLIENT` for each additional client, then reconnect it. Setup replaces owned `proxy-mate` and `proxy-mcp` bridge entries with `proxyfan` and backs up the original configuration. A custom server using the former key is preserved; remove it manually if it is an obsolete installation. New installs use `~/.proxyfan`; existing installs reuse `~/.proxy-mcp` or `~/.proxy-mate` in place, preserving the CA, SQLite sessions and absolute captured-body paths. Do not move or copy a live state directory. Backups remain under the selected state directory's `setup-backups`.
 
-Use `PROXY_MATE_*` environment variables for new configuration. Every former `PROXY_MCP_*` variable remains accepted, with the new name taking precedence when both are set. Installed service environments use the new names. `PROXY_MATE_HOME` explicitly selects a different root; it does not migrate existing data. The `proxy-mcp` executable remains an alias within the new package.
+Use `PROXYFAN_*` environment variables for new configuration. Every former `PROXY_MATE_*` or `PROXY_MCP_*` variable remains accepted, with the new name taking precedence when both are set. Installed service environments use the new names. `PROXYFAN_HOME` explicitly selects a different root; it does not migrate existing data. The `proxy-mate` and `proxy-mcp` executables remain aliases within the new package.
 
-Old `proxy-mcp://` resource links and subscriptions still work. New links use `proxy-mate://`. Session exports, plugin catalogs and WebSocket snapshots/transcripts accept both names and write the new format identifiers. Existing certificates retain their original subject until you explicitly rotate the CA. The daemon accepts already connected pre-rename bridges; reconnect clients to get the new branding and compact tool results.
+Old `proxy-mate://` and `proxy-mcp://` resource links and subscriptions still work. New links use `proxyfan://`. Session exports, plugin catalogs and WebSocket snapshots/transcripts accept both prior names and write the new format identifiers. Existing certificates retain their original subject until you explicitly rotate the CA. The daemon accepts already connected pre-rename bridges; reconnect clients to get the new branding and compact tool results.
 
-GitHub source and releases now live at [othmansh0/proxy-mate](https://github.com/othmansh0/proxy-mate). Update existing clones with `git remote set-url origin https://github.com/othmansh0/proxy-mate.git`. The npm package is a new identity: an old package installation will not automatically update to the new name. Maintainers must configure npm trusted publishing for repository `proxy-mate` as described in [packaging](PACKAGING.md).
+GitHub source and releases now live at [othmansh0/proxyfan](https://github.com/othmansh0/proxyfan). Update existing clones with `git remote set-url origin https://github.com/othmansh0/proxyfan.git`. The npm package is a new identity: an old package installation will not automatically update to the new name. Maintainers must configure npm trusted publishing for repository `proxyfan` as described in [packaging](PACKAGING.md).

@@ -49,7 +49,7 @@ export async function verifySimulatorCertificate({ udid, keyPath, certPath, deve
     proxy.server?.prependListener('connection', (socket) => {
       if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(socket.remoteAddress)) socket.destroy();
     });
-    const target = `https://proxy-mate-verify.invalid/${nonce}`;
+    const target = `https://proxyfan-verify.invalid/${nonce}`;
     await proxy.forGet(target).thenReply(200, nonce, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
     const { stdout } = await exec('/usr/bin/xcrun', ['simctl', 'spawn', udid, binary, String(proxy.port), target, nonce], {
       env: { ...process.env, DEVELOPER_DIR: listed.preflight.developer_dir }, signal, timeout: 25_000, maxBuffer: 64 * 1024,

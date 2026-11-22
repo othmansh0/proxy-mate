@@ -8,9 +8,9 @@ const DEFAULT_FIELD_PATTERNS = Object.freeze([
   'secret', 'session', 'token',
 ]);
 const ENV_KEYS = Object.freeze({
-  headers: 'PROXY_MATE_REDACT_HEADERS',
-  query: 'PROXY_MATE_REDACT_QUERY_FIELDS',
-  body: 'PROXY_MATE_REDACT_BODY_FIELDS',
+  headers: 'PROXYFAN_REDACT_HEADERS',
+  query: 'PROXYFAN_REDACT_QUERY_FIELDS',
+  body: 'PROXYFAN_REDACT_BODY_FIELDS',
 });
 const MAX_EXTRA_PATTERNS = 64;
 const MAX_PATTERN_LENGTH = 80;
@@ -80,7 +80,7 @@ export function redactUrl(value, redactedFields = [], config = createRedactionCo
   if (!value) return value;
   try {
     const absolute = /^[A-Za-z][A-Za-z\d+.-]*:/.test(String(value));
-    const url = absolute ? new URL(value) : new URL(value, 'http://proxy-mate.invalid');
+    const url = absolute ? new URL(value) : new URL(value, 'http://proxyfan.invalid');
     if (url.username) {
       url.username = '[REDACTED]';
       redactedFields.push('url:username');

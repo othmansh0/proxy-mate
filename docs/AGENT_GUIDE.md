@@ -4,7 +4,7 @@ For everyday iOS app debugging, start with [Agent network workflow](AGENT_NETWOR
 
 ## Mental model
 
-`proxy-mate` is a local MCP server for selectively intercepting HTTP(S) traffic,
+`proxyfan` is a local MCP server for selectively intercepting HTTP(S) traffic,
 recording bounded capture data, and applying ordered proxy rules. It is not a
 general remote proxy or a browser-based control plane.
 
@@ -113,21 +113,21 @@ is invoked by a small `tools.mjs` adapter.
 
 ## Environment-variable grants
 
-The `PROXY_MATE_*` variables are the security model: each unlocks one narrow,
+The `PROXYFAN_*` variables are the security model: each unlocks one narrow,
 explicit capability that defaults off or safe. None are read from caller
 input; only the server process's own environment.
 
 | Variable | Unlocks |
 | --- | --- |
-| `PROXY_MATE_HOME` | Overrides the state directory (default `~/.proxy-mate`) holding config, sessions, and PID/handshake files. |
-| `PROXY_MATE_ALLOWED_PATHS` | Extra filesystem roots (colon/OS-separated) callers may reference, beyond the state directory and CWD; still symlink-contained. |
-| `PROXY_MATE_ALLOW_SENSITIVE` | Grants the `sensitive` control-plane scope and permits `include_sensitive=true` reads of unredacted flow data; set only for a trusted, temporary debugging session. |
-| `PROXY_MATE_STORE_SENSITIVE` | Permits `capture_body_mode=all`, i.e. persisting unredacted bodies to a session at all. |
-| `PROXY_MATE_PERSISTENCE_FAIL_CLOSED` | Stops capture instead of silently continuing when session persistence fails. |
-| `PROXY_MATE_ENABLE_TRANSFORM_PLUGINS` | Required to register a live `request`/`response` transform-plugin rule — by tool call, rule import, or startup replay of a persisted rule; without it, the registration attempt is rejected (`TRANSFORM_PLUGINS_NOT_ENABLED`) though the plugin itself can still be stored and test-executed offline. `websocket_offline` plugins are never live rules and are unaffected. |
-| `PROXY_MATE_MAX_FLOWS` | Caps the in-memory flow list size (default 500). |
-| `PROXY_MATE_REDACT_HEADERS`, `PROXY_MATE_REDACT_QUERY_FIELDS`, `PROXY_MATE_REDACT_BODY_FIELDS` | Additive safe-glob patterns appended to the default redaction lists for headers, query fields, and body fields; cannot remove a default pattern. |
-| `PROXY_MATE_PREVIEW_DEVICE_SET` | Overrides the Xcode Preview simulator device set path used for CA trust setup. |
+| `PROXYFAN_HOME` | Overrides the state directory (default `~/.proxyfan`) holding config, sessions, and PID/handshake files. |
+| `PROXYFAN_ALLOWED_PATHS` | Extra filesystem roots (colon/OS-separated) callers may reference, beyond the state directory and CWD; still symlink-contained. |
+| `PROXYFAN_ALLOW_SENSITIVE` | Grants the `sensitive` control-plane scope and permits `include_sensitive=true` reads of unredacted flow data; set only for a trusted, temporary debugging session. |
+| `PROXYFAN_STORE_SENSITIVE` | Permits `capture_body_mode=all`, i.e. persisting unredacted bodies to a session at all. |
+| `PROXYFAN_PERSISTENCE_FAIL_CLOSED` | Stops capture instead of silently continuing when session persistence fails. |
+| `PROXYFAN_ENABLE_TRANSFORM_PLUGINS` | Required to register a live `request`/`response` transform-plugin rule — by tool call, rule import, or startup replay of a persisted rule; without it, the registration attempt is rejected (`TRANSFORM_PLUGINS_NOT_ENABLED`) though the plugin itself can still be stored and test-executed offline. `websocket_offline` plugins are never live rules and are unaffected. |
+| `PROXYFAN_MAX_FLOWS` | Caps the in-memory flow list size (default 500). |
+| `PROXYFAN_REDACT_HEADERS`, `PROXYFAN_REDACT_QUERY_FIELDS`, `PROXYFAN_REDACT_BODY_FIELDS` | Additive safe-glob patterns appended to the default redaction lists for headers, query fields, and body fields; cannot remove a default pattern. |
+| `PROXYFAN_PREVIEW_DEVICE_SET` | Overrides the Xcode Preview simulator device set path used for CA trust setup. |
 
 ## Adding an MCP tool end-to-end
 
@@ -153,7 +153,7 @@ input; only the server process's own environment.
 
 ## Tests and checks
 
-Run repository tests **without** setting `PROXY_MATE_HOME`. Under `node --test`, each test process gets its own private temporary state directory, so fixtures that replace or remove the state root can never reach an installed daemon's `~/.proxy-mcp` or `~/.proxy-mate`, and parallel test files never share rules, claims, leases or sessions. The real `networksetup` is refused inside test runs. Exporting one `PROXY_MATE_HOME` for the whole suite would make parallel files share state and become flaky.
+Run repository tests **without** setting `PROXYFAN_HOME`. Under `node --test`, each test process gets its own private temporary state directory, so fixtures that replace or remove the state root can never reach an installed daemon's `~/.proxy-mcp` or `~/.proxyfan`, and parallel test files never share rules, claims, leases or sessions. The real `networksetup` is refused inside test runs. Exporting one `PROXYFAN_HOME` for the whole suite would make parallel files share state and become flaky.
 
 ```sh
 npm test                                      # full Node test suite

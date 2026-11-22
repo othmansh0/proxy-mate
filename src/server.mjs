@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readEnvironment } from './lib/environment.mjs';
-// proxy-mate — local HTTP(S) capture, routing, mocking, and Simulator setup.
+// proxyfan — local HTTP(S) capture, routing, mocking, and Simulator setup.
 //
 // Two run shapes share the same internals:
 //   * stdio MCP server (default)  — forwards to the shared daemon. It never
@@ -93,7 +93,7 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (['get_started', 'acquire_capture_lease', 'finish_capture_task'].includes(tool) && args?.task_id !== undefined) {
       client.task_id = normalizeTaskId(args.task_id);
     }
-    if (closing) throw new Error('proxy-mate is shutting down.');
+    if (closing) throw new Error('proxyfan is shutting down.');
     // Resolve the handshake for EVERY call: launchd restarts rotate the token
     // and can change the port. Never retry a mutation after an ambiguous error.
     if (!localReady) {
@@ -111,8 +111,8 @@ async function runStdio({ requireDaemon = false } = {}) {
       if (daemonExpected) {
         throw Object.assign(new Error('The shared daemon is unavailable after a bounded readiness wait. This MCP connection remains open.'), {
           code: 'DAEMON_UNAVAILABLE', retryable: true,
-          recovery: ['Run proxy-mate status and inspect the daemon stderr log.',
-            'If not installed, run proxy-mate install with the capture options for your workflow.',
+          recovery: ['Run proxyfan status and inspect the daemon stderr log.',
+            'If not installed, run proxyfan install with the capture options for your workflow.',
             'Retry the tool call after daemon recovery; do not restart the MCP client.'],
         });
       }
@@ -153,7 +153,7 @@ async function runStdio({ requireDaemon = false } = {}) {
     if (flowId && /flow|request|curl/.test(tool)) void resourceSubscriptions.notifyLiveFlow(flowId).catch(() => {});
     return value;
   };
-  registerMcpTools(mcp, rememberCaptureLease(observableDispatch), { legacyAliases: readEnvironment('PROXY_MATE_LEGACY_OUTPUT') === '1' });
+  registerMcpTools(mcp, rememberCaptureLease(observableDispatch), { legacyAliases: readEnvironment('PROXYFAN_LEGACY_OUTPUT') === '1' });
   registerMcpResources(mcp, observableDispatch);
   registerMcpPrompts(mcp);
   const transport = new StdioServerTransport();
@@ -227,7 +227,7 @@ async function runDaemon(args) {
       if (result?.queue_drained === false) throw new Error('Control queue shutdown budget exhausted');
     });
     await step('operator_ui', 1000, () => tools.stop_operator_ui());
-    const configuredDrain = Number(readEnvironment('PROXY_MATE_DRAIN_MS') ?? 8000);
+    const configuredDrain = Number(readEnvironment('PROXYFAN_DRAIN_MS') ?? 8000);
     const graceMs = Math.max(0, Math.min(Number.isFinite(configuredDrain) && configuredDrain >= 0 ? configuredDrain : 8000, remaining() - 3000));
     await step('capture', Math.max(0, remaining() - 2000), () => tools[INTERNAL_CAPTURE_CONTROL].stop_proxy({}, { skipRouting: true, graceMs }));
     await step('pid', 250, () => clearPidFile());
@@ -309,7 +309,7 @@ async function runDaemon(args) {
     caKeyPath: args.caKeyPath,
     caCertPath: args.caCertPath,
   });
-  process.stderr.write(`[proxy-mate] proxy listening on :${engine.port}\n`);
+  process.stderr.write(`[proxyfan] proxy listening on :${engine.port}\n`);
 
   phaseStart('routing');
   let routing = null;
@@ -335,14 +335,14 @@ async function runDaemon(args) {
         certPath: activeCaCert, keyPath: engine.caKeyPath, applyRouting,
       }));
     }
-    process.stderr.write(`[proxy-mate] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
+    process.stderr.write(`[proxyfan] routing on for ${routing.networkService} via ${routing.pacUrl}\n`);
   }
 
   phaseStart('trust');
   if (!args.skipTrust) {
     trust ??= await trustCaOnSimulators(activeCaCert);
     if (trust.trusted?.length) {
-      process.stderr.write(`[proxy-mate] CA imported on ${trust.trusted.length} simulator(s): ${trust.trusted.map((s) => s.name).join(', ')}\n`);
+      process.stderr.write(`[proxyfan] CA imported on ${trust.trusted.length} simulator(s): ${trust.trusted.map((s) => s.name).join(', ')}\n`);
     }
   }
 
@@ -358,14 +358,14 @@ async function runDaemon(args) {
         failures.push({ rule_id: r.rule_id ?? r.id ?? null, error: error?.message ?? String(error) });
       }
     }
-    if (replayed) process.stderr.write(`[proxy-mate] replayed ${replayed} persisted rule(s)\n`);
+    if (replayed) process.stderr.write(`[proxyfan] replayed ${replayed} persisted rule(s)\n`);
     if (failures.length) {
       engine.diagnostics.push({ kind: 'rule-replay-failures', timestamp: Date.now(), failures });
-      process.stderr.write(`[proxy-mate] failed to replay ${failures.length} persisted rule(s); inspect get_diagnostics\n`);
+      process.stderr.write(`[proxyfan] failed to replay ${failures.length} persisted rule(s); inspect get_diagnostics\n`);
     }
   } catch (error) {
     engine.diagnostics.push({ kind: 'rule-load-error', timestamp: Date.now(), error: error?.message ?? String(error) });
-    process.stderr.write(`[proxy-mate] could not load persisted rules: ${error?.message ?? error}\n`);
+    process.stderr.write(`[proxyfan] could not load persisted rules: ${error?.message ?? error}\n`);
   }
 
   phaseStart('watcher');
@@ -382,7 +382,7 @@ async function runDaemon(args) {
   await writePidFile(process.pid);
   await patchState({ ...await readProcessIdentity(process.pid), control_port: controlPort, daemon_proxy_port: proxyPort, pid: process.pid, runtime_role: 'daemon', runtime_entry: url.fileURLToPath(import.meta.url) });
   await ctrl.start();
-  process.stderr.write(`[proxy-mate] control plane listening on :${ctrl.port}\n`);
+  process.stderr.write(`[proxyfan] control plane listening on :${ctrl.port}\n`);
   await recordPreviousExit();
   phaseStart('ready');
   const readyDetails = { ...durations, proxy_port: engine.port, pac_port: pacServer.port ?? pacPort, control_port: ctrl.port };
@@ -505,21 +505,21 @@ function validateCliArgs(args) {
 }
 
 function printHelp() {
-  process.stderr.write(`proxy-mate v${SERVER_VERSION} — selective HTTP(S) interception for iOS Simulator testing
+  process.stderr.write(`proxyfan v${SERVER_VERSION} — selective HTTP(S) interception for iOS Simulator testing
 
 USAGE
-  proxy-mate init [--client name]    Install the service and connect a client (default claude)
-  proxy-mate init --dry-run          Preview setup without changing services or client files
-  proxy-mate init --upgrade          Upgrade an idle service; keep existing capture evidence
-  proxy-mate                         Run the thin stdio MCP bridge to the shared daemon
-  proxy-mate --in-process            Explicit single-client development engine
-  proxy-mate --require-daemon        Shared-daemon MCP client; never owns capture or routing
-  proxy-mate --daemon [opts]         Long-lived daemon (manages proxy, PAC, sim trust, control plane)
-  proxy-mate doctor                  Inspect ports, stop only a verified stale daemon, restore recorded PAC state
-  proxy-mate install [opts]          Install LaunchAgent for persistent daemon (~/Library/LaunchAgents)
-  proxy-mate uninstall               Remove the LaunchAgent
-  proxy-mate status                  Daemon + LaunchAgent + handshake state
-  proxy-mate setup                   Friendly interactive capture setup; app-only by default
+  proxyfan init [--client name]    Install the service and connect a client (default claude)
+  proxyfan init --dry-run          Preview setup without changing services or client files
+  proxyfan init --upgrade          Upgrade an idle service; keep existing capture evidence
+  proxyfan                         Run the thin stdio MCP bridge to the shared daemon
+  proxyfan --in-process            Explicit single-client development engine
+  proxyfan --require-daemon        Shared-daemon MCP client; never owns capture or routing
+  proxyfan --daemon [opts]         Long-lived daemon (manages proxy, PAC, sim trust, control plane)
+  proxyfan doctor                  Inspect ports, stop only a verified stale daemon, restore recorded PAC state
+  proxyfan install [opts]          Install LaunchAgent for persistent daemon (~/Library/LaunchAgents)
+  proxyfan uninstall               Remove the LaunchAgent
+  proxyfan status                  Daemon + LaunchAgent + handshake state
+  proxyfan setup                   Friendly interactive capture setup; app-only by default
 
 INIT OPTIONS
   --client <name>          claude (default), codex, cursor, claude-desktop or json
@@ -549,7 +549,7 @@ DAEMON OPTIONS
   --tls-passthrough <list>  Comma-separated hostnames to tunnel raw (cert-pinned hosts)
 
 UNINSTALL OPTIONS
-  --keep-ca                 Keep the proxy-mate CA in the user login keychain
+  --keep-ca                 Keep the proxyfan CA in the user login keychain
 
 State lives in ${STATE_DIR}.
 `);
@@ -645,7 +645,7 @@ async function runSetup() {
   if (!process.stdin.isTTY) throw Object.assign(new Error('Interactive setup needs a terminal. Use the set-up-capture MCP prompt in chat instead.'), { code: 'INTERACTIVE_TERMINAL_REQUIRED' });
   const handshake = await readHandshake();
   if (!handshake || !await probeDaemon(handshake.controlUrl, handshake.token)) {
-    throw new Error('Install or start the shared service first with: proxy-mate install --no-routing --no-trust-ca');
+    throw new Error('Install or start the shared service first with: proxyfan install --no-routing --no-trust-ca');
   }
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -669,7 +669,7 @@ async function main() {
     });
     if (args.dryRun || result.client?.status === 'manual') process.stdout.write(JSON.stringify(result, null, 2) + '\n');
     else {
-      process.stdout.write(`Proxy Mate ${result.service.version} ready. Service ${result.service.status}.\n`);
+      process.stdout.write(`ProxyFan ${result.service.version} ready. Service ${result.service.status}.\n`);
       process.stdout.write(`${args.client ?? 'claude'}: ${result.client.status} (${result.client.config_path})\n`);
       if (result.client.backup_path) process.stdout.write(`Previous client configuration: ${result.client.backup_path}\n`);
       if (result.update_available) process.stdout.write(`${result.update_available}\n`);
@@ -692,6 +692,6 @@ async function main() {
 
 main().catch((e) => {
   const detail = process.argv.includes('setup') || process.argv.includes('init') ? e?.message || String(e) : e?.stack || e;
-  process.stderr.write(`[proxy-mate] fatal: ${detail}\n`);
+  process.stderr.write(`[proxyfan] fatal: ${detail}\n`);
   process.exit(1);
 });

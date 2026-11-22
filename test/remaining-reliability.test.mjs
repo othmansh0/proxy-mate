@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const state = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-recovery-test-'));
-process.env.PROXY_MATE_HOME = state;
+process.env.PROXYFAN_HOME = state;
 const { ProxyEngine, ensureCA } = await import('../src/lib/proxy.mjs');
 const { composeHttpRequest } = await import('../src/lib/request-tools.mjs');
 const { flowBodyToMockBody, storeFlowBody } = await import('../src/lib/bodies.mjs');
@@ -25,7 +25,7 @@ test('sustained RSS pressure runs cleanup before a supervised restart', async ()
     installShutdownHandlers(async () => { console.log('cleanup-completed'); });
     setInterval(() => {}, 1000);`;
   await assert.rejects(promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], {
-    env: { ...process.env, PROXY_MATE_MAX_RSS_MB: '128' }, timeout: 15000,
+    env: { ...process.env, PROXYFAN_MAX_RSS_MB: '128' }, timeout: 15000,
   }), (error) => {
     assert.equal(error.code, 1);
     assert.match(error.stderr, /sustained memory pressure/);

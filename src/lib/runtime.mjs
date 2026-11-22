@@ -31,7 +31,7 @@ export async function acquireRuntime({ directory = STATE_DIR, wait = true, lock 
     });
   } catch (cause) {
     if (cause.code !== 'ELOCKED') throw cause;
-    throw Object.assign(new Error('Another proxy-mate process owns this state directory. Use the shared daemon or a separate PROXY_MATE_HOME.'), {
+    throw Object.assign(new Error('Another proxyfan process owns this state directory. Use the shared daemon or a separate PROXYFAN_HOME.'), {
       code: 'RUNTIME_BUSY', retryable: true,
     });
   }
@@ -40,9 +40,9 @@ export async function acquireRuntime({ directory = STATE_DIR, wait = true, lock 
 export async function reconcileRuntime(options = {}) {
   const state = await readState();
   const stale = await isStateStale(options);
-  // Includes pre-lock releases of proxy-mate: never take over their live state.
+  // Includes pre-lock releases of proxyfan: never take over their live state.
   if (state?.pid && state.pid !== process.pid && !stale) {
-    throw Object.assign(new Error('A live proxy-mate process owns the recorded state. Stop that process before starting a new runtime.'), {
+    throw Object.assign(new Error('A live proxyfan process owns the recorded state. Stop that process before starting a new runtime.'), {
       code: 'RUNTIME_BUSY', retryable: true,
     });
   }
@@ -72,12 +72,12 @@ export function installShutdownHandlers(cleanup, { stdin = false, timeoutMs = 20
   readIntent = readShutdownIntent, clearIntent = clearShutdownIntent } = {}) {
   let stopping = null;
   let pressureSamples = 0;
-  const configuredRss = Number(readEnvironment('PROXY_MATE_MAX_RSS_MB') ?? 1024);
+  const configuredRss = Number(readEnvironment('PROXYFAN_MAX_RSS_MB') ?? 1024);
   const maxRss = Number.isFinite(configuredRss) && configuredRss >= 128 ? configuredRss * 1024 * 1024 : 1024 * 1024 * 1024;
   const memoryTimer = setInterval(() => {
     pressureSamples = proc.memoryUsage().rss > maxRss ? pressureSamples + 1 : 0;
     if (pressureSamples >= 3) {
-      process.stderr.write('[proxy-mate] sustained memory pressure: draining and restoring routing before exit; launchd will restart the daemon\n');
+      process.stderr.write('[proxyfan] sustained memory pressure: draining and restoring routing before exit; launchd will restart the daemon\n');
       void shutdown(1, 'memory_pressure');
     }
   }, 2000);

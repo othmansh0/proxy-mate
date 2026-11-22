@@ -1,4 +1,4 @@
-// proxy-mate doctor — port-based orphan detection and safe kill.
+// proxyfan doctor — port-based orphan detection and safe kill.
 //
 // Critical rule: only SIGTERM/SIGKILL processes whose `ps -p PID -o comm=` is
 // "node" (our binary is node + server.mjs). Never `pkill -f` — that matches
@@ -140,7 +140,7 @@ function processAlive(pid) {
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 // One-shot doctor sweep: scan, kill orphans, return a report. Used by the
-// `proxy-mate doctor` CLI subcommand and the kill_orphan_proxy MCP tool.
+// `proxyfan doctor` CLI subcommand and the kill_orphan_proxy MCP tool.
 export async function doctorSweep({ ports, force = false } = {}) {
   const before = await scanPorts(ports);
   const killed = await killOrphans({ ports, force });

@@ -283,7 +283,7 @@ export class BreakpointManager {
       throw new BreakpointError(
         'SENSITIVE_BREAKPOINT_ACCESS_NOT_GRANTED',
         'Sensitive breakpoint reads require the server-level sensitive-data grant.',
-        { recovery: ['Restart a trusted local session with PROXY_MATE_ALLOW_SENSITIVE=1.'] },
+        { recovery: ['Restart a trusted local session with PROXYFAN_ALLOW_SENSITIVE=1.'] },
       );
     }
   }
@@ -420,7 +420,7 @@ function mapAction(direction, decision, maxBodyBytes) {
       const response = {
         statusCode: 503,
         headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
-        body: 'Request aborted by proxy-mate breakpoint',
+        body: 'Request aborted by proxyfan breakpoint',
       };
       return direction === 'request' ? { response } : response;
     }

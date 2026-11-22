@@ -1,5 +1,5 @@
 export interface ProxyClientOptions {
-  /** Absolute daemon state directory. Defaults to PROXY_MATE_HOME, an existing legacy root, or ~/.proxy-mate. */
+  /** Absolute daemon state directory. Defaults to PROXYFAN_HOME, an existing legacy root, or ~/.proxyfan. */
   home?: string;
   /** Bounded readiness wait before each call, 0–60000 ms. Default 15000. */
   readyTimeoutMs?: number;

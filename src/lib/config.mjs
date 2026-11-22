@@ -4,18 +4,21 @@ import { readFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { readEnvironment } from './environment.mjs';
 
 // A single overridable data root keeps runtime files consistent and makes the
-// server testable without touching a developer's real ~/.proxy-mate directory.
+// server testable without touching a developer's real ~/.proxyfan directory.
 export function resolveStateDirectory({ home = os.homedir(), env = process.env, exists = existsSync } = {}) {
-  const explicit = readEnvironment('PROXY_MATE_HOME', env);
+  const explicit = readEnvironment('PROXYFAN_HOME', env);
   if (explicit) return path.resolve(explicit);
   // Under Node's test runner, never fall back to the developer's real state
   // directory: a test once deleted ~/.proxy-mcp while a daemon was using it.
   // Each test process gets its own private temporary home instead.
-  if (env.NODE_TEST_CONTEXT) return mkdtempSync(path.join(os.tmpdir(), 'proxy-mate-test-home-'));
+  if (env.NODE_TEST_CONTEXT) return mkdtempSync(path.join(os.tmpdir(), 'proxyfan-test-home-'));
   // Reuse existing installations in place: stored body paths, CA trust and
   // bridges may still refer to this directory. Never copy or rotate the CA.
-  const legacy = path.join(home, '.proxy-mcp');
-  return exists(legacy) ? legacy : path.join(home, '.proxy-mate');
+  for (const name of ['.proxy-mcp', '.proxy-mate']) {
+    const previous = path.join(home, name);
+    if (exists(previous)) return previous;
+  }
+  return path.join(home, '.proxyfan');
 }
 
 export const STATE_DIR = resolveStateDirectory();
@@ -23,13 +26,13 @@ export const STATE_DIR = resolveStateDirectory();
 // Single source of truth for the live-transform grant. The plugin catalog and
 // rules.json are both durable, so the grant has to be re-read per run at every
 // registration path rather than trusted from the session that first set it.
-export const TRANSFORM_PLUGIN_GRANT_ENV = 'PROXY_MATE_ENABLE_TRANSFORM_PLUGINS';
+export const TRANSFORM_PLUGIN_GRANT_ENV = 'PROXYFAN_ENABLE_TRANSFORM_PLUGINS';
 
 export function liveTransformGrantEnabled() {
   return readEnvironment(TRANSFORM_PLUGIN_GRANT_ENV) === '1';
 }
 
-export const SERVER_NAME = 'proxy-mate';
+export const SERVER_NAME = 'proxyfan';
 // npm version updates the package/lock once; installed snapshots include this manifest.
 export const SERVER_VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 export const PROXY_PORT_DEFAULT = 8080;

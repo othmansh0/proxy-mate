@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-lease-integration-'));
-process.env.PROXY_MATE_HOME = directory;
+process.env.PROXYFAN_HOME = directory;
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
 const { ControlServer } = await import('../src/lib/control.mjs');
@@ -33,7 +33,7 @@ test('two real MCP bridges coordinate shared mutations while reads, exports and 
     const client = new Client({ name: `lease-client-${index}`, version: '1' });
     clients.push(client);
     await client.connect(new StdioClientTransport({ command: process.execPath, args: ['src/client.mjs'],
-      cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXY_MATE_HOME: directory }, stderr: 'pipe' }));
+      cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PROXYFAN_HOME: directory }, stderr: 'pipe' }));
   }
   const call = async (index, name, args = {}) => {
     const result = await clients[index].callTool({ name, arguments: args });

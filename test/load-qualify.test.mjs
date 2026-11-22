@@ -37,7 +37,7 @@ test('owned busy children receive SIGKILL if SIGTERM is ignored', { timeout: 400
 test('four-second real daemon smoke reports traffic and cleans all owned resources', { timeout: 20000 }, async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'load-smoke-'));
   const output = path.join(dir, 'report.json');
-  const child = spawn(process.execPath, ['scripts/load-qualify.mjs', '--seconds', '4', '--cpu-factor', '0', '--bridges', '2', '--guardian', '--subscriptions', '--concurrency', '2', '--json', output], { env: { ...process.env, PROXY_MATE_HOME: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['scripts/load-qualify.mjs', '--seconds', '4', '--cpu-factor', '0', '--bridges', '2', '--guardian', '--subscriptions', '--concurrency', '2', '--json', output], { env: { ...process.env, PROXYFAN_HOME: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = ''; child.stderr.on('data', c => { stderr += c; }); child.stdout.resume();
   try {
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });

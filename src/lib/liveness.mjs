@@ -102,7 +102,7 @@ export async function probeLiveness({ directory = STATE_DIR, timeoutMs = 1000, r
         res.on('end', () => {
           try {
             const parsed = JSON.parse(body);
-            finish(res.statusCode === 200 && parsed?.ok === true && parsed.service === 'proxy-mate-liveness' ? parsed : null);
+            finish(res.statusCode === 200 && parsed?.ok === true && parsed.service === 'proxyfan-liveness' ? parsed : null);
           } catch { finish(null); }
         });
       });

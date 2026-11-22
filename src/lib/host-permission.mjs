@@ -3,11 +3,11 @@ import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
 
-export const HOST_CERTIFICATE_EXPLANATION = 'Proxy Mate needs permission to trust its debugging certificate in your login Keychain so it can inspect HTTPS traffic routed through the local proxy.\n\nThis step does not request access to saved Keychain passwords. Enter your Mac password only in the macOS security dialog that follows.\n\nCertificate trust remains until removed and is broader than your chosen capture scope. Captured data is stored locally and can be returned to connected MCP clients.';
+export const HOST_CERTIFICATE_EXPLANATION = 'ProxyFan needs permission to trust its debugging certificate in your login Keychain so it can inspect HTTPS traffic routed through the local proxy.\n\nThis step does not request access to saved Keychain passwords. Enter your Mac password only in the macOS security dialog that follows.\n\nCertificate trust remains until removed and is broader than your chosen capture scope. Captured data is stored locally and can be returned to connected MCP clients.';
 
 export const HOST_CERTIFICATE_DIALOG = `on run arguments
   try
-    set answer to display dialog (item 1 of arguments) with title "Proxy Mate — Certificate Permission" buttons {"Cancel", "Continue"} default button "Cancel" cancel button "Cancel" with icon caution giving up after 120
+    set answer to display dialog (item 1 of arguments) with title "ProxyFan — Certificate Permission" buttons {"Cancel", "Continue"} default button "Cancel" cancel button "Cancel" with icon caution giving up after 120
     if gave up of answer then return "cancelled"
     return button returned of answer
   on error number -128

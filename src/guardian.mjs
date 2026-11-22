@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readEnvironment } from './lib/environment.mjs';
 import { pathToFileURL } from 'node:url';
 import { realpathSync } from 'node:fs';
 import { createGuardian } from './lib/guardian.mjs';
@@ -15,9 +16,9 @@ export function startGuardian({ tick = createGuardian(), log = logLine,
   let busy = false, stopping = false, current = Promise.resolve(), stopped;
   let pacHost;
   const ready = Promise.resolve().then(async () => {
-    if (env.PROXY_MATE_PAC_HOST !== 'guardian') return;
+    if (readEnvironment('PROXYFAN_PAC_HOST', env) !== 'guardian') return;
     try {
-      pacHost = pacHostFactory({ ...pacHostOptions, port: Number(env.PROXY_MATE_PAC_PORT ?? 8081) });
+      pacHost = pacHostFactory({ ...pacHostOptions, port: Number(readEnvironment('PROXYFAN_PAC_PORT', env) ?? 8081) });
       await pacHost.start();
       log('guardian', 'PAC host started', { port: pacHost.port });
     } catch (error) {

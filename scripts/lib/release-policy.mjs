@@ -13,10 +13,10 @@ export function checkReleaseToolchain(versions, npmVersion) {
 }
 
 export function checkManifest(pkg, lock, { access, registry, tag } = {}) {
-  if (pkg.name !== '@othmansh01/proxy-mate' || pkg.publishConfig?.registry !== 'https://registry.npmjs.org'
+  if (pkg.name !== '@othmansh01/proxyfan' || pkg.publishConfig?.registry !== 'https://registry.npmjs.org'
     || pkg.publishConfig?.access !== 'public' || pkg.private
     || access && access !== 'public' || registry && registry.replace(/\/$/, '') !== 'https://registry.npmjs.org') {
-    throw new Error('Publish @othmansh01/proxy-mate only to public npm with --access public.');
+    throw new Error('Publish @othmansh01/proxyfan only to public npm with --access public.');
   }
   const release = releaseVersion(pkg.version);
   if (release.prerelease && (tag ?? pkg.publishConfig.tag ?? 'latest') === 'latest') {

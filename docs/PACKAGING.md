@@ -1,12 +1,12 @@
 # Public releases and versioning
 
-Package: **`@othmansh01/proxy-mate`** on **npm**, with source and release assets at `othmansh0/proxy-mate`. GitHub Packages is no longer required. People install a published version with:
+Package: **`@othmansh01/proxyfan`** on **npm**, with source and release assets at `othmansh0/proxyfan`. GitHub Packages is no longer required. People install a published version with:
 
 ```bash
-npx --yes @othmansh01/proxy-mate@latest init --client claude
+npx --yes @othmansh01/proxyfan@latest init --client claude
 ```
 
-The first public release is **0.9.0**, published on 16 November 2026. It is pre-1.0 software; keep the documented platform and capture limits visible. Building a checkout does not publish it; new releases use the version-tagged workflow below.
+The first ProxyFan release is **0.11.0**. Versions through 0.10.0 were published as `@othmansh01/proxy-mate`. It is pre-1.0 software; keep the documented platform and capture limits visible. Building a checkout does not publish it; new releases use the version-tagged workflow below.
 
 ## One-time owner setup
 
@@ -33,7 +33,7 @@ npm config set @othmansh01:registry https://registry.npmjs.org --location=user
 
 ### 3. Bootstrap the npm package once
 
-The manual **0.9.0** bootstrap is complete. Its registry integrity matches the qualified artifact, and installation from npm without credentials passed. To reproduce a qualified artifact, use a clean checkout with a physical node_modules directory (not npm-linked dependencies) and the **official Node 24.22.2 distribution** with npm 11.19.1, matching the pinned release publisher. Homebrew builds can ship a different compression library despite the same Node version. The builder also checks the publisher's zlib version and discards npm's regenerable hidden dependency-metadata cache so warm and cold installs include the same dependency files. Consumer installs continue to support Node 22+.
+A new npm name has its own publication permissions. For the first ProxyFan version, use the exact qualified tarball for the initial public publish if trusted publishing is not yet configured. Verify its registry integrity before resuming the tagged workflow. To reproduce a qualified artifact, use a clean checkout with a physical node_modules directory (not npm-linked dependencies) and the **official Node 24.22.2 distribution** with npm 11.19.1, matching the pinned release publisher. Homebrew builds can ship a different compression library despite the same Node version. The builder also checks the publisher's zlib version and discards npm's regenerable hidden dependency-metadata cache so warm and cold installs include the same dependency files. Consumer installs continue to support Node 22+.
 
 ```bash
 npm ci
@@ -49,12 +49,12 @@ npm can accept an upload before the version becomes installable while [publish-t
 
 ### 4. Configure tokenless npm trusted publishing
 
-The production trusted publisher is configured and was validated by the 0.9.1 publication. Its settings in **Packages → @othmansh01/proxy-mate → Settings → Trusted publishing → GitHub Actions** are:
+Configure a trusted publisher for the new npm identity. The previous package’s configuration does not transfer. The settings in **Packages → @othmansh01/proxyfan → Settings → Trusted publishing → GitHub Actions** are:
 
 | Field | Value |
 | --- | --- |
 | Organization or user | `othmansh0` |
-| Repository | `proxy-mate` |
+| Repository | `proxyfan` |
 | Workflow filename | `release.yml` |
 | Environment | `npm` |
 | Allowed actions | Allow direct `npm publish` |
@@ -62,10 +62,10 @@ The production trusted publisher is configured and was validated by the 0.9.1 pu
 If a new configuration is needed, the same grant can be created with npm CLI 11.19.1, followed by its interactive 2FA approval:
 
 ```bash
-npm trust github @othmansh01/proxy-mate --file=release.yml --repo=othmansh0/proxy-mate --env=npm --allow-publish --yes --registry=https://registry.npmjs.org/
+npm trust github @othmansh01/proxyfan --file=release.yml --repo=othmansh0/proxyfan --env=npm --allow-publish --yes --registry=https://registry.npmjs.org/
 ```
 
-The public repository already has the **npm** GitHub environment and an active `v*` tag ruleset restricting tag creation, updates and deletion to repository administrators (verified 16 November 2026). Private vulnerability reporting is enabled. Add a required environment reviewer if owner approval before uploads is desired. Do not add an `NPM_TOKEN` secret: the workflow uses GitHub OIDC and `id-token: write`.
+The public GitHub repository has the **npm** GitHub environment and an active `v*` tag ruleset restricting tag creation, updates and deletion to repository administrators (verified 16 November 2026). Private vulnerability reporting is enabled. Add a required environment reviewer if owner approval before uploads is desired. Do not add an `NPM_TOKEN` secret: the workflow uses GitHub OIDC and `id-token: write`.
 
 A new npm trusted-publisher configuration must complete a successful OIDC publish within two days. An identical-version retry that skips npm upload does not test that authentication. Verify it with the next actual version publication before the configuration expires; if it expires, recreate it.
 
@@ -100,7 +100,7 @@ npm version prerelease --preid=rc -m "Release %s"
 git push origin HEAD --follow-tags
 ```
 
-Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh01/proxy-mate@next init --client claude`.
+Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh01/proxyfan@next init --client claude`.
 
 ## What is automated, and what is not
 

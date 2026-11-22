@@ -80,7 +80,7 @@ export async function setupHostCertificate(certPath, {
       code: ['HOST_CA_TRUST_CANCELLED', 'HOST_CA_EXPLANATION_UNAVAILABLE'].includes(error.code)
         ? error.code : 'HOST_CA_TRUST_FAILED',
       error: compactError(error),
-      recovery: error.recovery ?? 'Run `proxy-mate install` from an interactive macOS user session and approve Keychain access, or use --no-host-trust with narrowly scoped --domains.',
+      recovery: error.recovery ?? 'Run `proxyfan install` from an interactive macOS user session and approve Keychain access, or use --no-host-trust with narrowly scoped --domains.',
     };
   }
   const after = await getStatus(certPath);

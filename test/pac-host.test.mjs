@@ -80,7 +80,7 @@ test('external adapter rejects absent and foreign hosts; daemon adapter logs fal
   const f = await fixture(t); const port = f.host.port; await f.host.stop();
   await assert.rejects(new ExternalPacServer().start(port), { code: 'PAC_HOST_UNAVAILABLE' });
   const logs = [];
-  const adapter = createDaemonPacServer({ env: { PROXY_MATE_PAC_HOST: 'guardian' }, log: (...args) => logs.push(args) });
+  const adapter = createDaemonPacServer({ env: { PROXYFAN_PAC_HOST: 'guardian' }, log: (...args) => logs.push(args) });
   t.after(() => adapter.stop()); adapter.setBody('fallback body');
   await adapter.start(port);
   assert.equal(await (await fetch(`http://127.0.0.1:${adapter.port}/proxy.pac`)).text(), 'fallback body');
@@ -96,7 +96,7 @@ for (const busy of [false, true]) test(`guardian PAC lifecycle with busy=${busy}
   const f = await fixture(t); const port = f.host.port;
   if (!busy) await f.host.stop();
   const handlers = {}, exits = [], logs = [];
-  const controller = startGuardian({ tick: async () => {}, env: { PROXY_MATE_PAC_HOST: 'guardian', PROXY_MATE_PAC_PORT: String(port) },
+  const controller = startGuardian({ tick: async () => {}, env: { PROXYFAN_PAC_HOST: 'guardian', PROXYFAN_PAC_PORT: String(port) },
     pacHostOptions: { claimsStore: f.claimsStore, readState: async () => null },
     interval: () => 1, clear: () => {}, once: (sig, fn) => { handlers[sig] = fn; },
     exit: code => exits.push(code), log: (...args) => logs.push(args) });

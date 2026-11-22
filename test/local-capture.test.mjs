@@ -4,7 +4,7 @@ import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-local-capture-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-local-capture-'));
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { PacServer } = await import('../src/lib/pac.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');

@@ -13,10 +13,10 @@ const root = path.resolve(import.meta.dirname, '../..');
 
 export async function runMultiAgent(config) {
   const start = Date.now(), home = await mkdtemp(path.join(os.tmpdir(), 'proxy-multi-'));
-  const env = { ...process.env, PROXY_MATE_HOME: home, PROXY_MATE_ALLOW_FAKE_NETWORKSETUP: '1',
-    PROXY_MATE_FAKE_NETWORKSETUP: path.join(root, 'test/fixtures/fake-networksetup.mjs'),
-    PROXY_MATE_FAKE_NETWORK_STATE: path.join(home, 'fake-network.json'), PROXY_MATE_FAKE_HOST_TRUST: 'trusted',
-    PROXY_MATE_TEST_HEARTBEAT_MS: '1000', PROXY_MATE_TEST_MISSED_BEATS: '5', PROXY_MATE_TEST_STARTUP_GRACE_MS: '6000', PROXY_MATE_PAC_HOST: 'in-process' };
+  const env = { ...process.env, PROXYFAN_HOME: home, PROXYFAN_ALLOW_FAKE_NETWORKSETUP: '1',
+    PROXYFAN_FAKE_NETWORKSETUP: path.join(root, 'test/fixtures/fake-networksetup.mjs'),
+    PROXYFAN_FAKE_NETWORK_STATE: path.join(home, 'fake-network.json'), PROXYFAN_FAKE_HOST_TRUST: 'trusted',
+    PROXYFAN_TEST_HEARTBEAT_MS: '1000', PROXYFAN_TEST_MISSED_BEATS: '5', PROXYFAN_TEST_STARTUP_GRACE_MS: '6000', PROXYFAN_PAC_HOST: 'in-process' };
   Object.assign(process.env, env); // Isolated process, before dynamic src imports.
   const report = { passed: false, phases: [], guardian: [], policy_decisions: [], requests: [], restart_errors: [] };
   const children = [], clients = [], cpu = [];
@@ -38,10 +38,10 @@ export async function runMultiAgent(config) {
     const result = await callRaw(i, name, args);
     assert.ok(!result.isError, JSON.stringify({ name, result })); return result.structuredContent?.data;
   };
-  const network = async () => JSON.parse(await readFile(env.PROXY_MATE_FAKE_NETWORK_STATE, 'utf8'));
+  const network = async () => JSON.parse(await readFile(env.PROXYFAN_FAKE_NETWORK_STATE, 'utf8'));
   const phase = name => { report.phases.push({ name, elapsed_ms: Date.now() - start }); };
   try {
-    await writeFile(env.PROXY_MATE_FAKE_NETWORK_STATE, JSON.stringify({ service: 'Fake Primary', services: ['Fake Primary'], url: '', enabled: false, web_proxy: { enabled: false }, secure_web_proxy: { enabled: false } }));
+    await writeFile(env.PROXYFAN_FAKE_NETWORK_STATE, JSON.stringify({ service: 'Fake Primary', services: ['Fake Primary'], url: '', enabled: false, web_proxy: { enabled: false }, secure_web_proxy: { enabled: false } }));
     const reservations = Array.from({ length: 3 }, () => http.createServer());
     let ports;
     try { ports = await Promise.all(reservations.map(listen)); } finally { await Promise.all(reservations.map(closeServer)); }
@@ -198,7 +198,7 @@ export async function runMultiAgent(config) {
     monitoring = false; await guardianTask;
     const vpnExit = once(daemon, 'close'); daemon.kill('SIGKILL'); await vpnExit;
     const vpn = { ...await network(), enabled: true, url: 'https://vpn.example.test/proxy.pac' };
-    await writeFile(env.PROXY_MATE_FAKE_NETWORK_STATE, JSON.stringify(vpn));
+    await writeFile(env.PROXYFAN_FAKE_NETWORK_STATE, JSON.stringify(vpn));
     await boot();
     const { readRuntimeEvents } = await import('../../src/lib/runtime-identity.mjs');
     await until(async () => (await readRuntimeEvents()).some(e => e.pid === daemon.pid && e.event === 'routing_not_rearmed' && e.reason === 'external_change'));

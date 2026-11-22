@@ -20,9 +20,10 @@ import { activateServiceFiles } from './service-install.mjs';
 const execFileP = promisify(execFile);
 const LAUNCHCTL_OPTIONS = { timeout: 30_000, maxBuffer: 1024 * 1024 };
 
-const LABEL = 'dev.proxy-mate.daemon';
-const GUARDIAN_LABEL = 'dev.proxy-mate.guardian';
+const LABEL = 'dev.proxyfan.daemon';
+const GUARDIAN_LABEL = 'dev.proxyfan.guardian';
 export const LEGACY_SERVICE_LABELS = Object.freeze([
+  'dev.proxy-mate.daemon', 'dev.proxy-mate.guardian',
   'dev.proxy-mcp.daemon', 'dev.proxy-mcp.guardian', 'com.almosafer.proxy-mcp',
 ]);
 const PLIST_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents');
@@ -40,7 +41,7 @@ export function plistXml({ programArgs, environment = {}, label = LABEL, logPref
   const env = {
     PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     ...environment,
-    PROXY_MATE_HOME: STATE_DIR,
+    PROXYFAN_HOME: STATE_DIR,
   };
   const envXml = Object.entries(env).map(([key, value]) => `    <key>${escapeXml(key)}</key><string>${escapeXml(value)}</string>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -114,10 +115,10 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
   if (domainsFile) programArgs.push('--domains-file', path.resolve(domainsFile));
   for (const a of extraArgs) programArgs.push(a);
 
-  const environment = { ...serviceEnvironment(), PROXY_MATE_PAC_HOST: 'guardian', PROXY_MATE_PAC_PORT: String(pacPort ?? 8081) };
+  const environment = { ...serviceEnvironment(), PROXYFAN_PAC_HOST: 'guardian', PROXYFAN_PAC_PORT: String(pacPort ?? 8081) };
   // Retain the previous CWD authorization boundary for explicit fixture reads.
   // Files under protected folders may still require macOS user permission.
-  environment.PROXY_MATE_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXY_MATE_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);
+  environment.PROXYFAN_ALLOWED_PATHS = [runtime.sourceRoot, environment.PROXYFAN_ALLOWED_PATHS].filter(Boolean).join(path.delimiter);
   const previousHandshake = await read();
   const guardianArgs = [programArgs[0], path.join(runtime.directory, 'src/guardian.mjs')];
   // The daemon serves interactive Simulator traffic: Background throttles it
@@ -140,7 +141,7 @@ async function installLaunchAgentUnlocked({ nodeBin, serverPath, domainsFile, pr
     if (error.details?.rollback_restored) await fs.rm(runtime.directory, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  await prune(runtime.directory).catch((error) => process.stderr.write(`[proxy-mate] old runtime cleanup failed: ${error.message}\n`));
+  await prune(runtime.directory).catch((error) => process.stderr.write(`[proxyfan] old runtime cleanup failed: ${error.message}\n`));
   return { plistPath, label: LABEL, programArgs, runtime_directory: runtime.directory,
     mcp_server_path: mcpServerPath, mcp_client_path: path.join(path.dirname(mcpServerPath), 'client.mjs'),
     guardian: { label: GUARDIAN_LABEL, plistPath: guardianPlistPath }, ready: true };
@@ -163,7 +164,7 @@ export async function waitForDaemonReady({ previousToken, timeoutMs = 90_000,
     if (handshake && handshake.token !== previousToken && await probe(handshake.controlUrl, handshake.token)) return true;
     await new Promise((resolve) => setTimeout(resolve, Math.min(250, Math.max(1, deadline - Date.now()))));
   }
-  throw Object.assign(new Error(`LaunchAgent was loaded but did not become ready. Check ${path.join(LOG_DIR, 'daemon.err.log')} and run proxy-mate status.`), { code: 'DAEMON_STARTUP_TIMEOUT' });
+  throw Object.assign(new Error(`LaunchAgent was loaded but did not become ready. Check ${path.join(LOG_DIR, 'daemon.err.log')} and run proxyfan status.`), { code: 'DAEMON_STARTUP_TIMEOUT' });
 }
 
 export async function uninstallLaunchAgent() {

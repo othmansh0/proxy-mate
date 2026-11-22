@@ -11,7 +11,7 @@ export async function runtimeIdentity() {
   let marker = null;
   try { marker = JSON.parse(await fs.readFile(path.join(root, '.proxy-runtime.json'), 'utf8')); } catch { /* checkout */ }
   return { version: SERVER_VERSION, node: process.version, node_executable: process.execPath,
-    entry_root: root, installed: ['proxy-mate', 'proxy-mcp'].includes(marker?.managed_by),
+    entry_root: root, installed: ['proxyfan', 'proxy-mate', 'proxy-mcp'].includes(marker?.managed_by),
     content_sha256: marker?.content_sha256 ?? null, dependency_lock_sha256: marker?.dependency_lock_sha256 ?? null,
     staged_at: marker?.staged_at ?? null };
 }
@@ -39,7 +39,7 @@ function isEvent(value) { return value && typeof value === 'object' && typeof va
 // Never interrogate launchd for an unsupervised process (including test runs).
 export async function readLaunchdLastExit({ run = execFileP } = {}) {
   try {
-    const { stdout } = await run('/bin/launchctl', ['list', 'dev.proxy-mate.daemon'], { timeout: 2000 });
+    const { stdout } = await run('/bin/launchctl', ['list', 'dev.proxyfan.daemon'], { timeout: 2000 });
     const match = stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
     return match ? Number(match[1]) : null;
   } catch { return null; }
@@ -52,7 +52,7 @@ export async function recordPreviousExit({ pid = process.pid, serviceName = proc
   const previous = events[readyIndex];
   if (!previous || previous.pid === pid || events.slice(readyIndex + 1).some(e =>
     e.pid === previous.pid && ['stopping', 'startup_failed'].includes(e.event))) return;
-  const launchd_last_exit = serviceName === 'dev.proxy-mate.daemon' ? await readLastExit() : null;
+  const launchd_last_exit = serviceName === 'dev.proxyfan.daemon' ? await readLastExit() : null;
   await recordEvent('previous_exit_unrecorded', { details: { previous_pid: previous.pid, launchd_last_exit } });
 }
 

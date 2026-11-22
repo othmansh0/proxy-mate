@@ -13,7 +13,7 @@ import { SERVER_INSTRUCTIONS, gettingStarted, searchHelp, setupWorkflows } from 
 import { registerMcpTools, registerMcpResources, registerMcpPrompts,
   registerMcpResourceSubscriptions } from './lib/mcp-contract.mjs';
 
-import { newClientId, normalizeTaskId } from './lib/client-identity.mjs';
+import { clientIdentityHeaders, newClientId, normalizeTaskId } from './lib/client-identity.mjs';
 
 const client = { client_id: newClientId(), task_id: null };
 const readiness = createDaemonReadiness({ client });
@@ -38,7 +38,7 @@ const dispatch = rememberCaptureLease(async (tool, args, context = {}) => {
     return gettingStarted(args, status, { daemonReachable: Boolean(handshake) });
   }
   if (!handshake) throw Object.assign(new Error('The shared daemon is unavailable. This MCP bridge remains connected; use get_started or search_docs for recovery.'), {
-    code: 'DAEMON_UNAVAILABLE', retryable: true, recovery: ['Run proxy-mate status and inspect its daemon log.', 'Retry after recovery; no MCP restart is needed.'],
+    code: 'DAEMON_UNAVAILABLE', retryable: true, recovery: ['Run proxyfan status and inspect its daemon log.', 'Retry after recovery; no MCP restart is needed.'],
   });
   const result = await callDaemon({ ...handshake, client, tool, args, signal: context.signal });
   heartbeat.contact(handshake);
@@ -47,7 +47,7 @@ const dispatch = rememberCaptureLease(async (tool, args, context = {}) => {
   if (flowId && /flow|request|curl/.test(tool)) void subscriptions.notifyLiveFlow(flowId).catch(() => {});
   return result;
 });
-registerMcpTools(mcp, dispatch, { legacyAliases: readEnvironment('PROXY_MATE_LEGACY_OUTPUT') === '1' });
+registerMcpTools(mcp, dispatch, { legacyAliases: readEnvironment('PROXYFAN_LEGACY_OUTPUT') === '1' });
 registerMcpResources(mcp, dispatch);
 registerMcpPrompts(mcp);
 
@@ -64,7 +64,7 @@ process.once('SIGINT', () => void close());
 process.stdin.once('end', () => void close());
 process.stdin.once('close', () => void close());
 process.stdout.on('error', (error) => {
-  if (error.code !== 'EPIPE') process.stderr.write(`[proxy-mate client] output failed: ${error.message}\n`);
+  if (error.code !== 'EPIPE') process.stderr.write(`[proxyfan client] output failed: ${error.message}\n`);
   void close(error.code === 'EPIPE' ? 0 : 1);
 });
 await mcp.connect(new StdioServerTransport());
@@ -81,7 +81,7 @@ export function createBridgeHeartbeat({ client, readiness, read = readHandshake,
     const response = await fetch(new URL('/heartbeat', handshake.controlUrl), {
       method: 'POST', signal: AbortSignal.timeout(5000),
       headers: { authorization: `Bearer ${handshake.token}`, 'content-type': 'application/json',
-        'x-proxy-mate-client-id': identity.client_id },
+        ...clientIdentityHeaders(identity.client_id) },
       body: JSON.stringify({ ...identity, bridge_version: SERVER_VERSION }),
     });
     if (!response.ok) throw new Error('Heartbeat unavailable');
@@ -89,8 +89,8 @@ export function createBridgeHeartbeat({ client, readiness, read = readHandshake,
   },
 }) {
   // Test-only timing override; keep normal production heartbeat scheduling.
-  const testInterval = (process.env.NODE_TEST_CONTEXT || process.env.PROXY_MATE_ALLOW_FAKE_NETWORKSETUP === '1')
-    ? Number(process.env.PROXY_MATE_TEST_HEARTBEAT_MS) : 0;
+  const testInterval = (process.env.NODE_TEST_CONTEXT || readEnvironment('PROXYFAN_ALLOW_FAKE_NETWORKSETUP') === '1')
+    ? Number(readEnvironment('PROXYFAN_TEST_HEARTBEAT_MS')) : 0;
   let timer = null, stopped = false, cached = null, intervalMs = Number.isFinite(testInterval) && testInterval > 0 ? testInterval : 30000, failures = 0, inFlight = false;
   const arm = () => {
     if (stopped || inFlight || timer !== null) return;

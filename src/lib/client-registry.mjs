@@ -3,8 +3,8 @@ import { LEGACY_CLIENT_ID, normalizeClientId, normalizeTaskId } from './client-i
 
 // Presence is deliberately ephemeral. Durable resource ownership lives in its
 // own stores; restart grace gives existing bridges time to introduce themselves.
-export function createClientRegistry({ now = Date.now, intervalMs = testTiming('PROXY_MATE_TEST_HEARTBEAT_MS', 30000), missedBeats = testTiming('PROXY_MATE_TEST_MISSED_BEATS', 3),
-  startupGraceMs = testTiming('PROXY_MATE_TEST_STARTUP_GRACE_MS', 90000), onPresenceLost = () => {},
+export function createClientRegistry({ now = Date.now, intervalMs = testTiming('PROXYFAN_TEST_HEARTBEAT_MS', 30000), missedBeats = testTiming('PROXYFAN_TEST_MISSED_BEATS', 3),
+  startupGraceMs = testTiming('PROXYFAN_TEST_STARTUP_GRACE_MS', 90000), onPresenceLost = () => {},
 } = {}) {
   const created = now(), clients = new Map();
   const alive = c => Boolean(c && now() - c.last_seen <= intervalMs * missedBeats);

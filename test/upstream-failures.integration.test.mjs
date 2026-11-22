@@ -7,7 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.PROXY_MATE_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-upstream-failures-'));
+process.env.PROXYFAN_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-upstream-failures-'));
 const { ProxyEngine } = await import('../src/lib/proxy.mjs');
 const { PacServer } = await import('../src/lib/pac.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');

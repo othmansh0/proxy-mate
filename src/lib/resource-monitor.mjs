@@ -5,7 +5,9 @@ export function startResourceSubscriptionMonitor(dispatch, subscriptions, interv
   let busy = false;
   const timer = setInterval(async () => {
     if (busy) return;
-    const uris = subscriptions.subscriptions();
+    // Poll one canonical resource even when a pre-rename bridge subscribed to an alias.
+    // The subscription registry delivers updates to the exact URI each client requested.
+    const uris = subscriptions.subscriptions().map(uri => uri.replace(/^proxy-(?:mate|mcp):/, 'proxyfan:'));
     if (uris.length === 0) return;
     busy = true;
     try {

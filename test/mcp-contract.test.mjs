@@ -5,6 +5,7 @@ import {
   MCP_RESOURCE_URIS, MCP_TOOLS, errorToolResult, registerMcpPrompts, registerMcpResourceSubscriptions, registerMcpResources, registerMcpTools,
   successToolResult, toolOutputSchema,
 } from '../src/lib/mcp-contract.mjs';
+import { startResourceSubscriptionMonitor } from '../src/lib/resource-monitor.mjs';
 import { makeTools } from '../src/lib/tools.mjs';
 import { ProxyEngine } from '../src/lib/proxy.mjs';
 import { PacServer } from '../src/lib/pac.mjs';
@@ -15,7 +16,7 @@ test('registry has unique, fully annotated tool contracts', () => {
   for (const tool of MCP_TOOLS) {
     assert.ok(tool.outputSchema, `${tool.name} missing output schema`);
     assert.equal(typeof tool.title, 'string', `${tool.name} missing title`);
-    assert.equal(typeof tool._meta?.['proxy-mate/group'], 'string', `${tool.name} missing group metadata`);
+    assert.equal(typeof tool._meta?.['proxyfan/group'], 'string', `${tool.name} missing group metadata`);
     for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
       assert.equal(typeof tool.annotations[hint], 'boolean', `${tool.name} missing ${hint}`);
     }
@@ -77,7 +78,7 @@ test('pending breakpoint contracts explicitly gate sensitive previews', () => {
 });
 
 test('success and error results follow the stable envelope without verbose JSON text', () => {
-  const success = successToolResult('get_version', {}, { name: 'proxy-mate', version: 'test', mode: 'unit' });
+  const success = successToolResult('get_version', {}, { name: 'proxyfan', version: 'test', mode: 'unit' });
   assert.equal(toolOutputSchema.safeParse(success.structuredContent).success, true);
   assert.equal(success.structuredContent.data.version, 'test');
   assert.equal(success.structuredContent.version, 'test'); // 1.x compatibility alias
@@ -87,7 +88,7 @@ test('success and error results follow the stable envelope without verbose JSON 
     id: 'flow/1', request: { body_path: '/private/body', body_size: 10 }, response: null,
   });
   assert.equal(flow.structuredContent.data.request.body_path, undefined);
-  assert.equal(flow.structuredContent.data.request.body_resource_uri, 'proxy-mate://flows/flow%2F1/bodies/request');
+  assert.equal(flow.structuredContent.data.request.body_resource_uri, 'proxyfan://flows/flow%2F1/bodies/request');
 
   const failure = new Error('try again');
   failure.code = 'TEMPORARY_FAILURE';
@@ -190,13 +191,13 @@ test('resources expose status, redacted flow detail, and body content through di
   assert.deepEqual(resources.slice(0, 6).map((resource) => resource.name), [
     'proxy-status', 'proxy-capabilities', 'flow-detail', 'flow-body', 'session-flow-detail', 'session-flow-body',
   ]);
-  const status = await resources[0].callback(new URL('proxy-mate://status'));
+  const status = await resources[0].callback(new URL('proxyfan://status'));
   assert.equal(JSON.parse(status.contents[0].text).running, false);
-  const capabilities = await resources[1].callback(new URL('proxy-mate://capabilities'));
+  const capabilities = await resources[1].callback(new URL('proxyfan://capabilities'));
   assert.equal(JSON.parse(capabilities.contents[0].text).websocket_engine.live_message_injection, false);
-  const detail = await resources[2].callback(new URL('proxy-mate://flows/f-1'), { flow_id: 'f-1' });
+  const detail = await resources[2].callback(new URL('proxyfan://flows/f-1'), { flow_id: 'f-1' });
   assert.equal(JSON.parse(detail.contents[0].text).id, 'f-1');
-  const body = await resources[3].callback(new URL('proxy-mate://flows/f-1/bodies/request'), { flow_id: 'f-1', kind: 'request' });
+  const body = await resources[3].callback(new URL('proxyfan://flows/f-1/bodies/request'), { flow_id: 'f-1', kind: 'request' });
   assert.equal(body.contents[0].text, '{"token":"[REDACTED]"}');
   const legacyDetail = await resources.find((resource) => resource.name === 'flow-detail-legacy')
     .callback(new URL('proxy-mcp://flows/f-1'), { flow_id: 'f-1' });
@@ -222,6 +223,26 @@ test('workflow prompts register concise, argument-aware MCP messages', () => {
   assert.match(prompts.get('set-up-capture-client').callback({ adapter_id: 'docker' }).messages[0].content.text, /preflight_capture_adapter/);
 });
 
+test('monitor polls status and flow changes for subscribers using only previous names', async (t) => {
+  const delivered = new Set();
+  let complete;
+  const updated = new Promise(resolve => { complete = resolve; });
+  const mark = key => {
+    delivered.add(key);
+    if (delivered.size === 2) complete();
+  };
+  let revision = 0;
+  const stop = startResourceSubscriptionMonitor(async () => ++revision, {
+    subscriptions: () => ['proxy-mate://status', 'proxy-mcp://flows/f-42/bodies/request'],
+    notifyStatus: () => mark('status'),
+    notifyLiveFlow: id => mark(id),
+  }, 5);
+  const timeout = setTimeout(() => complete(), 2000);
+  t.after(() => { clearTimeout(timeout); stop(); });
+  await updated;
+  assert.deepEqual(delivered, new Set(['status', 'f-42']));
+});
+
 test('resource subscription helper tracks status and live-flow subscribers before notifying', async () => {
   const handlers = [];
   const updates = [];
@@ -241,13 +262,13 @@ test('resource subscription helper tracks status and live-flow subscribers befor
   assert.equal(subscriptions.isSubscribed(MCP_RESOURCE_URIS.status), true);
   assert.equal(await subscriptions.notifyStatus(), true);
 
-  const flowUri = 'proxy-mate://flows/f-42';
+  const flowUri = 'proxyfan://flows/f-42';
   await subscribe({ params: { uri: flowUri } });
   assert.equal(await subscriptions.notifyLiveFlow('f-42'), true);
   await unsubscribe({ params: { uri: flowUri } });
   assert.equal(await subscriptions.notifyLiveFlow('f-42'), false);
   await assert.rejects(
-    subscribe({ params: { uri: 'proxy-mate://sessions/s-1/flows/f-1' } }),
+    subscribe({ params: { uri: 'proxyfan://sessions/s-1/flows/f-1' } }),
     { code: 'RESOURCE_NOT_SUBSCRIBABLE' },
   );
   assert.deepEqual(updates, [

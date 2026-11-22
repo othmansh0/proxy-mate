@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-efficiency-'));
-process.env.PROXY_MATE_HOME = directory;
+process.env.PROXYFAN_HOME = directory;
 const { inspectJson } = await import('../src/lib/json-inspection.mjs');
 const { makeTools } = await import('../src/lib/tools.mjs');
 const { successToolResult, registerMcpTools, MCP_TOOLS } = await import('../src/lib/mcp-contract.mjs');
