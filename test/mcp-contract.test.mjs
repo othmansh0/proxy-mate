@@ -5,6 +5,7 @@ import {
   MCP_RESOURCE_URIS, MCP_TOOLS, errorToolResult, registerMcpPrompts, registerMcpResourceSubscriptions, registerMcpResources, registerMcpTools,
   successToolResult, toolOutputSchema,
 } from '../src/lib/mcp-contract.mjs';
+import { startResourceSubscriptionMonitor } from '../src/lib/resource-monitor.mjs';
 import { makeTools } from '../src/lib/tools.mjs';
 import { ProxyEngine } from '../src/lib/proxy.mjs';
 import { PacServer } from '../src/lib/pac.mjs';
@@ -220,6 +221,26 @@ test('workflow prompts register concise, argument-aware MCP messages', () => {
   assert.match(prompts.get('compare-regression').callback({ left_flow_id: 'before', right_flow_id: 'after' }).messages[0].content.text, /compare_flows/);
   assert.match(prompts.get('security-review').callback({}).messages[0].content.text, /include_sensitive/);
   assert.match(prompts.get('set-up-capture-client').callback({ adapter_id: 'docker' }).messages[0].content.text, /preflight_capture_adapter/);
+});
+
+test('monitor polls status and flow changes for subscribers using only previous names', async (t) => {
+  const delivered = new Set();
+  let complete;
+  const updated = new Promise(resolve => { complete = resolve; });
+  const mark = key => {
+    delivered.add(key);
+    if (delivered.size === 2) complete();
+  };
+  let revision = 0;
+  const stop = startResourceSubscriptionMonitor(async () => ++revision, {
+    subscriptions: () => ['proxy-mate://status', 'proxy-mcp://flows/f-42/bodies/request'],
+    notifyStatus: () => mark('status'),
+    notifyLiveFlow: id => mark(id),
+  }, 5);
+  const timeout = setTimeout(() => complete(), 2000);
+  t.after(() => { clearTimeout(timeout); stop(); });
+  await updated;
+  assert.deepEqual(delivered, new Set(['status', 'f-42']));
 });
 
 test('resource subscription helper tracks status and live-flow subscribers before notifying', async () => {
