@@ -67,7 +67,7 @@
     "zod": "^4.6.7"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.2.0"
   },
   "overrides": {
     "@hono/node-server": "2.1.6",
