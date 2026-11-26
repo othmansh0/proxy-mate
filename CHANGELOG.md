@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.11.1 — 2026-11-26
+
 - Publish under the unscoped npm name `proxyfan` for shorter install commands and imports.
 
 - Add the ProxyFan icon to the README, MCP server metadata, and operator UI. Clarify guided iOS capture and manual Android setup.
