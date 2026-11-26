@@ -24,6 +24,10 @@ test('stdio MCP initializes, lists the parity surface, and returns structured co
   const client = new Client({ name: 'proxyfan-test', version: '1.0.0' });
   await client.connect(transport);
   t.after(() => client.close());
+  const serverInfo = client.getServerVersion();
+  assert.equal(serverInfo.title, 'ProxyFan');
+  assert.equal(serverInfo.icons[0].mimeType, 'image/png');
+  assert.match(serverInfo.icons[0].src, /^data:image\/png;base64,iVBORw0KGgo/);
 
   const listed = await client.listTools();
   const names = new Set(listed.tools.map((tool) => tool.name));

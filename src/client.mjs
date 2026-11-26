@@ -8,7 +8,8 @@ import { createDaemonReadiness } from './lib/daemon-connection.mjs';
 import { readHandshake } from './lib/state.mjs';
 import { rememberCaptureLease } from './lib/capture-lease.mjs';
 import { startResourceSubscriptionMonitor } from './lib/resource-monitor.mjs';
-import { SERVER_NAME, SERVER_VERSION } from './lib/config.mjs';
+import { SERVER_VERSION } from './lib/config.mjs';
+import { MCP_SERVER_INFO } from './lib/branding.mjs';
 import { SERVER_INSTRUCTIONS, gettingStarted, searchHelp, setupWorkflows } from './lib/guidance.mjs';
 import { registerMcpTools, registerMcpResources, registerMcpPrompts,
   registerMcpResourceSubscriptions } from './lib/mcp-contract.mjs';
@@ -18,7 +19,7 @@ import { clientIdentityHeaders, newClientId, normalizeTaskId } from './lib/clien
 const client = { client_id: newClientId(), task_id: null };
 const readiness = createDaemonReadiness({ client });
 const heartbeat = createBridgeHeartbeat({ client, readiness });
-const mcp = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, {
+const mcp = new McpServer(MCP_SERVER_INFO, {
   capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS,
 });
 let closing = false;

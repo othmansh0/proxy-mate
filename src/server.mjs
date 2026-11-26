@@ -49,7 +49,8 @@ import { applyPacRouting, clearPacRouting, validateRoutingDomains } from './lib/
 import { trustCaOnSimulators } from './lib/sim.mjs';
 import { setupSimulatorRouting } from './lib/simulator-routing.mjs';
 import { ensureCA } from './lib/proxy.mjs';
-import { STATE_DIR, SERVER_NAME, SERVER_VERSION } from './lib/config.mjs';
+import { STATE_DIR, SERVER_VERSION } from './lib/config.mjs';
+import { MCP_SERVER_INFO } from './lib/branding.mjs';
 import { setupHostCertificate, removeHostCertificate } from './lib/host-cert.mjs';
 import { loadRules } from './lib/rules.mjs';
 import {
@@ -142,7 +143,7 @@ async function runStdio({ requireDaemon = false } = {}) {
   };
 
   const mcp = new McpServer(
-    { name: SERVER_NAME, version: SERVER_VERSION },
+    MCP_SERVER_INFO,
     { capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS },
   );
   const resourceSubscriptions = registerMcpResourceSubscriptions(mcp);
@@ -505,7 +506,7 @@ function validateCliArgs(args) {
 }
 
 function printHelp() {
-  process.stderr.write(`proxyfan v${SERVER_VERSION} — selective HTTP(S) interception for iOS Simulator testing
+  process.stderr.write(`proxyfan v${SERVER_VERSION} — local HTTP(S) debugging for mobile development
 
 USAGE
   proxyfan init [--client name]    Install the service and connect a client (default claude)
