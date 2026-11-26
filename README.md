@@ -1,6 +1,4 @@
-# ProxyFan
-
-<img src="https://raw.githubusercontent.com/othmansh0/proxyfan/develop/src/assets/proxyfan.png" alt="ProxyFan icon" width="116" height="116">
+<img src="https://raw.githubusercontent.com/othmansh0/proxyfan/main/.github/social-preview.png" alt="ProxyFan — Mobile HTTP debugging for coding agents" width="1280" height="640">
 
 [![npm version](https://img.shields.io/npm/v/proxyfan.svg)](https://www.npmjs.com/package/proxyfan) [![CI](https://github.com/othmansh0/proxyfan/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/othmansh0/proxyfan/actions/workflows/ci.yml) [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/othmansh0/proxyfan/blob/develop/LICENSE)
 
