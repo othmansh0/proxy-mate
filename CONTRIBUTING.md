@@ -19,6 +19,6 @@ The 8 November setup preserves the previous local main tip as `archive/local-mai
 
 ## Public npm releases
 
-Distribution uses `@othmansh01/proxyfan` on npm. Follow [Releases and versioning](docs/PACKAGING.md). Add a concise note under `## Unreleased` for user-facing changes. After merging and committing those notes, `npm version patch`, `minor` or an explicit prerelease updates the package/lock, promotes the changelog notes and creates the version commit/tag. Runtime version comes from package.json. Push the commit and annotated tag to run release qualification and OIDC publishing.
+Distribution uses `proxyfan` on npm. Follow [Releases and versioning](docs/PACKAGING.md). Add a concise note under `## Unreleased` for user-facing changes. After merging and committing those notes, `npm version patch`, `minor` or an explicit prerelease updates the package/lock, promotes the changelog notes and creates the version commit/tag. Runtime version comes from package.json. Push the commit and annotated tag to run release qualification and OIDC publishing.
 
 Keep runtime dependencies bundled from the audited lockfile and smoke-test the actual tarball in a clean consumer. Publishing requires the configured npm trusted publisher and GitHub environment; do not add an npm automation token to repository secrets. Merging to develop alone does not publish a package or promote main.

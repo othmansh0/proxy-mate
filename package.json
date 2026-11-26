@@ -1,5 +1,5 @@
 {
-  "name": "@othmansh01/proxyfan",
+  "name": "proxyfan",
   "version": "0.11.0",
   "description": "Local MCP server for mobile HTTP and HTTPS debugging on macOS. Inspect app requests, mock APIs, and export redacted evidence.",
   "type": "module",

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { waitForPublishedArtifact } from '../scripts/lib/release-policy.mjs';
 
-const manifest = { name: '@othmansh01/proxyfan', version: '0.9.1', integrity: 'sha512-qualified' };
+const manifest = { name: 'proxyfan', version: '0.9.1', integrity: 'sha512-qualified' };
 const published = { name: manifest.name, version: manifest.version, dist: { integrity: manifest.integrity } };
 
 test('publication verification waits for registry visibility after an accepted upload', async () => {
