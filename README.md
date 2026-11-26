@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/othmansh0/proxyfan/develop/src/assets/proxyfan.png" alt="ProxyFan icon" width="116" height="116">
 
-[![npm version](https://img.shields.io/npm/v/@othmansh01/proxyfan.svg)](https://www.npmjs.com/package/@othmansh01/proxyfan) [![CI](https://github.com/othmansh0/proxyfan/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/othmansh0/proxyfan/actions/workflows/ci.yml) [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/othmansh0/proxyfan/blob/develop/LICENSE)
+[![npm version](https://img.shields.io/npm/v/proxyfan.svg)](https://www.npmjs.com/package/proxyfan) [![CI](https://github.com/othmansh0/proxyfan/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/othmansh0/proxyfan/actions/workflows/ci.yml) [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/othmansh0/proxyfan/blob/develop/LICENSE)
 
 A local MCP server for debugging mobile HTTP and HTTPS traffic with your coding agent. Inspect requests, mock APIs, pause responses, and export redacted evidence.
 
@@ -11,7 +11,7 @@ A local MCP server for debugging mobile HTTP and HTTPS traffic with your coding 
 **Host requirements** · macOS and Node.js 22+. For iOS Simulator, install full Xcode and a Simulator runtime.
 
 ```sh
-npx --yes @othmansh01/proxyfan@latest init --client claude
+npx --yes proxyfan@latest init --client claude
 ```
 
 - Available clients: `claude`, `codex`, `cursor`, `claude-desktop`, or `json` for manual stdio registration.
@@ -39,9 +39,9 @@ npx --yes @othmansh01/proxyfan@latest init --client claude
 
 | Task | Command |
 | --- | --- |
-| Check the service | `npx --yes @othmansh01/proxyfan@latest status` |
-| Upgrade after stopping capture | `npx --yes @othmansh01/proxyfan@latest init --upgrade --client claude` |
-| Remove the service and keep the CA | `npx --yes @othmansh01/proxyfan@latest uninstall --keep-ca` |
+| Check the service | `npx --yes proxyfan@latest status` |
+| Upgrade after stopping capture | `npx --yes proxyfan@latest init --upgrade --client claude` |
+| Remove the service and keep the CA | `npx --yes proxyfan@latest uninstall --keep-ca` |
 
 - Captures stay under `~/.proxyfan` by default. ProxyFan redacts recognized credentials before storage and when returning evidence. Review exports before sharing.
 - From a source checkout on macOS, run `npm ci` and `npm run check`.

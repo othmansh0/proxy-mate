@@ -1,12 +1,12 @@
 # Public releases and versioning
 
-Package: **`@othmansh01/proxyfan`** on **npm**, with source and release assets at `othmansh0/proxyfan`. GitHub Packages is no longer required. People install a published version with:
+Package: **`proxyfan`** on **npm**, with source and release assets at `othmansh0/proxyfan`. GitHub Packages is no longer required. People install a published version with:
 
 ```bash
-npx --yes @othmansh01/proxyfan@latest init --client claude
+npx --yes proxyfan@latest init --client claude
 ```
 
-The first ProxyFan release is **0.11.0**. Versions through 0.10.0 were published as `@othmansh01/proxy-mate`. It is pre-1.0 software; keep the documented platform and capture limits visible. Building a checkout does not publish it; new releases use the version-tagged workflow below.
+The first unscoped release is **0.11.1**. The prior `@othmansh01/proxyfan@0.11.0` release remains available for existing consumers. It is pre-1.0 software; keep the documented platform and capture limits visible. Building a checkout does not publish it; new releases use the version-tagged workflow below.
 
 ## One-time owner setup
 
@@ -16,24 +16,20 @@ The repository is public, including Git history and Actions history/logs. The lo
 
 Private vulnerability reporting is enabled; see the [security policy](../SECURITY.md). Hosted Actions now run successfully after the earlier account restriction. The default branch is `develop`; promotion to `main` is not required for version-tagged releases.
 
-### 2. Own the matching npm scope
+### 2. Sign in as an npm maintainer
 
-Sign into the verified npm account **othmansh01**. The npm scope is `@othmansh01`; the GitHub repository owner remains `othmansh0`. Two-factor authentication is enabled for authentication and writes. Complete npm's passkey/security-key approval for owner operations when requested.
+Sign into the verified npm account **othmansh01**. The GitHub repository owner is `othmansh0`. Two-factor authentication is enabled for authentication and writes. Complete npm's passkey/security-key approval for owner operations when requested.
 
 ```bash
 npm login --registry=https://registry.npmjs.org
 npm whoami --registry=https://registry.npmjs.org
 ```
 
-The identity must have publish access to `@othmansh01`. No GitHub package token is needed. If a previous private setup mapped this scope to GitHub, change it once:
-
-```bash
-npm config set @othmansh01:registry https://registry.npmjs.org --location=user
-```
+The npm account must be a maintainer of `proxyfan` for account-authenticated publishes. The public install needs no npm sign-in.
 
 ### 3. Bootstrap the npm package once
 
-A new npm name has its own publication permissions. For the first ProxyFan version, use the exact qualified tarball for the initial public publish if trusted publishing is not yet configured. Verify its registry integrity before resuming the tagged workflow. To reproduce a qualified artifact, use a clean checkout with a physical node_modules directory (not npm-linked dependencies) and the **official Node 24.22.2 distribution** with npm 11.19.1, matching the pinned release publisher. Homebrew builds can ship a different compression library despite the same Node version. The builder also checks the publisher's zlib version and discards npm's regenerable hidden dependency-metadata cache so warm and cold installs include the same dependency files. Consumer installs continue to support Node 22+.
+A new npm name has its own publication permissions. For the first unscoped ProxyFan release, use the exact qualified tarball for the initial public publish if trusted publishing is not yet configured. Verify its registry integrity before resuming the tagged workflow. To reproduce a qualified artifact, use a clean checkout with a physical node_modules directory (not npm-linked dependencies) and the **official Node 24.22.2 distribution** with npm 11.19.1, matching the pinned release publisher. Homebrew builds can ship a different compression library despite the same Node version. The builder also checks the publisher's zlib version and discards npm's regenerable hidden dependency-metadata cache so warm and cold installs include the same dependency files. Consumer installs continue to support Node 22+.
 
 ```bash
 npm ci
@@ -49,7 +45,7 @@ npm can accept an upload before the version becomes installable while [publish-t
 
 ### 4. Configure tokenless npm trusted publishing
 
-Configure a trusted publisher for the new npm identity. The previous package’s configuration does not transfer. The settings in **Packages → @othmansh01/proxyfan → Settings → Trusted publishing → GitHub Actions** are:
+Configure a trusted publisher for the new npm identity. The previous package’s configuration does not transfer. The settings in **Packages → proxyfan → Settings → Trusted publishing → GitHub Actions** are:
 
 | Field | Value |
 | --- | --- |
@@ -62,7 +58,7 @@ Configure a trusted publisher for the new npm identity. The previous package’s
 If a new configuration is needed, the same grant can be created with npm CLI 11.19.1, followed by its interactive 2FA approval:
 
 ```bash
-npm trust github @othmansh01/proxyfan --file=release.yml --repo=othmansh0/proxyfan --env=npm --allow-publish --yes --registry=https://registry.npmjs.org/
+npm trust github proxyfan --file=release.yml --repo=othmansh0/proxyfan --env=npm --allow-publish --yes --registry=https://registry.npmjs.org/
 ```
 
 The public GitHub repository has the **npm** GitHub environment and an active `v*` tag ruleset restricting tag creation, updates and deletion to repository administrators (verified 16 November 2026). Private vulnerability reporting is enabled. Add a required environment reviewer if owner approval before uploads is desired. Do not add an `NPM_TOKEN` secret: the workflow uses GitHub OIDC and `id-token: write`.
@@ -100,7 +96,7 @@ npm version prerelease --preid=rc -m "Release %s"
 git push origin HEAD --follow-tags
 ```
 
-Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes @othmansh01/proxyfan@next init --client claude`.
+Each bump requires committed Unreleased notes. A version such as `0.10.0-rc.1` gets npm's **next** tag and a GitHub prerelease; a version without a prerelease suffix gets **latest**. Prereleases cannot silently replace latest. Test a candidate explicitly with `npx --yes proxyfan@next init --client claude`.
 
 ## What is automated, and what is not
 

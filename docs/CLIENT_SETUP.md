@@ -1,6 +1,6 @@
 # MCP client setup
 
-Start with the [README quick start](../README.md). `npx --yes @othmansh01/proxyfan@latest init --client CLIENT` installs the shared service and connects a client.
+Start with the [README quick start](../README.md). `npx --yes proxyfan@latest init --client CLIENT` installs the shared service and connects a client.
 
 ## Automatic registration
 
@@ -17,7 +17,7 @@ Registration affects future client connections. Reconnect an existing MCP sessio
 ## Preview
 
 ```bash
-npx --yes @othmansh01/proxyfan@latest init --client claude --dry-run
+npx --yes proxyfan@latest init --client claude --dry-run
 ```
 
 Preview reads service/configuration metadata but writes no service, certificate, routing or client files. It shows whether setup would install, reuse or upgrade the service and the exact local command/configuration.
@@ -25,7 +25,7 @@ Preview reads service/configuration metadata but writes no service, certificate,
 ## Manual clients
 
 ```bash
-npx --yes @othmansh01/proxyfan@latest init --client json
+npx --yes proxyfan@latest init --client json
 ```
 
 Copy the returned `client.config.mcpServers` into your client's MCP settings. Both the Node executable and bridge path are absolute. No GitHub token belongs in the MCP configuration: public npm packages need no registry authentication. The installed runtime works independently of the source checkout or npm cache.
@@ -46,22 +46,22 @@ Automatic upgrades preserve proxy/control ports, textual capture policy and TLS 
 
 For the former package name, first read [Migrate from proxy-mcp](#migrate-from-proxy-mcp).
 
-The public package uses `@othmansh01`, separate from the former private `@othmansh0` scope. If you previously mapped `@othmansh01` to GitHub Packages, point it at npm once:
+ProxyFan installs from the public npm registry under the unscoped name `proxyfan`. If your default npm registry points elsewhere, set the public registry for this command:
 
 ```bash
-npm config set @othmansh01:registry https://registry.npmjs.org --location=user
+npm_config_registry=https://registry.npmjs.org npx --yes proxyfan@latest init --client claude
 ```
 
-Then run the README init command. A GitHub Packages token is not needed for public releases.
+
 
 <a id="migrate-from-proxy-mcp"></a>
 
 ## Migrate from Proxy Mate
 
-For either previous package, install ProxyFan during an idle capture window.
+For any previous release, including `@othmansh01/proxyfan`, install ProxyFan during an idle capture window.
 
 ```bash
-npx --yes @othmansh01/proxyfan@latest init --upgrade --client claude
+npx --yes proxyfan@latest init --upgrade --client claude
 ```
 
 Finish active capture before upgrading. Repeat plain `init --client CLIENT` for each additional client, then reconnect it. Setup replaces owned `proxy-mate` and `proxy-mcp` bridge entries with `proxyfan` and backs up the original configuration. A custom server using the former key is preserved; remove it manually if it is an obsolete installation. New installs use `~/.proxyfan`; existing installs reuse `~/.proxy-mcp` or `~/.proxy-mate` in place, preserving the CA, SQLite sessions and absolute captured-body paths. Do not move or copy a live state directory. Backups remain under the selected state directory's `setup-backups`.

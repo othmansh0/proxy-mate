@@ -81,18 +81,18 @@ async function smoke() {
   try {
     await fs.writeFile(path.join(temporary, 'package.json'), JSON.stringify({ name: 'proxy-package-smoke', version: '1.0.0', type: 'module', private: true }));
     await npm(['install', '--offline', '--ignore-scripts', '--no-fund', '--no-audit', path.join(output, manifest.filename)], { cwd: temporary });
-    const packageRoot = path.join(temporary, 'node_modules/@othmansh01/proxyfan');
+    const packageRoot = path.join(temporary, 'node_modules', manifest.name);
     const installed = await readJson(path.join(packageRoot, 'package.json'));
-    if (installed.version !== manifest.version) throw new Error('Consumer installed a different package version.');
+    if (installed.name !== manifest.name || installed.version !== manifest.version) throw new Error('Consumer installed a different package or version.');
     await fs.access(path.join(packageRoot, 'src/index.d.ts'));
-    const probe = `import assert from 'node:assert/strict'; import {createProxyClient} from '@othmansh01/proxyfan'; const c=createProxyClient({home:process.env.PROXYFAN_HOME,readyTimeoutMs:0}); await assert.rejects(c.callTool('get_proxy_status'),{code:'DAEMON_UNAVAILABLE'});`;
+    const probe = `import assert from 'node:assert/strict'; import {createProxyClient} from ${JSON.stringify(manifest.name)}; const c=createProxyClient({home:process.env.PROXYFAN_HOME,readyTimeoutMs:0}); await assert.rejects(c.callTool('get_proxy_status'),{code:'DAEMON_UNAVAILABLE'});`;
     const env = { ...process.env, PROXYFAN_HOME: path.join(temporary, 'unused-state') };
     await run(process.execPath, ['--input-type=module', '-e', probe], { cwd: temporary, env });
     const nativeProbe = `import {createRequire} from 'node:module'; const require=createRequire(process.env.PROXY_PACKAGE_MANIFEST); const Database=require('better-sqlite3'); const db=new Database(':memory:'); if(db.prepare('SELECT 1 AS ok').get().ok!==1)throw new Error('Native binding failed'); db.close();`;
     await run(process.execPath, ['--input-type=module', '-e', nativeProbe], {
       cwd: temporary, env: { ...env, PROXY_PACKAGE_MANIFEST: path.join(packageRoot, 'package.json') },
     });
-    const preview = JSON.parse((await run(process.execPath, [path.join(packageRoot, 'src/server.mjs'), 'init', '--dry-run', '--client', 'json'], { cwd: temporary, env })).stdout);
+    const preview = JSON.parse((await run(process.execPath, [path.join(temporary, 'node_modules/.bin/proxyfan'), 'init', '--dry-run', '--client', 'json'], { cwd: temporary, env })).stdout);
     if (preview.status !== 'preview') throw new Error('Installed CLI preview failed.');
     try { await fs.access(env.PROXYFAN_HOME); throw new Error('Preview created capture state.'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
