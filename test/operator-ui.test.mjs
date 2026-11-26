@@ -43,6 +43,11 @@ test('operator UI is opt-in, loopback-only, token protected, and sends a strict 
     assert.equal(page.body.includes(started.token), false);
     assert.match(page.headers['content-security-policy'], /default-src 'none'/);
     assert.match(page.headers['content-security-policy'], /connect-src 'self'/);
+    assert.match(page.body, /rel="icon" href="\/favicon\.png"/);
+    const favicon = await request(ui.port, '/favicon.png');
+    assert.equal(favicon.status, 200);
+    assert.equal(favicon.headers['content-type'], 'image/png');
+    assert.ok(Number(favicon.headers['content-length']) <= 4096);
     assert.equal(page.headers['cache-control'], 'no-store, max-age=0');
     assert.equal((await request(ui.port, '/api/status')).status, 401);
     assert.equal((await request(ui.port, '/api/status', { token: started.token })).status, 200);

@@ -1,7 +1,7 @@
 {
   "name": "@othmansh01/proxyfan",
   "version": "0.11.0",
-  "description": "Local MCP server for iOS Simulator HTTP/HTTPS network debugging on macOS. Inspect app requests, mock APIs, and capture redacted evidence.",
+  "description": "Local MCP server for mobile HTTP and HTTPS debugging on macOS. Inspect app requests, mock APIs, and export redacted evidence.",
   "type": "module",
   "bin": {
     "proxyfan": "src/server.mjs",
@@ -11,6 +11,7 @@
   "files": [
     "src/**/*.mjs",
     "src/**/*.d.ts",
+    "src/assets/*.png",
     "scripts/",
     "docs/",
     "README.md",
@@ -35,9 +36,9 @@
     "debugging",
     "model-context-protocol",
     "mcp-server",
-    "proxy-mate",
-    "proxy-mcp",
     "ios-simulator",
+    "android-emulator",
+    "adb",
     "network-debugging",
     "api-mocking"
   ],

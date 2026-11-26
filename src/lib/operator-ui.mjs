@@ -2,13 +2,14 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 
 import { createRedactor } from './redaction.mjs';
+import { PROXYFAN_ICON } from './branding.mjs';
 
 const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 8;
 const DEFAULT_RATE_LIMIT = 120;
 const DEFAULT_RATE_WINDOW_MS = 60_000;
 const MAX_ITEMS = 100;
-const CSP = (nonce) => `default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; img-src 'none'; object-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'`;
+const CSP = (nonce) => `default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'`;
 
 /**
  * A small, opt-in, read-only operator view. It deliberately has no mutation
@@ -100,6 +101,13 @@ export class OperatorUiServer {
       return this.#error(res, 429, 'RATE_LIMITED');
     }
     if (req.url === '/' || req.url === '/index.html') return this.#page(req, res);
+    if (req.url === '/favicon.png') {
+      res.writeHead(200, securityHeaders({
+        'content-type': 'image/png',
+        'content-length': String(PROXYFAN_ICON.length),
+      }));
+      return res.end(req.method === 'HEAD' ? undefined : PROXYFAN_ICON);
+    }
     if (!this.#authorized(req.headers.authorization)) return this.#error(res, 401, 'UNAUTHORIZED');
     if (this.activeRequests >= this.maxConcurrentRequests) return this.#error(res, 503, 'BUSY');
     this.activeRequests += 1;
@@ -286,5 +294,5 @@ function boundedInteger(value, min, max, name) {
 }
 
 function renderPage(nonce) {
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ProxyFan operator</title><style>body{font:15px system-ui,sans-serif;max-width:860px;margin:2rem auto;padding:0 1rem;color:#18212b}input{width:min(30rem,100%)}button{margin-left:.4rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:1rem}small{color:#52606d}</style><main><h1>ProxyFan operator</h1><p><label>Bearer token <input id="token" type="password" autocomplete="off"></label><button id="connect">Connect</button></p><p id="message" role="status">Read-only local status. Token stays in this page’s memory.</p><section><h2>Status</h2><pre id="status">Not connected.</pre></section><section><h2>Recent flows</h2><pre id="flows">Not connected.</pre></section><section><h2>Rules</h2><pre id="rules">Not connected.</pre></section><small>Refreshes every five seconds while connected.</small></main><script nonce="${nonce}">(()=>{let token='';let timer;const $=id=>document.getElementById(id);const show=(id,value)=>{$(id).textContent=typeof value==='string'?value:JSON.stringify(value,null,2)};const load=async()=>{try{const h={Authorization:'Bearer '+token};const [health,status,flows,rules]=await Promise.all(['/api/health','/api/status','/api/flows','/api/rules'].map(async path=>{const r=await fetch(path,{headers:h,cache:'no-store',credentials:'same-origin'});if(!r.ok)throw new Error('Request failed ('+r.status+')');return r.json()}));show('status',{health,status});show('flows',flows.flows);show('rules',rules.rules);$('message').textContent='Connected. Last refreshed '+new Date().toLocaleTimeString()}catch(e){$('message').textContent=e.message}};$('connect').addEventListener('click',()=>{token=$('token').value;$('token').value='';if(timer)clearInterval(timer);load();timer=setInterval(load,5000)});})();</script></html>`;
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ProxyFan operator</title><link rel="icon" href="/favicon.png" type="image/png"><style>body{font:15px system-ui,sans-serif;max-width:860px;margin:2rem auto;padding:0 1rem;color:#18212b}input{width:min(30rem,100%)}button{margin-left:.4rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:1rem}small{color:#52606d}</style><main><h1>ProxyFan operator</h1><p><label>Bearer token <input id="token" type="password" autocomplete="off"></label><button id="connect">Connect</button></p><p id="message" role="status">Read-only local status. Token stays in this page’s memory.</p><section><h2>Status</h2><pre id="status">Not connected.</pre></section><section><h2>Recent flows</h2><pre id="flows">Not connected.</pre></section><section><h2>Rules</h2><pre id="rules">Not connected.</pre></section><small>Refreshes every five seconds while connected.</small></main><script nonce="${nonce}">(()=>{let token='';let timer;const $=id=>document.getElementById(id);const show=(id,value)=>{$(id).textContent=typeof value==='string'?value:JSON.stringify(value,null,2)};const load=async()=>{try{const h={Authorization:'Bearer '+token};const [health,status,flows,rules]=await Promise.all(['/api/health','/api/status','/api/flows','/api/rules'].map(async path=>{const r=await fetch(path,{headers:h,cache:'no-store',credentials:'same-origin'});if(!r.ok)throw new Error('Request failed ('+r.status+')');return r.json()}));show('status',{health,status});show('flows',flows.flows);show('rules',rules.rules);$('message').textContent='Connected. Last refreshed '+new Date().toLocaleTimeString()}catch(e){$('message').textContent=e.message}};$('connect').addEventListener('click',()=>{token=$('token').value;$('token').value='';if(timer)clearInterval(timer);load();timer=setInterval(load,5000)});})();</script></html>`;
 }
